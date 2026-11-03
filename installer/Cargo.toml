@@ -1,0 +1,19 @@
+[package]
+name = "orchestrator-setup"
+version = "0.3.0"
+edition = "2021"
+description = "Installer for Orchestrator"
+
+# Built separately (see release.ps1): it embeds ../target/release/orchestrator.exe.
+[workspace]
+
+[dependencies]
+rfd = "0.16"
+
+[build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

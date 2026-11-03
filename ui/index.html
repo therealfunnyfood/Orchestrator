@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orchestrator</title>
+<link rel="stylesheet" href="/static/app.css">
+<script>window.ORCH = { token: "__TOKEN__", desktop: __DESKTOP__ };</script>
+</head>
+<body>
+<div id="shell">
+  <nav id="activity">
+    <button class="act" data-act="orch" title="Orchestrator (Ctrl+1)">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.6"/><circle cx="5" cy="6" r="1.7"/><circle cx="19" cy="6" r="1.7"/><circle cx="5" cy="18" r="1.7"/><circle cx="19" cy="18" r="1.7"/><path d="M6.4 7.2 10 10.4M17.6 7.2 14 10.4M6.4 16.8 10 13.6M17.6 16.8 14 13.6"/></svg>
+    </button>
+    <button class="act" data-act="explorer" title="Threads (Ctrl+B toggles)">
+      <svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h10M4 19h13"/><circle cx="19" cy="12" r="1.6"/></svg>
+    </button>
+    <button class="act" data-act="manage" title="Manage threads">
+      <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M3.5 9.5h17M3.5 14.5h17M9 4.5v15"/></svg>
+    </button>
+    <div class="act-spacer"></div>
+    <button class="act" data-act="palette" title="Command palette (Ctrl+Shift+P)">
+      <svg viewBox="0 0 24 24"><path d="M5 8l4 4-4 4M11 17h8"/></svg>
+    </button>
+    <button class="act" data-act="settings" title="Settings (Ctrl+,)">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.8v2.6M12 18.6v2.6M21.2 12h-2.6M5.4 12H2.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8M18.5 18.5l-1.8-1.8M7.3 7.3 5.5 5.5"/></svg>
+    </button>
+  </nav>
+
+  <aside id="side">
+    <div class="side-head">
+      <span>THREADS</span>
+      <span class="side-actions">
+        <button class="ib" id="side-new" title="New thread (Ctrl+N)">+</button>
+        <button class="ib" id="side-collapse" title="Hide sidebar (Ctrl+B)">‹</button>
+      </span>
+    </div>
+    <button class="ws-row" id="ws-row" title="Switch workspace">
+      <span class="chev">⌄</span><span id="ws-name" class="ws-name"></span><span class="ws-switch">switch</span>
+    </button>
+    <div id="tree"></div>
+  </aside>
+
+  <main id="editor">
+    <div id="tabs"></div>
+    <div id="panes">
+      <section id="pane-chat" class="pane">
+        <div id="crumbs" class="crumbs"></div>
+        <div id="scroller"><div id="log"></div></div>
+        <div id="composer-wrap">
+          <div id="plan" class="plan hidden"></div>
+          <div id="queue" class="queue hidden"></div>
+          <div id="suggest" class="suggest hidden"></div>
+          <div id="tray" class="tray hidden"></div>
+          <div id="composer">
+            <span class="prompt">❯</span>
+            <textarea id="input" rows="1" spellcheck="false" placeholder="Message the orchestrator…"></textarea>
+            <button id="attach" class="attach" title="Attach files or images (or paste / drop them)">📎</button>
+            <button id="stop" class="stop hidden" title="Stop (Esc)">■</button>
+            <input id="file-input" type="file" multiple hidden>
+          </div>
+          <div id="chips"></div>
+        </div>
+      </section>
+      <section id="pane-manage" class="pane hidden"></section>
+      <section id="pane-settings" class="pane hidden"></section>
+      <section id="pane-brief" class="pane hidden"></section>
+      <div id="splitter" class="splitter hidden" title="Drag to resize"></div>
+      <section id="side-pane" class="side-pane hidden">
+        <iframe id="side-frame" title="Thread"></iframe>
+      </section>
+    </div>
+  </main>
+</div>
+
+<footer id="status"></footer>
+
+<div id="qi" class="qi hidden">
+  <input id="qi-input" spellcheck="false" autocomplete="off">
+  <div id="qi-list"></div>
+</div>
+
+<div id="dlg-bg" class="dlg-bg hidden">
+  <div class="dlg" id="dlg-new">
+    <div class="dlg-title">New thread</div>
+    <label>Name<input id="nt-name" placeholder="api-tests" autocomplete="off" spellcheck="false"></label>
+    <label>Task <span class="opt">optional, starts it right away</span><textarea id="nt-task" rows="6" spellcheck="false"></textarea></label>
+    <div class="grid2">
+      <label>Model<input id="nt-model" list="models" placeholder="default" spellcheck="false"></label>
+      <label>Effort<select id="nt-effort"><option value="__default">default</option><option value="">CLI default</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+    </div>
+    <label>Folder <span class="opt">blank = workspace</span>
+      <div class="row"><input id="nt-cwd" spellcheck="false"><button class="btn" id="nt-browse">Browse…</button></div>
+    </label>
+    <div class="err" id="nt-err"></div>
+    <div class="dlg-actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="nt-create">Create</button></div>
+  </div>
+</div>
+
+<datalist id="models">
+  <option value="claude-opus-5-5"><option value="claude-sonnet-5-5"><option value="claude-haiku-5-5"><option value="claude-fable-5-1">
+</datalist>
+<div id="toast" class="toast hidden"></div>
+<div id="mixpop" class="mixpop hidden"></div>
+<div id="setup" class="setup-bg hidden"><div class="setup"></div></div>
+<div id="lightbox" class="lightbox hidden"><img alt=""></div>
+<div id="dropzone" class="dropzone hidden"><div>Drop files to attach</div></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

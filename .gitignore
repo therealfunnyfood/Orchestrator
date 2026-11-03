@@ -1,0 +1,9 @@
+target/
+dist/
+.venv/
+.env
+*.env
+python/
+data/
+workspace/
+__pycache__/

@@ -1,0 +1,27 @@
+[package]
+name = "orchestrator"
+version = "0.3.0"
+edition = "2021"
+description = "Claude Code orchestrator: an orchestrator agent that runs parallel Claude Code threads"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+futures-util = "0.3"
+rand = "0.9"
+rfd = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tao = "0.37"
+tokio = { version = "1", features = ["full"] }
+tray-icon = "0.24"
+wry = "0.57"
+
+[build-dependencies]
+embed-resource = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 4
