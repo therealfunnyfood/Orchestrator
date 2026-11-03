@@ -50,6 +50,14 @@ recommended option first and add ' (Recommended)' to its label.",
             }, "required": ["questions"]},
         },
         {
+            "name": "message_orchestrator",
+            "description": "Send a message to the orchestrator that manages you, right now, without ending your turn: \
+e.g. a shared resource is free, you're blocked and need something, or a result it asked you to report straight \
+away. It's delivered immediately (and wakes the orchestrator if it's idle). Your final reply also reaches it, so \
+use this only for things it needs before you finish.",
+            "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]},
+        },
+        {
             "name": "show_media",
             "description": "Show the user a file inline in their chat: an image (png, jpg, gif, webp, svg), video \
 (mp4, webm), audio (mp3, wav, ogg) or PDF. Use it for screenshots, charts, generated images, recordings or \
@@ -257,6 +265,14 @@ async fn approved_effort(app: &Arc<App>, key: &str, thread: &str, requested: Opt
 
 async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<String, String> {
     match name {
+        "message_orchestrator" => {
+            if key.starts_with(ORCHESTRATOR) {
+                return Err("you are the orchestrator; use send_to_thread to message threads".into());
+            }
+            let text = arg(args, "message").filter(|m| !m.trim().is_empty()).ok_or("message is required")?;
+            app.message_orchestrator(key, text)?;
+            Ok("delivered to the orchestrator".into())
+        }
         "update_plan" => {
             let items = args.get("items").cloned().unwrap_or(json!([]));
             if !items.is_array() {
@@ -325,8 +341,14 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             let st = app.store.lock().unwrap();
             let mut lines: Vec<String> = names.iter().filter_map(|n| st.get(n)).map(|t| summary(app, t)).collect();
             let still: Vec<&String> = names.iter().filter(|n| app.busy(n)).collect();
-            if !still.is_empty() {
-                lines.push(format!("still running after timeout: {}", still.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+            let still_list = still.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            if let Some(inbox) = app.drain_inbox(key) {
+                lines.push(format!("\n[messages from threads]\n{inbox}"));
+                if !still.is_empty() {
+                    lines.push(format!("(returned early for these messages; still running: {still_list})"));
+                }
+            } else if !still.is_empty() {
+                lines.push(format!("still running after timeout: {still_list}"));
             }
             Ok(if lines.is_empty() { "no threads".into() } else { lines.join("\n") })
         }
@@ -487,7 +509,7 @@ pub async fn handle(app: &Arc<App>, key: &str, msg: &Value) -> Option<Value> {
                 }}));
             }
             let allowed = key.starts_with(ORCHESTRATOR)
-                || ["update_plan", "ask_user", "show_media"].contains(&name);
+                || ["update_plan", "ask_user", "show_media", "message_orchestrator"].contains(&name);
             let outcome = if allowed { call(app, key, name, &args).await } else { Err(format!("{name} is only available to the orchestrator")) };
             match outcome {
                 Ok(text) => json!({"content": [{"type": "text", "text": text}], "isError": false}),

@@ -20,6 +20,10 @@ given end to end without asking for permission. When you finish a turn, end with
 what you did, what changed (files, commands), and anything left open. That summary is what the \
 orchestrator reads.
 
+To tell the orchestrator something before your turn ends (a shared resource is free, you're
+blocked and need something, a result it asked you to report straight away), call
+message_orchestrator. Never try to message other Claude sessions any other way.
+
 Depending on the project's permission level, some actions may need the user's approval. If one is
 denied, don't retry it the same way: adjust your approach, or explain what you need and why.
 
@@ -84,6 +88,10 @@ resume_past_session only when the old conversation's detailed context really mat
 a forked copy, so the original is never changed. save_project_notes keeps a project brief and rules
 that are shown to you and every thread in this workspace.
 
+Threads can message you mid-turn with message_orchestrator (for example to say a shared resource
+is free or that they need something). Those arrive as a [messages from threads] block at the start
+of a turn, or in the result of wait_for_threads, which returns early when one arrives. Act on them.
+
 The user can also open any thread and talk to it directly. Thread updates that arrived since the
 user's last message are prepended to it in a [thread updates] block.
 "#;
@@ -121,6 +129,8 @@ pub struct App {
     cancels: Mutex<HashMap<String, watch::Sender<bool>>>,
     /// Finished-turn notices handed to the orchestrator on its next turn.
     notices: Mutex<Vec<String>>,
+    /// Mid-turn messages from threads to their orchestrator, by orchestrator key.
+    inbox: Mutex<HashMap<String, Vec<(String, String)>>>,
     /// ask_user questions waiting for an answer, by question id.
     questions: Mutex<HashMap<String, PendingQuestion>>,
     answered_ids: Mutex<std::collections::HashSet<String>>,
@@ -156,6 +166,7 @@ impl App {
             workers: Mutex::new(HashSet::new()),
             cancels: Mutex::new(HashMap::new()),
             notices: Mutex::new(Vec::new()),
+            inbox: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
             answered_ids: Mutex::new(Default::default()),
             started: Mutex::new(HashMap::new()),
@@ -401,6 +412,13 @@ impl App {
                     app.touch();
                     if key.starts_with(ORCHESTRATOR) {
                         app.orchestrator_turn(&key, &msg).await;
+                        // Thread messages that arrived after it last looked get their own turn.
+                        if app.has_inbox(&key) && app.queues.lock().unwrap().get(&key).is_none_or(|q| q.is_empty()) {
+                            if let Some(text) = app.drain_inbox(&key) {
+                                app.queues.lock().unwrap().entry(key.clone()).or_default().push_back(
+                                    Queued { id: format!("m{}", (now() * 1000.0) as u64), text, sender: "threads".into(), attach: vec![], fork: None });
+                            }
+                        }
                     } else {
                         app.thread_turn(&key, &msg).await;
                     }
@@ -622,12 +640,47 @@ impl App {
         }
     }
 
-    /// Block until the named threads are idle or the timeout passes.
+    /// A thread's mid-turn message to its orchestrator. Delivered right away: into a
+    /// new orchestrator turn if it's idle, otherwise into its current turn (it wakes
+    /// wait_for_threads) or the start of its next one.
+    pub fn message_orchestrator(self: &Arc<Self>, from: &str, text: &str) -> Result<(), String> {
+        let ws = self.store.lock().unwrap().get(from).map(|t| t.workspace.clone()).ok_or(format!("no thread named '{from}'"))?;
+        let key = orch_key(&ws);
+        self.hub.emit(from, json!({"kind": "notice", "text": format!("→ messaged the orchestrator: {}", crate::events::clip(text))}));
+        self.inbox.lock().unwrap().entry(key.clone()).or_default().push((from.to_string(), text.to_string()));
+        self.touch();
+        if !self.busy(&key) && same_path(&ws, &self.workspace()) {
+            self.flush_inbox(&key);
+        }
+        Ok(())
+    }
+
+    /// Take the orchestrator's pending thread messages, formatted for a prompt.
+    pub fn drain_inbox(&self, key: &str) -> Option<String> {
+        let msgs = self.inbox.lock().unwrap().remove(key).filter(|m| !m.is_empty())?;
+        Some(msgs.iter().map(|(from, text)| format!("[message from thread {from}]\n{text}")).collect::<Vec<_>>().join("\n\n"))
+    }
+
+    fn has_inbox(&self, key: &str) -> bool {
+        self.inbox.lock().unwrap().get(key).is_some_and(|m| !m.is_empty())
+    }
+
+    /// Start an orchestrator turn for waiting thread messages.
+    fn flush_inbox(self: &Arc<Self>, key: &str) {
+        if let Some(text) = self.drain_inbox(key) {
+            let msg = Queued { id: String::new(), text, sender: "threads".into(), attach: vec![], fork: None };
+            self.enqueue(key, msg, false);
+        }
+    }
+
+    /// Block until the named threads are idle, a thread messages the orchestrator,
+    /// or the timeout passes.
     pub async fn wait_threads(&self, names: &[String], timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
+        let key = self.orch_key();
         loop {
             let notified = self.changed.notified();
-            if !names.iter().any(|n| self.busy(n)) {
+            if !names.iter().any(|n| self.busy(n)) || self.has_inbox(&key) {
                 return;
             }
             tokio::select! {
@@ -688,12 +741,17 @@ impl App {
         if let Some(f) = &msg.fork {
             self.hub.emit(key, json!({"kind": "fork", "at": f.at_ts}));
         }
-        self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": "you", "attachments": msg.attach, "resume_at": start_point}));
+        self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach, "resume_at": start_point}));
         self.touch();
         let (text, images) = with_attachments(&msg.text, &msg.attach);
         let text = text.as_str();
 
         let notices: Vec<String> = std::mem::take(&mut *self.notices.lock().unwrap());
+        let text = match self.drain_inbox(key) {
+            Some(inbox) => format!("[messages from threads]\n{inbox}\n\n{text}"),
+            None => text.to_string(),
+        };
+        let text = text.as_str();
         let prompt = if notices.is_empty() {
             text.to_string()
         } else {

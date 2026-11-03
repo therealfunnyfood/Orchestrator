@@ -546,6 +546,7 @@ function renderEventInner(ev, log) {
     }
     const e = h("div", "ev user" + (ev.sender === "orchestrator" ? " from-orch" : "") + (ev.imported ? " imported" : ""));
     if (ev.sender === "orchestrator" && !isOrch(ev.thread)) e.append(h("span", "who", "orchestrator →"));
+    if (ev.sender === "threads") { e.classList.add("from-orch"); e.append(h("span", "who", "from threads →")); }
     if (ev.imported) e.append(h("span", "who", "from Claude Code"));
     e.append(document.createTextNode(ev.text));
     if (ev.attachments?.length) e.append(attachmentView(ev.attachments));

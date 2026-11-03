@@ -78,8 +78,11 @@ fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Op
         cmd.args(["--permission-prompt-tool", "mcp__app__approve"]);
     }
     cmd.arg("--setting-sources=user,project,local");
-    // Questions go through the app's own ask_user tool (rendered as clickable cards).
-    cmd.args(["--disallowedTools", "AskUserQuestion"]);
+    // Questions go through the app's own ask_user tool (rendered as clickable cards), and
+    // sessions talk to each other only through the app (message_orchestrator,
+    // send_to_thread): Claude Code's own cross-session tools would reach the user's other
+    // Claude sessions instead.
+    cmd.args(["--disallowedTools", "AskUserQuestion,SendMessage,ListAgents"]);
     if let Some(r) = resume {
         cmd.arg(format!("--resume={r}"));
         if let Some(at) = &spec.resume_at {

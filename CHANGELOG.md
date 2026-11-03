@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 (2026-11-02)
+
+- Threads can now message their orchestrator mid-turn with `message_orchestrator`, for
+  example to say a shared resource is free or that they're blocked. If the orchestrator
+  is idle, the message starts a turn right away. If it's waiting on threads, the wait
+  returns early with the message. Otherwise it gets the message at its next step.
+- Claude Code's own cross-session tools (`SendMessage`, `ListAgents`) are now
+  turned off inside Orchestrator. Before, a thread that wanted to reach its orchestrator
+  could use them and message one of the user's other Claude sessions by mistake.
+
 ## 0.4.0 (2026-11-02)
 
 - **Permission levels**: Full access, Auto, Edits OK (ask for the rest), Ask for
