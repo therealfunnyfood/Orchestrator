@@ -2,6 +2,9 @@
 name = "orchestrator"
 version = "0.3.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/therealfunnyfood/Orchestrator"
+authors = ["therealfunnyfood"]
 description = "Claude Code orchestrator: an orchestrator agent that runs parallel Claude Code threads"
 
 [dependencies]

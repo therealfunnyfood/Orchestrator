@@ -10,6 +10,14 @@ Threads run Claude Code with **permissions bypassed**. They can run commands and
 files in the workspace folder without asking, so only point it at folders you're
 comfortable with that.
 
+## Requirements
+
+- Windows 10 or 11 (64-bit) with the Microsoft Edge WebView2 Runtime (built into
+  Windows 11).
+- [Claude Code](https://claude.com/claude-code). The first-run setup installs it if
+  it's missing.
+- A Claude Pro or Max plan, an Anthropic API key, or both.
+
 ## Install
 
 1. Download `Orchestrator-Setup-<version>.exe` from [Releases](../../releases).
@@ -88,6 +96,31 @@ Requires Rust (MSVC toolchain) and Windows 10/11.
 Settings are stored in `%APPDATA%\Orchestrator`, and threads and transcripts in
 `%LOCALAPPDATA%\Orchestrator`.
 
+## Privacy
+
+Orchestrator has no telemetry. Everything stays on your computer except:
+
+- the work itself, which Claude Code sends to Anthropic under your plan or API key;
+- an update check that asks GitHub for the latest release. You can turn it off in
+  Settings → About.
+
+The local server listens only on 127.0.0.1 and requires a random token that changes
+every launch. Your API key is stored in `%APPDATA%\Orchestrator\settings.json`.
+
+## Troubleshooting
+
+- **SmartScreen warning when installing**: the installer isn't code-signed. Choose
+  *More info → Run anyway*.
+- **The plan shows an API key instead of your subscription**: Claude Code is signed in
+  with a Console key. Use Settings → Run setup again → *My Claude plan* → Sign in, and
+  choose the account that has your plan.
+- **"must include the anthropic-workspace-id header"**: your API key isn't scoped to a
+  workspace. Add the workspace ID (from the same organization as the key) in Settings.
+- **The window disappeared**: it's in the system tray. Click the icon, or launch
+  Orchestrator again.
+- **A turn was cut off** (closed or crashed): the conversation shows "interrupted".
+  Click ↻ continue.
+
 ## Notes
 
 - On the plan, the `$` figures are what the work would cost at API rates. Nothing
@@ -95,3 +128,8 @@ Settings are stored in `%APPDATA%\Orchestrator`, and threads and transcripts in
 - Anthropic's terms limit how a subscription login may be used by automated
   tools. This app drives your own Claude Code login on your own machine; check the
   current terms if you run it heavily.
+- Orchestrator is an independent project. It isn't made or endorsed by Anthropic.
+
+## License
+
+[MIT](LICENSE) © 2026 therealfunnyfood

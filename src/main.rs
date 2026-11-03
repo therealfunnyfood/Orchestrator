@@ -16,6 +16,7 @@ mod runner;
 mod setup;
 mod store;
 mod uninstall;
+mod updates;
 mod web;
 
 use rand::Rng;
@@ -94,6 +95,19 @@ async fn start(desktop: bool, port: u16) -> (Arc<app::App>, String) {
     tokio::spawn(async move {
         axum::serve(listener, router).await.ok();
     });
+    // Update check: at startup, then twice a day.
+    let a = app.clone();
+    tokio::spawn(async move {
+        loop {
+            if a.settings().check_updates {
+                if let Ok(found) = tokio::task::spawn_blocking(updates::check).await {
+                    *a.update.lock().unwrap() = found;
+                    a.touch();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(12 * 3600)).await;
+        }
+    });
     let url = format!("http://127.0.0.1:{port}/?t={}", app.token);
     (app, url)
 }
@@ -113,7 +127,7 @@ fn shutdown(app: &app::App) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--uninstall") {
-        uninstall::run();
+        uninstall::run(&args);
         return;
     }
 

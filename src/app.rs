@@ -69,7 +69,7 @@ The app records every thread turn (model, effort, steps, time, API-rate cost, er
 a thread's result, give a verdict with rate_thread: right, too_weak (needed a stronger model/effort)
 or too_strong (a cheaper one would have done). After a batch of work, or about once a day, call
 efficiency_report and update save_tuning_notes with concrete rules you've learned for this project
-(e.g. "docs/README edits: haiku, low"; "device/ C++ bugs: opus, medium"). Follow your tuning notes.
+(e.g. "docs/README edits: haiku, low"; "parser bugs in src/: opus, medium"). Follow your tuning notes.
 
 Whenever you mention a thread to the user, write it as a link: [thread-name](thread:thread-name).
 The user can click it to open that thread beside your chat.
@@ -126,6 +126,8 @@ pub struct App {
     changed: Notify,
     /// Cached index of Claude Code's saved conversations.
     pub sessions_index: claude_projects::Index,
+    /// A newer release on GitHub, if one was found.
+    pub update: Mutex<Option<Value>>,
 }
 
 impl App {
@@ -156,6 +158,7 @@ impl App {
             started: Mutex::new(HashMap::new()),
             changed: Notify::new(),
             sessions_index: claude_projects::Index::new(),
+            update: Mutex::new(None),
         })
     }
 
@@ -250,6 +253,7 @@ impl App {
                 "api_mix": s.api_mix,
                 "setup_done": s.setup_done,
             },
+            "app": {"version": crate::updates::VERSION, "repo": crate::updates::REPO, "update": self.update.lock().unwrap().clone()},
             "usage": self.usage_json(),
             "plan_usage": self.store.lock().unwrap().plan_usage.clone(),
         })
@@ -825,6 +829,9 @@ impl App {
         if let Some(v) = patch.get("setup_done").and_then(Value::as_bool) {
             s.setup_done = v;
         }
+        if let Some(v) = patch.get("check_updates").and_then(Value::as_bool) {
+            s.check_updates = v;
+        }
         if let Some(v) = patch.get("max_effort").and_then(Value::as_str) {
             check_effort(v)?;
             s.max_effort = v.into();
@@ -849,6 +856,7 @@ impl App {
             "theme": s.theme,
             "api_mix": s.api_mix,
             "max_effort": s.max_effort,
+            "check_updates": s.check_updates,
             "usage": self.usage_json(),
             "plan_usage": self.store.lock().unwrap().plan_usage.clone(),
             "config_file": self.paths.settings_file().to_string_lossy(),

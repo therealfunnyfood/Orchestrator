@@ -1178,6 +1178,10 @@ function wireSplit() {
   });
 }
 
+function openUrl(url) {
+  return api("/api/open-url", { body: { url } }).catch(fail);
+}
+
 function copy(text) {
   navigator.clipboard.writeText(text).then(() => toast("copied"), () => toast("copy failed", true));
 }
@@ -1499,6 +1503,8 @@ function renderStatus() {
     }, "A thread is asking you a question");
   }
   const u = S.state.usage;
+  const upd = S.state.app?.update;
+  if (upd) item("wait", `⬆ update ${esc(upd.version)}`, () => openUrl(upd.url), "A new version of Orchestrator is available");
   const pu = S.state.plan_usage?.unifiedWindows;
   if (pu?.five_hour) {
     const f = pu.five_hour.utilization, w = pu.seven_day?.utilization ?? 0;
@@ -2163,6 +2169,33 @@ async function renderSettings() {
   setting("Appearance", "Theme", "", select("theme", [["dark", "Dark"], ["light", "Light"], ["system", "Follow Windows"]], s.theme));
 
   section("About");
+  {
+    const app = S.state.app || {};
+    const wrap = h("div");
+    const line = h("div", "d");
+    line.innerHTML = `Orchestrator <b>${esc(app.version || "")}</b> · MIT License · <a href="https://github.com/${esc(app.repo || "")}">github.com/${esc(app.repo || "")}</a>`;
+    const row = h("div", "row");
+    const chk = h("button", "btn", "Check for updates");
+    chk.onclick = async () => {
+      chk.disabled = true;
+      try {
+        const r = await api("/api/check-update", { body: {} });
+        toast(r.update ? `Version ${r.update.version} is available` : `You're on the latest version (${r.version})`);
+        await loadState();
+      } catch (e) { fail(e); }
+      chk.disabled = false;
+    };
+    const auto = h("label");
+    auto.style.cssText = "display:flex;gap:6px;align-items:center;margin-left:10px";
+    const cb = h("input");
+    cb.type = "checkbox";
+    cb.checked = s.check_updates !== false;
+    cb.onchange = () => save({ check_updates: cb.checked }, cb.checked ? "will check for updates" : "update checks off");
+    auto.append(cb, document.createTextNode("Check automatically"));
+    row.append(chk, auto);
+    wrap.append(line, row);
+    setting("About", "Version", "Update checks ask GitHub for the latest release; nothing else is sent.", wrap);
+  }
   const about = h("div", "d");
   about.innerHTML = `Data: <code>${esc(s.data_dir)}</code><br>Threads run Claude Code with permissions bypassed. Pick workspaces you're OK with them changing.`;
   page.append(about);
@@ -2241,7 +2274,11 @@ function wire() {
     if (files.length && curKey()) addFiles(files);
   });
   $("#lightbox").onclick = () => $("#lightbox").classList.add("hidden");
-  document.addEventListener("click", (e) => { onThreadLink(e); }, true);
+  document.addEventListener("click", (e) => {
+    if (onThreadLink(e)) return;
+    const a = e.target.closest("a[href]");
+    if (a && /^https?:/.test(a.getAttribute("href"))) { e.preventDefault(); openUrl(a.href); }
+  }, true);
   wireSplit();
   $("#side-new").onclick = () => newThread("");
   $("#side-collapse").onclick = toggleSide;

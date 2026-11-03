@@ -34,6 +34,8 @@ pub struct Settings {
     pub max_effort: String,
     /// The first-run setup wizard has been completed.
     pub setup_done: bool,
+    /// Check GitHub for a newer release (at startup and twice a day).
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -52,6 +54,7 @@ impl Default for Settings {
             api_mix: 0,
             max_effort: "high".into(),
             setup_done: false,
+            check_updates: true,
         }
     }
 }

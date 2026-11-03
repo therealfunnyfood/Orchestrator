@@ -16,7 +16,7 @@ pub fn projects_root() -> PathBuf {
 }
 
 /// Claude Code's folder name for a working directory: every non-alphanumeric
-/// character becomes '-' (D:\dev\Dock -> D--dev-Dock).
+/// character becomes '-' (C:\code\my-app -> C--code-my-app).
 pub fn encode_dir(path: &str) -> String {
     path.trim_end_matches(['\\', '/']).chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }

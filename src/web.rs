@@ -88,6 +88,8 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/past-sessions", get(past_sessions))
         .route("/api/notes", post(notes))
         .route("/api/mix", post(set_mix))
+        .route("/api/open-url", post(open_url))
+        .route("/api/check-update", post(check_update))
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/install-cli", post(|| async { crate::setup::install_cli().map(|_| Json(json!({"ok": true}))).map_err(ApiError) }))
         .route("/api/setup/login", post(setup_login))
@@ -432,4 +434,30 @@ async fn setup_finish(State(app): State<Shared>, Json(b): Json<Value>) -> ApiRes
     app.update_settings(&json!({"setup_done": true, "api_mix": mix}))?;
     app.set_mix(mix as u8);
     Ok(Json(json!({"ok": true})))
+}
+
+/// Open a web link in the default browser (http/https only).
+async fn open_url(Json(b): Json<Value>) -> ApiResult {
+    let url = s(&b, "url").unwrap_or("").to_string();
+    let ok = (url.starts_with("https://") || url.starts_with("http://"))
+        && !url.chars().any(|c| c.is_whitespace() || "\"^&|<>".contains(c));
+    if !ok {
+        return Err(ApiError("only plain http(s) links can be opened".into()));
+    }
+    let mut cmd = std::process::Command::new("rundll32.exe");
+    cmd.args(["url.dll,FileProtocolHandler", &url]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.spawn().map_err(|e| ApiError(e.to_string()))?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn check_update(State(app): State<Shared>) -> ApiResult {
+    let found = tokio::task::spawn_blocking(crate::updates::check).await.map_err(|e| ApiError(e.to_string()))?;
+    *app.update.lock().unwrap() = found.clone();
+    app.touch();
+    Ok(Json(json!({"update": found, "version": crate::updates::VERSION})))
 }
