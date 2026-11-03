@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1 (2026-11-02)
+
+- If Orchestrator was first run from inside a packaged app such as the Claude
+  desktop app, Windows redirected its data to that app's private copy of AppData,
+  so a normal launch started empty. On startup it now finds that data and moves it
+  to the real folders, backing up what was there first.
+
 ## 0.3.0 (2026-11-02)
 
 First public release.

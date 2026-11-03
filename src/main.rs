@@ -12,6 +12,7 @@ mod claude_projects;
 mod config;
 mod events;
 mod mcp;
+mod migrate;
 mod runner;
 mod setup;
 mod store;
@@ -87,7 +88,14 @@ fn token() -> String {
 }
 
 async fn start(desktop: bool, port: u16) -> (Arc<app::App>, String) {
-    let app = app::App::new(config::Paths::resolve(), token());
+    let paths = config::Paths::resolve();
+    // Data stranded in a packaged app's redirected AppData (see migrate.rs).
+    let rescued = migrate::rescue_packaged_data(&paths);
+    let app = app::App::new(paths, token());
+    if let Some(note) = rescued {
+        let key = app.orch_key();
+        app.hub.emit(&key, serde_json::json!({"kind": "notice", "text": note}));
+    }
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.expect("bind 127.0.0.1");
     let port = listener.local_addr().unwrap().port();
     app.port.store(port, Ordering::Relaxed);

@@ -116,6 +116,11 @@ every launch. Your API key is stored in `%APPDATA%\Orchestrator\settings.json`.
   choose the account that has your plan.
 - **"must include the anthropic-workspace-id header"**: your API key isn't scoped to a
   workspace. Add the workspace ID (from the same organization as the key) in Settings.
+- **Your threads are missing after reinstalling**: if you first started Orchestrator
+  from inside another app, such as a Claude Code session in the Claude desktop app,
+  Windows saved its data to that app's private copy of AppData. Version 0.3.1 and
+  later move that data back automatically on startup. To avoid it, start Orchestrator
+  from the Start menu.
 - **The window disappeared**: it's in the system tray. Click the icon, or launch
   Orchestrator again.
 - **A turn was cut off** (closed or crashed): the conversation shows "interrupted".
