@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.2 (2026-11-02)
+
+- **Messages reach a working agent right away**: send a message while a thread or the
+  orchestrator is mid-turn and it goes into that turn. Claude reads it at its next step
+  and adjusts, the same way Claude desktop works, instead of waiting for the turn to
+  finish. Press Alt+Enter to queue a message for after the turn instead. "▶ send now"
+  in the queue panel now delivers mid-turn too, rather than interrupting.
+- The orchestrator's `send_to_thread` also delivers mid-turn by default, so it can
+  redirect a busy thread (`when: "after"` queues instead). A message from you ends the
+  orchestrator's `wait_for_threads` early so it sees the message straight away.
+- Mid-turn messages are marked "↪ mid-turn" in the transcript.
+
 ## 0.4.1 (2026-11-02)
 
 - Threads can now message their orchestrator mid-turn with `message_orchestrator`, for

@@ -48,8 +48,9 @@ To uninstall, use Settings → Apps → Installed apps → Orchestrator.
   open it, click a link to open it beside the chat, or pop it out into its own
   window (⧉). Each thread has a task list, and threads can ask you multiple-choice
   questions and show you images, video, audio or PDFs.
-- **Composer**: messages stream in as they're written. You can queue messages
-  while a turn runs, edit or retry earlier messages (the conversation branches from
+- **Composer**: messages stream in as they're written. A message you send while a
+  turn runs goes straight into it (Claude reads it at its next step, like in Claude
+  desktop); Alt+Enter queues it for after the turn instead. You can edit or retry earlier messages (the conversation branches from
   that point), and paste or drop images and files.
 - **Workspace**: the project folder it works in. Each workspace has its own
   orchestrator conversation, threads, brief and rules. `/import` brings in a Claude

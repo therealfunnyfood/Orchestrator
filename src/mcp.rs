@@ -87,9 +87,12 @@ optional: low, medium, high, xhigh or max.",
         },
         {
             "name": "send_to_thread",
-            "description": "Send a follow-up message to an existing thread (runs in the background; queued if the thread is busy).",
+            "description": "Send a message to an existing thread. If the thread is mid-turn it reads the message at its \
+next step (use this to redirect or add info); otherwise it starts a turn in the background. when=\"after\" queues \
+it to run once the current turn finishes instead.",
             "inputSchema": {"type": "object", "properties": {
                 "name": {"type": "string"}, "message": {"type": "string"},
+                "when": {"type": "string", "enum": ["now", "after"], "description": "default now"},
             }, "required": ["name", "message"]},
         },
         {
@@ -315,7 +318,7 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             let task = arg(args, "task").ok_or("task is required")?;
             let effort = approved_effort(app, key, n, arg(args, "effort"), arg(args, "effort_reason").unwrap_or("")).await?;
             let row = app.create_thread(n, arg(args, "cwd"), None, arg(args, "model"), effort.as_deref())?;
-            app.send_to_thread(n, task, "orchestrator", vec![])?;
+            app.send_to_thread(n, task, "orchestrator", vec![], false)?;
             Ok(format!(
                 "started thread {} in {} (model {}, effort {})",
                 row.name, row.cwd, if row.model.is_empty() { "default" } else { &row.model }, if row.effort.is_empty() { "medium" } else { &row.effort }
@@ -324,8 +327,12 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
         "send_to_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
             let msg = arg(args, "message").ok_or("message is required")?;
-            let queued = app.send_to_thread(n, msg, "orchestrator", vec![])?;
-            Ok(format!("{} to {n}", if queued { "queued" } else { "sent" }))
+            let now = arg(args, "when") != Some("after");
+            Ok(match app.send_to_thread(n, msg, "orchestrator", vec![], now)? {
+                "injected" => format!("delivered to {n} mid-turn; it reads it at its next step"),
+                "queued" => format!("queued for {n}; runs after its current turn"),
+                _ => format!("sent to {n}"),
+            })
         }
         "wait_for_threads" => {
             let mut names: Vec<String> = args
@@ -347,6 +354,9 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
                 if !still.is_empty() {
                     lines.push(format!("(returned early for these messages; still running: {still_list})"));
                 }
+            } else if app.take_nudge(key) {
+                lines.push(format!("(returned early: the user sent you a message, which follows this result{})",
+                    if still.is_empty() { String::new() } else { format!("; still running: {still_list}") }));
             } else if !still.is_empty() {
                 lines.push(format!("still running after timeout: {still_list}"));
             }

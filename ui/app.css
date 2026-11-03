@@ -152,6 +152,7 @@ button { cursor: pointer; }
 .ev.user::before { content: ">"; left: 8px; top: 6px; color: var(--dim); }
 .ev.user.from-orch { border-left-color: var(--accent); }
 .ev.user .who { display: block; font-size: 11px; color: var(--accent); margin-bottom: 2px; }
+.ev.user .who.injected { color: var(--muted, #888); }
 .ev.text::before { content: "●"; color: var(--strong); font-size: 11px; top: 1px; }
 .ev.text.sub { opacity: .85; }
 .ev.text.sub::before { color: var(--dim); }

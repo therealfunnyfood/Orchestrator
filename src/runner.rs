@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -39,6 +39,18 @@ pub struct TurnSpec {
     /// Claude Code permission mode. Anything but bypassPermissions routes approvals
     /// to the app's `approve` tool (needs mcp_config).
     pub permission_mode: String,
+    /// Messages sent while the turn runs (stream-json user lines, see `user_line`).
+    /// Claude Code reads them at its next step, like typing while Claude works.
+    pub inject: Option<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>,
+}
+
+/// One stream-json user message for Claude Code's stdin.
+pub fn user_line(prompt: &str, images: &[(String, String)]) -> String {
+    let mut content = vec![serde_json::json!({"type": "text", "text": prompt})];
+    for (mime, data) in images {
+        content.push(serde_json::json!({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}}));
+    }
+    serde_json::json!({"type": "user", "message": {"role": "user", "content": content}}).to_string() + "\n"
 }
 
 #[derive(Default)]
@@ -181,17 +193,24 @@ async fn run_once(
     })?;
     let pid = child.id().unwrap_or(0);
 
+    // stdin stays open while the turn runs so messages can be added mid-turn; closing
+    // it after the result lets Claude Code exit.
     let mut stdin = child.stdin.take().unwrap();
-    let mut content = vec![serde_json::json!({"type": "text", "text": prompt})];
-    for (mime, data) in &spec.images {
-        content.push(serde_json::json!({"type": "image", "source": {"type": "base64", "media_type": mime, "data": data}}));
-    }
-    let message = serde_json::json!({"type": "user", "message": {"role": "user", "content": content}}).to_string() + "
-";
+    let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
-        let _ = stdin.write_all(message.as_bytes()).await;
+        while let Some(line) = writer_rx.recv().await {
+            if stdin.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+        }
         let _ = stdin.shutdown().await;
     });
+    let _ = writer_tx.send(user_line(prompt, &spec.images));
+    let mut writer = Some(writer_tx);
+    let mut inject = match &spec.inject {
+        Some(rx) => Some(rx.lock().await),
+        None => None,
+    };
     let mut stderr = child.stderr.take().unwrap();
     let stderr_task = tokio::spawn(async move {
         let mut buf = Vec::new();
@@ -224,11 +243,12 @@ async fn run_once(
                     }
                     Some("result") => {
                         got_result = true;
+                        // A message that came in as the turn ended gets one more result.
                         out.text = v.get("result").and_then(Value::as_str).unwrap_or("").to_string();
                         out.is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-                        out.cost_usd = v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
-                        out.steps = v.get("num_turns").and_then(Value::as_u64).unwrap_or(0);
-                        out.duration_ms = v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
+                        out.cost_usd = out.cost_usd.max(v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0));
+                        out.steps += v.get("num_turns").and_then(Value::as_u64).unwrap_or(0);
+                        out.duration_ms += v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
                         out.limited |= looks_limited(&v);
                         if out.is_error && out.text.is_empty() {
                             let errs = v.get("errors").map(Value::to_string).unwrap_or_default();
@@ -237,7 +257,28 @@ async fn run_once(
                     }
                     _ => {}
                 }
+                if v.get("type").and_then(Value::as_str) == Some("result") {
+                    // Stop taking messages (senders fall back to the queue), but pass on
+                    // any that already arrived; Claude Code answers them before exiting.
+                    let mut more = false;
+                    if let Some(rx) = inject.as_mut() {
+                        rx.close();
+                        while let Ok(line) = rx.try_recv() {
+                            more |= writer.as_ref().is_some_and(|w| w.send(line).is_ok());
+                        }
+                    }
+                    if !more {
+                        writer = None;
+                    }
+                }
                 on_line(&v);
+            }
+            line = async { inject.as_mut().unwrap().recv().await }, if inject.is_some() => {
+                match (line, &writer) {
+                    (Some(line), Some(w)) => { let _ = w.send(line); }
+                    (None, _) => inject = None,
+                    _ => {}
+                }
             }
             _ = cancel.changed() => {
                 if *cancel.borrow() {
@@ -274,7 +315,7 @@ pub async fn run_turn(
         let plain = TurnSpec { resume_at: None, images: spec.images.clone(), tools: spec.tools.clone(), mcp_config: spec.mcp_config.clone(),
             prompt: spec.prompt.clone(), cwd: spec.cwd.clone(), resume: None, model: spec.model.clone(), effort: spec.effort.clone(),
             backend: spec.backend.clone(), append_system: spec.append_system.clone(), long_tool_calls: spec.long_tool_calls, fork_session: false,
-            permission_mode: spec.permission_mode.clone() };
+            permission_mode: spec.permission_mode.clone(), inject: None };
         let mut retry = run_once(settings, &plain, &retry_prompt, "api", result.session_id.as_deref(), cancel, on_line).await?;
         retry.cost_usd += result.cost_usd;
         retry.steps += result.steps;

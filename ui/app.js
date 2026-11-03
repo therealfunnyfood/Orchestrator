@@ -548,6 +548,11 @@ function renderEventInner(ev, log) {
     if (ev.sender === "orchestrator" && !isOrch(ev.thread)) e.append(h("span", "who", "orchestrator →"));
     if (ev.sender === "threads") { e.classList.add("from-orch"); e.append(h("span", "who", "from threads →")); }
     if (ev.imported) e.append(h("span", "who", "from Claude Code"));
+    if (ev.injected) {
+      const tag = h("span", "who injected", "↪ mid-turn");
+      tag.title = "Sent while it was working; it read this at its next step";
+      e.append(tag);
+    }
     e.append(document.createTextNode(ev.text));
     if (ev.attachments?.length) e.append(attachmentView(ev.attachments));
     e.dataset.ts = String(ev.ts);
@@ -1105,7 +1110,7 @@ function renderQueue() {
     r.append(t);
     const btns = h("span", "btns");
     const now = h("button", null, "▶ send now");
-    now.title = "Interrupt the current turn and run this next";
+    now.title = "Send it into the current turn now (it reads it at its next step)";
     now.onclick = () => queueAction("now", m.id);
     const ed = h("button", null, "✎ edit");
     ed.title = "Move back into the composer";
@@ -1506,7 +1511,7 @@ function renderChips() {
     c.append(b);
   };
   $("#input").placeholder = inf.busy
-    ? "Queue a message — it runs when the current turn finishes…"
+    ? "Send while it works (Enter) · queue for after this turn (Alt+Enter)…"
     : inf.isOrch ? "Message the orchestrator…" : `Message ${inf.name}…`;
   chip("target", "to", inf.isOrch ? "orchestrator" : inf.name, () => goToThread(), "Switch conversation (Ctrl+P)");
   chip("", "access", permLabel(inf.permission_effective || S.state.permission), () => pickPermission(k), "Permission level");
@@ -1952,7 +1957,7 @@ function acceptSuggest() {
   i.focus();
 }
 
-async function submit() {
+async function submit(queue = false) {
   const i = $("#input");
   let text = i.value.trim();
   if (!text && !S.attachments.length) return;
@@ -1965,8 +1970,9 @@ async function submit() {
   try {
     if (text.startsWith("/")) await runCommand(text);
     else {
-      const r = await api("/api/send", { body: { thread: curKey(), text, attachments } });
+      const r = await api("/api/send", { body: { thread: curKey(), text, attachments, queue } });
       if (r.queued) toast("queued — runs after the current turn");
+      else if (r.delivery === "injected") toast("sent — it'll read this at its next step");
       S.attachments = [];
       renderTray();
     }
@@ -2318,7 +2324,7 @@ function wire() {
       if (it && input.value.trim() !== it.insert.trim()) { e.preventDefault(); return acceptSuggest(); }
     }
     if (open && e.key === "Escape") { e.preventDefault(); return closeSuggest(); }
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); return submit(); }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); return submit(e.altKey); }
     if (e.key === "ArrowUp" && !input.value && !open) {
       const q = info(curKey())?.queue || [];
       if (q.length) { // pull the newest queued message back for editing

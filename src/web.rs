@@ -169,12 +169,14 @@ async fn send(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
-    let queued = if target.starts_with(ORCHESTRATOR) {
-        app.submit_orchestrator(text, attach)
+    // Default: straight into a running turn. "queue": true waits for it to finish.
+    let now = !b.get("queue").and_then(Value::as_bool).unwrap_or(false);
+    let delivery = if target.starts_with(ORCHESTRATOR) {
+        app.submit_orchestrator(text, attach, now)
     } else {
-        app.send_to_thread(target, text, "you", attach)?
+        app.send_to_thread(target, text, "you", attach, now)?
     };
-    Ok(Json(json!({"ok": true, "queued": queued})))
+    Ok(Json(json!({"ok": true, "delivery": delivery, "queued": delivery == "queued"})))
 }
 
 async fn stop(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
@@ -185,7 +187,7 @@ async fn create_thread(State(app): State<Shared>, Json(b): Json<Value>) -> ApiRe
     let name = s(&b, "name").unwrap_or("").trim().to_string();
     let row = app.create_thread(&name, s(&b, "cwd"), s(&b, "backend"), s(&b, "model"), s(&b, "effort"))?;
     if let Some(task) = s(&b, "task").map(str::trim).filter(|t| !t.is_empty()) {
-        app.send_to_thread(&name, task, "you", vec![])?;
+        app.send_to_thread(&name, task, "you", vec![], false)?;
     }
     Ok(Json(serde_json::to_value(row).unwrap()))
 }

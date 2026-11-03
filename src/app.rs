@@ -3,7 +3,7 @@
 use crate::config::{check_backend, check_effort, check_permission, Paths, Settings};
 use crate::claude_projects::{self, SessionInfo};
 use crate::events::Hub;
-use crate::runner::{run_turn, TurnError, TurnSpec};
+use crate::runner::{run_turn, user_line, TurnError, TurnSpec};
 use crate::store::{now, same_path, EffRecord, Store, ThreadRow};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -88,6 +88,9 @@ resume_past_session only when the old conversation's detailed context really mat
 a forked copy, so the original is never changed. save_project_notes keeps a project brief and rules
 that are shown to you and every thread in this workspace.
 
+The user can message you while you work; those messages arrive mid-turn, between your steps.
+Read them and adjust what you're doing (they may redirect you or add information).
+
 Threads can message you mid-turn with message_orchestrator (for example to say a shared resource
 is free or that they need something). Those arrive as a [messages from threads] block at the start
 of a turn, or in the result of wait_for_threads, which returns early when one arrives. Act on them.
@@ -127,6 +130,10 @@ pub struct App {
     workers: Mutex<HashSet<String>>,
     /// Stop switch for the turn currently running on each key.
     cancels: Mutex<HashMap<String, watch::Sender<bool>>>,
+    /// Feeds messages into the turn currently running on each key.
+    injectors: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
+    /// Orchestrators with a mid-turn message from the user waiting; it ends wait_for_threads.
+    nudged: Mutex<HashSet<String>>,
     /// Finished-turn notices handed to the orchestrator on its next turn.
     notices: Mutex<Vec<String>>,
     /// Mid-turn messages from threads to their orchestrator, by orchestrator key.
@@ -165,6 +172,8 @@ impl App {
             queues: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashSet::new()),
             cancels: Mutex::new(HashMap::new()),
+            injectors: Mutex::new(HashMap::new()),
+            nudged: Mutex::new(HashSet::new()),
             notices: Mutex::new(Vec::new()),
             inbox: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
@@ -441,8 +450,16 @@ impl App {
         removed
     }
 
-    /// Run a queued message next, interrupting the turn in progress.
+    /// Deliver a queued message now: into the turn in progress if it can take it,
+    /// otherwise run it next by interrupting that turn.
     pub fn send_now(&self, key: &str, id: &str) -> bool {
+        let queued = self.queues.lock().unwrap().get(key).and_then(|q| q.iter().find(|m| m.id == id).cloned());
+        if let Some(m) = queued.filter(|m| m.fork.is_none()) {
+            if self.inject(key, &m) {
+                self.remove_queued(key, id);
+                return true;
+            }
+        }
         let moved = {
             let mut queues = self.queues.lock().unwrap();
             let Some(q) = queues.get_mut(key) else { return false };
@@ -466,20 +483,51 @@ impl App {
         self.touch();
     }
 
-    /// Queue a turn on a thread. `sender` is "you" or "orchestrator".
-    /// Returns whether it waits behind other work.
-    pub fn send_to_thread(self: &Arc<Self>, name: &str, text: &str, sender: &str, attach: Vec<String>) -> Result<bool, String> {
+    /// Add a message to the turn running on `key`; Claude Code reads it at its next
+    /// step. False when nothing is running or the turn is already wrapping up.
+    fn inject(&self, key: &str, msg: &Queued) -> bool {
+        let Some(tx) = self.injectors.lock().unwrap().get(key).cloned() else { return false };
+        let (prompt, images) = with_attachments(&msg.text, &msg.attach);
+        if tx.send(user_line(&prompt, &images)).is_err() {
+            return false;
+        }
+        self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach, "injected": true}));
+        if key.starts_with(ORCHESTRATOR) {
+            self.nudged.lock().unwrap().insert(key.to_string());
+        } else {
+            let mut st = self.store.lock().unwrap();
+            if let Some(r) = st.get_mut(key) {
+                r.last_prompt = msg.text.clone();
+            }
+            st.save();
+        }
+        self.touch();
+        true
+    }
+
+    /// Deliver a message: with `now`, into the turn in progress (like typing while
+    /// Claude works); otherwise, or if no turn can take it, queued.
+    /// Returns "injected", "queued" (waits behind other work) or "sent".
+    fn deliver(self: &Arc<Self>, key: &str, msg: Queued, now: bool) -> &'static str {
+        if now && self.inject(key, &msg) {
+            return "injected";
+        }
+        if self.enqueue(key, msg, false).1 { "queued" } else { "sent" }
+    }
+
+    /// Send a message to a thread. `sender` is "you" or "orchestrator".
+    pub fn send_to_thread(self: &Arc<Self>, name: &str, text: &str, sender: &str, attach: Vec<String>, now: bool) -> Result<&'static str, String> {
         if self.store.lock().unwrap().get(name).is_none() {
             return Err(format!("no thread named '{name}'"));
         }
         let msg = Queued { id: String::new(), text: text.into(), sender: sender.into(), attach, fork: None };
-        Ok(self.enqueue(name, msg, false).1)
+        Ok(self.deliver(name, msg, now))
     }
 
-    pub fn submit_orchestrator(self: &Arc<Self>, text: &str, attach: Vec<String>) -> bool {
+    pub fn submit_orchestrator(self: &Arc<Self>, text: &str, attach: Vec<String>, now: bool) -> &'static str {
         let key = self.orch_key();
         let msg = Queued { id: String::new(), text: text.into(), sender: "you".into(), attach, fork: None };
-        self.enqueue(&key, msg, false).1
+        self.deliver(&key, msg, now)
     }
 
     /// Edit (or retry) an earlier message: the conversation branches from just
@@ -491,6 +539,9 @@ impl App {
             .into_iter()
             .find(|e| e.get("kind").and_then(Value::as_str) == Some("user") && e.get("ts").and_then(Value::as_f64).is_some_and(|t| (t - ts).abs() < 1e-6))
             .ok_or("couldn't find that message")?;
+        if original.get("injected").and_then(Value::as_bool).unwrap_or(false) {
+            return Err("messages sent mid-turn can't be edited; send a follow-up instead".into());
+        }
         let resume_at = original.get("resume_at").and_then(Value::as_str).map(str::to_string);
         if resume_at.is_none() && original.get("resume_at").is_none() {
             return Err("this message is from before editing was supported, so it can't be edited".into());
@@ -548,6 +599,7 @@ impl App {
             images,
             fork_session: row.fork_pending && msg.fork.is_none(),
             permission_mode: self.permission_for(&row),
+            inject: Some(self.open_injector(name)),
         };
         let settings = self.settings();
         let app = self.clone();
@@ -575,6 +627,7 @@ impl App {
             }
         };
         let result = run_turn(&settings, &spec, &mut rx, &mut on_line).await;
+        self.injectors.lock().unwrap().remove(name);
         self.cancels.lock().unwrap().remove(name);
         self.started.lock().unwrap().remove(name);
         crate::attention();
@@ -673,6 +726,17 @@ impl App {
         }
     }
 
+    /// Whether the user messaged this orchestrator mid-turn since it last checked.
+    pub fn take_nudge(&self, key: &str) -> bool {
+        self.nudged.lock().unwrap().remove(key)
+    }
+
+    fn open_injector(&self, key: &str) -> tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.injectors.lock().unwrap().insert(key.to_string(), tx);
+        tokio::sync::Mutex::new(rx)
+    }
+
     /// Block until the named threads are idle, a thread messages the orchestrator,
     /// or the timeout passes.
     pub async fn wait_threads(&self, names: &[String], timeout: Duration) {
@@ -680,7 +744,7 @@ impl App {
         let key = self.orch_key();
         loop {
             let notified = self.changed.notified();
-            if !names.iter().any(|n| self.busy(n)) || self.has_inbox(&key) {
+            if !names.iter().any(|n| self.busy(n)) || self.has_inbox(&key) || self.nudged.lock().unwrap().contains(&key) {
                 return;
             }
             tokio::select! {
@@ -773,6 +837,7 @@ impl App {
             images,
             fork_session: false,
             permission_mode: self.project_permission(),
+            inject: Some(self.open_injector(key)),
         };
         let app = self.clone();
         let k = key.to_string();
@@ -796,6 +861,8 @@ impl App {
             }
         };
         let result = run_turn(&s, &spec, &mut rx, &mut on_line).await;
+        self.injectors.lock().unwrap().remove(key);
+        self.nudged.lock().unwrap().remove(key);
         self.cancels.lock().unwrap().remove(key);
         self.started.lock().unwrap().remove(key);
         crate::attention();
@@ -960,6 +1027,7 @@ impl App {
                 resume_at: None,
                 fork_session: false,
                 permission_mode: String::new(),
+                inject: None,
             };
             let (_tx, mut rx) = watch::channel(false);
             let mut sink = |_: &Value| {};
@@ -1075,6 +1143,7 @@ impl App {
             resume_at: None,
             fork_session: false,
             permission_mode: String::new(),
+            inject: None,
         };
         let (_tx, mut rx) = watch::channel(false);
         let app = self.clone();
@@ -1350,7 +1419,7 @@ Mention it only if the user asks about cost or usage.{}\n",
         self.hub.emit(name, json!({"kind": "notice", "text": format!(
             "continued from Claude Code conversation “{}” — this thread works on a copy; the original is untouched", info.title)}));
         if !message.trim().is_empty() {
-            self.send_to_thread(name, message, "orchestrator", vec![])?;
+            self.send_to_thread(name, message, "orchestrator", vec![], false)?;
         }
         Ok(row)
     }
