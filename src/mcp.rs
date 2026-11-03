@@ -272,7 +272,7 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             if key.starts_with(ORCHESTRATOR) {
                 return Err("you are the orchestrator; use send_to_thread to message threads".into());
             }
-            let text = arg(args, "message").filter(|m| !m.trim().is_empty()).ok_or("message is required")?;
+            let text = arg(args, "message").or(arg(args, "text")).filter(|m| !m.trim().is_empty()).ok_or("message is required")?;
             app.message_orchestrator(key, text)?;
             Ok("delivered to the orchestrator".into())
         }
@@ -355,7 +355,7 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
                     lines.push(format!("(returned early for these messages; still running: {still_list})"));
                 }
             } else if app.take_nudge(key) {
-                lines.push(format!("(returned early: the user sent you a message, which follows this result{})",
+                lines.push(format!("(returned early: a message arrived, which follows this result{})",
                     if still.is_empty() { String::new() } else { format!("; still running: {still_list}") }));
             } else if !still.is_empty() {
                 lines.push(format!("still running after timeout: {still_list}"));

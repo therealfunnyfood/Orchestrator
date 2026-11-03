@@ -20,9 +20,15 @@ given end to end without asking for permission. When you finish a turn, end with
 what you did, what changed (files, commands), and anything left open. That summary is what the \
 orchestrator reads.
 
-To tell the orchestrator something before your turn ends (a shared resource is free, you're
-blocked and need something, a result it asked you to report straight away), call
-message_orchestrator. Never try to message other Claude sessions any other way.
+Keep your orchestrator in the loop, the way a teammate would. Call message_orchestrator
+(it doesn't end your turn) to:
+- report a milestone on longer work, or something you found that affects other work;
+- ask it a question or for a decision you can't make yourself, then carry on with what you can
+  (its answer arrives mid-turn, between your steps; or end your turn with the question open);
+- say you're blocked, or that a shared resource (a port, a device, a branch) is free again.
+Keep messages short and purposeful: one or two sentences, not a running commentary.
+The orchestrator may also message you mid-turn to redirect you or add information: follow it.
+Never try to message other Claude sessions any other way.
 
 Depending on the project's permission level, some actions may need the user's approval. If one is
 denied, don't retry it the same way: adjust your approach, or explain what you need and why.
@@ -50,8 +56,17 @@ How to work:
   "done" looks like.
 - Choose the cheapest model and effort that will do each job well; the user wants usage kept as low
   as possible. See "Model and effort" below.
-- Use wait_for_threads to block until threads finish, then read_thread to get their results. Check
-  results before reporting them as done.
+- Talk to your threads like a lead talks to a team, not just "spawn and wait":
+  - When a thread reports, asks or finishes, respond: answer its question, approve or correct its
+    approach, give it the next step with send_to_thread, or tell it it's done.
+  - send_to_thread reaches a busy thread mid-turn, so redirect early when a thread is heading the
+    wrong way, and pass on anything it needs (a decision from the user, another thread's result,
+    a changed requirement) as soon as you have it.
+  - Relay between threads: when one thread's result unblocks or affects another, tell that thread.
+  - Check in with read_thread on long-running threads, and nudge one that seems stuck.
+  - Check results before reporting them as done; send a thread back to fix gaps.
+- Use wait_for_threads when you have nothing to do until threads report; it returns early when a
+  thread messages you or finishes.
 - Do small lookups yourself with Read/Glob/Grep; delegate real work.
 - Keep the user informed: say what you started, and summarize results when done.
 
@@ -91,9 +106,11 @@ that are shown to you and every thread in this workspace.
 The user can message you while you work; those messages arrive mid-turn, between your steps.
 Read them and adjust what you're doing (they may redirect you or add information).
 
-Threads can message you mid-turn with message_orchestrator (for example to say a shared resource
-is free or that they need something). Those arrive as a [messages from threads] block at the start
-of a turn, or in the result of wait_for_threads, which returns early when one arrives. Act on them.
+Threads message you with message_orchestrator (progress, questions, blockers), and when a thread
+finishes a task you gave it, its final report comes to you automatically. These arrive as a
+[messages from threads] block: mid-turn between your steps if you're working, in the result of
+wait_for_threads, or as a new turn of their own if you're idle. Act on each one: reply to the
+thread, move the work on, or tell the user. If nothing needs doing, say so in one line and stop.
 
 The user can also open any thread and talk to it directly. Thread updates that arrived since the
 user's last message are prepended to it in a [thread updates] block.
@@ -134,6 +151,8 @@ pub struct App {
     injectors: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
     /// Orchestrators with a mid-turn message from the user waiting; it ends wait_for_threads.
     nudged: Mutex<HashSet<String>>,
+    /// Orchestrators blocked in wait_for_threads (thread messages go into its result).
+    waiting: Mutex<HashSet<String>>,
     /// Finished-turn notices handed to the orchestrator on its next turn.
     notices: Mutex<Vec<String>>,
     /// Mid-turn messages from threads to their orchestrator, by orchestrator key.
@@ -174,6 +193,7 @@ impl App {
             cancels: Mutex::new(HashMap::new()),
             injectors: Mutex::new(HashMap::new()),
             nudged: Mutex::new(HashSet::new()),
+            waiting: Mutex::new(HashSet::new()),
             notices: Mutex::new(Vec::new()),
             inbox: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
@@ -688,7 +708,14 @@ impl App {
             st.save();
             notice
         };
-        if let Some(n) = notice {
+        let Some(n) = notice else { return };
+        if msg.sender == "orchestrator" {
+            // Its task: the orchestrator hears back right away, like a teammate reporting.
+            let result = self.store.lock().unwrap().get(name).map(|r| r.last_result.clone()).unwrap_or_default();
+            let report: String = result.chars().take(1500).collect();
+            let more = if result.chars().count() > 1500 { "\n(cut short; read_thread for the rest)" } else { "" };
+            let _ = self.post_to_orchestrator(name, &format!("{n}. Its final report:\n{report}{more}"));
+        } else {
             self.notices.lock().unwrap().push(n);
         }
     }
@@ -697,12 +724,31 @@ impl App {
     /// new orchestrator turn if it's idle, otherwise into its current turn (it wakes
     /// wait_for_threads) or the start of its next one.
     pub fn message_orchestrator(self: &Arc<Self>, from: &str, text: &str) -> Result<(), String> {
+        self.hub.emit(from, json!({"kind": "notice", "text": format!("→ messaged the orchestrator: {}", crate::events::clip(text))}));
+        self.post_to_orchestrator(from, text)
+    }
+
+    /// Hand a thread's message or report to its orchestrator: into its turn if it's
+    /// working, as a new turn if it's idle, else at the start of its next turn.
+    fn post_to_orchestrator(self: &Arc<Self>, from: &str, text: &str) -> Result<(), String> {
         let ws = self.store.lock().unwrap().get(from).map(|t| t.workspace.clone()).ok_or(format!("no thread named '{from}'"))?;
         let key = orch_key(&ws);
-        self.hub.emit(from, json!({"kind": "notice", "text": format!("→ messaged the orchestrator: {}", crate::events::clip(text))}));
         self.inbox.lock().unwrap().entry(key.clone()).or_default().push((from.to_string(), text.to_string()));
         self.touch();
-        if !self.busy(&key) && same_path(&ws, &self.workspace()) {
+        if !same_path(&ws, &self.workspace()) {
+            return Ok(()); // another project: it reads them when the user switches back
+        }
+        if self.waiting.lock().unwrap().contains(&key) {
+            // touch() above ends the wait; the messages are its result.
+        } else if self.running(&key) {
+            if let Some(text) = self.drain_inbox(&key) {
+                let msg = Queued { id: String::new(), text: text.clone(), sender: "threads".into(), attach: vec![], fork: None };
+                if !self.inject(&key, &msg) {
+                    // The turn is wrapping up: the worker starts a turn for it next.
+                    self.inbox.lock().unwrap().entry(key.clone()).or_default().insert(0, (String::new(), text));
+                }
+            }
+        } else if !self.busy(&key) {
             self.flush_inbox(&key);
         }
         Ok(())
@@ -711,7 +757,12 @@ impl App {
     /// Take the orchestrator's pending thread messages, formatted for a prompt.
     pub fn drain_inbox(&self, key: &str) -> Option<String> {
         let msgs = self.inbox.lock().unwrap().remove(key).filter(|m| !m.is_empty())?;
-        Some(msgs.iter().map(|(from, text)| format!("[message from thread {from}]\n{text}")).collect::<Vec<_>>().join("\n\n"))
+        Some(
+            msgs.iter()
+                .map(|(from, text)| if from.is_empty() { text.clone() } else { format!("[from thread {from}]\n{text}") })
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
     }
 
     fn has_inbox(&self, key: &str) -> bool {
@@ -742,16 +793,18 @@ impl App {
     pub async fn wait_threads(&self, names: &[String], timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
         let key = self.orch_key();
+        self.waiting.lock().unwrap().insert(key.clone());
         loop {
             let notified = self.changed.notified();
             if !names.iter().any(|n| self.busy(n)) || self.has_inbox(&key) || self.nudged.lock().unwrap().contains(&key) {
-                return;
+                break;
             }
             tokio::select! {
                 _ = notified => {}
-                _ = tokio::time::sleep_until(deadline) => return,
+                _ = tokio::time::sleep_until(deadline) => break,
             }
         }
+        self.waiting.lock().unwrap().remove(&key);
     }
 
     // ---- orchestrator ---------------------------------------------------
@@ -863,6 +916,7 @@ impl App {
         let result = run_turn(&s, &spec, &mut rx, &mut on_line).await;
         self.injectors.lock().unwrap().remove(key);
         self.nudged.lock().unwrap().remove(key);
+        self.waiting.lock().unwrap().remove(key); // in case the turn ended mid-wait
         self.cancels.lock().unwrap().remove(key);
         self.started.lock().unwrap().remove(key);
         crate::attention();

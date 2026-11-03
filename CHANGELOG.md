@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.3 (2026-11-02)
+
+- **The orchestrator and its threads now talk throughout the work**, the way a Claude Code
+  project's sessions do:
+  - When a thread finishes a task the orchestrator gave it, its final report goes to the
+    orchestrator right away. An idle orchestrator wakes up to act on it, a working one
+    gets it mid-turn, and one in `wait_for_threads` gets it as that call's result.
+  - Thread messages (`message_orchestrator`) also reach a working orchestrator mid-turn
+    now, instead of waiting for its next step.
+  - Threads are told to report milestones, ask questions and flag blockers. The
+    orchestrator is told to reply, redirect busy threads, relay results between threads
+    and check in on long-running ones.
+- Turns you drive yourself in a thread still don't wake the orchestrator; it sees them
+  as updates with your next message.
+
 ## 0.4.2 (2026-11-02)
 
 - **Messages reach a working agent right away**: send a message while a thread or the
