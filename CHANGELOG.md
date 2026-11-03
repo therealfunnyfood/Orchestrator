@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.5 (2026-11-03)
+
+- **File paths in messages are clickable.** Paths in links and in `code` (for example
+  `src/app.rs:42` or `C:\Projects\notes.txt`) open in Explorer, with the file
+  selected. Ctrl+click opens the file in your editor at that line instead. Relative
+  paths are taken from the thread's folder.
+- **Markdown files open in a viewer inside the app.** Clicking a `.md` file shows it
+  rendered in its own tab, with headings, tables, lists, images and links. Links in
+  the document work too. Use ↻ Reload after the file changes, or Edit to open it in
+  your editor. Shift+click a `.md` link to show it in Explorer instead.
+
 ## 0.4.4 (2026-11-02)
 
 - **Fixed: costs were counted far too high.** Claude Code reports a session's cost as a

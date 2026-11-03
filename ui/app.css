@@ -438,6 +438,8 @@ a.tlink, .tlink { color: var(--accent-2); cursor: pointer; text-decoration: none
 a.tlink::before, .tlink::before { content: "› "; color: var(--dim); }
 a.tlink:hover, .tlink:hover { color: var(--accent); border-bottom-style: solid; }
 code.tlink { background: none; padding: 0; }
+.flink { cursor: pointer; text-decoration: none; color: var(--accent-2); border-bottom: 1px dotted color-mix(in srgb, var(--accent) 55%, transparent); }
+.flink:hover { color: var(--accent); border-bottom-style: solid; }
 .tab .pop { width: 20px; height: 20px; border: 0; background: none; border-radius: 4px; color: var(--muted); visibility: hidden; font-size: 12px; }
 .tab:hover .pop { visibility: visible; }
 .tab .pop:hover { background: var(--hover); color: var(--strong); }
@@ -550,3 +552,19 @@ code.tlink { background: none; padding: 0; }
 .ev.question.perm .q-head { color: var(--amber); }
 .perm-input { margin: 6px 0 8px; font-family: var(--mono); font-size: 12px; background: var(--code); border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: var(--text); }
 .sb.perm-open { color: var(--amber); }
+
+/* markdown file viewer */
+.doc-bar { display: flex; align-items: center; gap: 8px; max-width: 920px; margin: 0 auto 14px; color: var(--muted); }
+.doc-bar .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; }
+.md.doc { max-width: 920px; margin: 0 auto; font-size: 14px; line-height: 1.65; }
+.md.doc h1, .md.doc h2, .md.doc h3, .md.doc h4 { font-weight: 600; margin: 1.3em 0 .5em; }
+.md.doc h1::before, .md.doc h2::before, .md.doc h3::before, .md.doc h4::before { content: none; }
+.md.doc h1 { font-size: 24px; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+.md.doc h2 { font-size: 19px; padding-bottom: .25em; border-bottom: 1px solid var(--border); }
+.md.doc h3 { font-size: 16px; }
+.md.doc h4 { font-size: 14px; }
+.md.doc > :first-child { margin-top: 0; }
+.md.doc img { max-width: 100%; }
+.md.doc table { border-collapse: collapse; margin: .5em 0 1em; }
+.md.doc th, .md.doc td { border: 1px solid var(--border); padding: 5px 10px; }
+.doc-text { white-space: pre-wrap; font-family: var(--mono); font-size: 12.5px; }

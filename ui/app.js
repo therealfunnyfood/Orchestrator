@@ -98,6 +98,20 @@ const curKey = () => (cur()?.type === "chat" ? cur().key : null);
 
 // ================================================================ markdown (small, escape-first)
 
+// Looks like a file or folder path: absolute (C:\..., \\server, ~/...), or relative with a
+// folder separator and a file extension or trailing slash. An optional :line may follow.
+function looksLikePath(s) {
+  if (!s || s.length > 400 || /:\/\/|[<>"|*?\n]/.test(s)) return false;
+  const p = s.replace(/(?::\d+){1,2}$/, "");
+  if (/^([A-Za-z]:[\\/]|\\\\|~[\\/])/.test(p)) return true;
+  if (p.includes(":") || /\s/.test(p)) return false;
+  return /[\\/]/.test(p) && (/\.[A-Za-z0-9]{1,8}$/.test(p) || /[\\/]$/.test(p));
+}
+const isDoc = (p) => /\.(md|markdown|mdx|txt)(?::\d+)*$/i.test(p);
+const FILE_TIP = "Show in Explorer · Ctrl+click to open in the editor";
+const DOC_TIP = "View here · Shift+click to show in Explorer · Ctrl+click to open in the editor";
+const fileAttrs = (p) => `data-path="${p}" title="${isDoc(p) ? DOC_TIP : FILE_TIP}"`;
+
 function inline(s) {
   const codes = [];
   s = s.replace(/`([^`\n]+)`/g, (_, c) => { codes.push(c); return `\u0000${codes.length - 1}\u0000`; });
@@ -109,8 +123,19 @@ function inline(s) {
          return `<img src="${url}" alt="${alt}">`;
        })
        .replace(/\[([^\]]+)\]\(thread:([A-Za-z0-9_-]+)\)/g, '<a class="tlink" data-thread="$2">$1</a>')
-       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${esc(codes[+i])}</code>`);
+       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+       .replace(/\[([^\]]+)\]\(&lt;(.+?)&gt;\)|\[([^\]]+)\]\(([^\s)]+)\)/g, (m, l1, t1, l2, t2) => {
+         const label = l1 ?? l2;
+         let target = t1 ?? t2;
+         if (/^#/.test(target)) return label;
+         if (/^(https?|mailto|thread):/.test(target)) return m;
+         target = target.replace(/^file:\/\/\/?/, "").replace(/#L(\d+)(?:-L?\d+)?$/, ":$1");
+         return `<a class="flink" ${fileAttrs(target)}>${label}</a>`;
+       });
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => {
+    const c = codes[+i];
+    return looksLikePath(c.trim()) ? `<code class="flink" ${fileAttrs(esc(c.trim()))}>${esc(c)}</code>` : `<code>${esc(c)}</code>`;
+  });
 }
 
 function md(src) {
@@ -289,6 +314,7 @@ function tabTitle(t) {
   if (t.type === "manage") return ["☰", "Threads"];
   if (t.type === "settings") return ["⚙", "Settings"];
   if (t.type === "brief") return ["📋", "Project brief"];
+  if (t.type === "doc") return ["▤", t.name];
   if (isOrch(t.key)) return ["◈", "orchestrator"];
   return ["›", t.key];
 }
@@ -323,7 +349,7 @@ function renderTabs() {
 }
 
 function openTab(tab) {
-  let i = S.tabs.findIndex((t) => t.type === tab.type && (t.type !== "chat" || t.key === tab.key));
+  let i = S.tabs.findIndex((t) => t.type === tab.type && (!["chat", "doc"].includes(t.type) || t.key.toLowerCase() === tab.key.toLowerCase()));
   if (i === -1) { S.tabs.push(tab); i = S.tabs.length - 1; }
   activate(i);
 }
@@ -342,10 +368,12 @@ async function activate(i) {
   $("#pane-manage").classList.toggle("hidden", t.type !== "manage");
   $("#pane-settings").classList.toggle("hidden", t.type !== "settings");
   $("#pane-brief").classList.toggle("hidden", t.type !== "brief");
+  $("#pane-doc").classList.toggle("hidden", t.type !== "doc");
   if (t.type === "chat") { S.unread.delete(t.key); await loadLog(t.key); }
   if (t.type === "manage") renderManage();
   if (t.type === "settings") renderSettings();
   if (t.type === "brief") renderBrief();
+  if (t.type === "doc") renderDoc();
   renderChrome();
   if (t.type === "chat") $("#input").focus();
 }
@@ -1202,6 +1230,7 @@ function wireSplit() {
     if (orch === "pop-out") popOut(key);
     if (orch === "open-tab") { closeSide(); openChat(key); }
     if (orch === "open-side") openSide(key);
+    if (orch === "open-doc") openDoc(e.data.path, e.data.base);
   });
 }
 
@@ -1233,8 +1262,65 @@ function lightbox(src) {
   lb.classList.remove("hidden");
 }
 
-function openPath(path, how) {
-  api("/api/open", { body: { path, how } }).catch(fail);
+function openPath(path, how, extra = {}) {
+  api("/api/open", { body: { path, how, ...extra } }).catch(fail);
+}
+
+// Folder that relative paths in the current view are taken from.
+const viewBase = () => (cur()?.type === "doc" ? cur().dir : info(curKey())?.cwd) || S.state.workspace;
+
+// A file path in a message or document. Markdown opens in the viewer; anything else is
+// shown in Explorer. Shift+click always shows it in Explorer, Ctrl+click opens the editor.
+function onFileLink(e) {
+  const a = e.target.closest("[data-path]");
+  if (!a || a.closest(".files, .composer")) return false;
+  e.preventDefault();
+  e.stopPropagation();
+  let path = a.dataset.path;
+  let line;
+  const m = path.match(/^(.+?):(\d+)(?::\d+)?$/);
+  if (m) { path = m[1]; line = +m[2]; }
+  try { path = decodeURIComponent(path); } catch {}
+  const base = viewBase();
+  if (e.ctrlKey || e.metaKey) openPath(path, "editor", { base, line });
+  else if (!e.shiftKey && isDoc(path)) openDoc(path, base);
+  else openPath(path, "reveal", { base });
+  return true;
+}
+
+async function openDoc(path, base) {
+  if (SOLO && window.parent !== window) return window.parent.postMessage({ orch: "open-doc", path, base }, location.origin);
+  try {
+    const d = await api("/api/doc", { body: { path, base } });
+    const i = S.tabs.findIndex((t) => t.type === "doc" && t.key.toLowerCase() === d.path.toLowerCase());
+    if (i !== -1) Object.assign(S.tabs[i], { text: d.text, name: d.name, dir: d.dir });
+    openTab({ type: "doc", key: d.path, name: d.name, dir: d.dir, text: d.text });
+  } catch (e) { fail(e); }
+}
+
+function renderDoc() {
+  const t = cur();
+  const pane = $("#pane-doc");
+  pane.textContent = "";
+  const page = h("div", "page doc-page");
+  const bar = h("div", "doc-bar");
+  const where = h("span", "path lnk", t.key);
+  where.title = "Show in Explorer";
+  where.onclick = () => openPath(t.key, "reveal");
+  const btn = (label, title, fn) => { const b = h("button", "btn", label); b.title = title; b.onclick = fn; return b; };
+  bar.append(where,
+    btn("↻ Reload", "Read the file again", () => openDoc(t.key)),
+    btn("Edit", "Open in the editor", () => openPath(t.key, "editor")));
+  const body = h("div", "md doc");
+  body.innerHTML = /\.txt$/i.test(t.key) ? `<pre class="doc-text">${esc(t.text)}</pre>` : md(t.text);
+  // Images with paths relative to the document.
+  for (const img of body.querySelectorAll("img")) {
+    const src = new URL(img.src, location.href);
+    const p = src.pathname === "/file" && src.searchParams.get("path");
+    if (p && !/^([A-Za-z]:[\\/]|\\\\)/.test(p)) img.src = fileUrl(t.dir + "\\" + p.replace(/\//g, "\\"));
+  }
+  page.append(bar, body);
+  pane.append(page);
 }
 
 function mediaView(ev) {
@@ -2357,7 +2443,7 @@ function wire() {
   });
   $("#lightbox").onclick = () => $("#lightbox").classList.add("hidden");
   document.addEventListener("click", (e) => {
-    if (onThreadLink(e)) return;
+    if (onThreadLink(e) || onFileLink(e)) return;
     const a = e.target.closest("a[href]");
     if (a && /^https?:/.test(a.getAttribute("href"))) { e.preventDefault(); openUrl(a.href); }
   }, true);

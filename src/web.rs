@@ -81,6 +81,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/answer", post(answer))
         .route("/api/upload", post(upload))
         .route("/api/open", post(open_path))
+        .route("/api/doc", post(read_doc))
         .route("/api/popout", post(popout))
         .route("/api/edit", post(edit))
         .route("/api/claude-projects", get(claude_projects))
@@ -303,10 +304,65 @@ async fn file(Query(q): Query<HashMap<String, String>>) -> Response {
     }
 }
 
+/// Turn a path from a message into an absolute Windows path: strips `file:///`, expands
+/// `~`, and takes a relative path from `base` (the chat's folder), then the workspace.
+fn resolve_path(app: &App, raw: &str, base: Option<&str>) -> std::path::PathBuf {
+    let raw = raw.trim().trim_start_matches("file:///").trim_start_matches("file://");
+    let p = raw.replace('/', "\\");
+    let p = match p.strip_prefix("~\\") {
+        Some(rest) => std::env::var("USERPROFILE").map(|h| format!("{h}\\{rest}")).unwrap_or(p.clone()),
+        None => p,
+    };
+    let path = std::path::PathBuf::from(&p);
+    if path.is_absolute() {
+        return path;
+    }
+    let ws = app.workspace();
+    let bases = base.into_iter().map(str::to_string).chain(std::iter::once(ws));
+    let tries: Vec<_> = bases.map(|b| normalize(&std::path::Path::new(&b).join(&path))).collect();
+    tries.iter().find(|t| t.exists()).cloned().unwrap_or_else(|| tries[0].clone())
+}
+
+/// Drop `.` and resolve `..` without touching the disk.
+fn normalize(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => { out.pop(); }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Read a markdown or text file for the in-app viewer.
+async fn read_doc(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
+    let path = resolve_path(&app, s(&b, "path").unwrap_or(""), s(&b, "base"));
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if !["md", "markdown", "mdx", "txt"].contains(&ext.as_str()) {
+        return Err(ApiError("only markdown and text files open in the viewer".into()));
+    }
+    let meta = tokio::fs::metadata(&path).await.map_err(|_| ApiError(format!("not found: {}", path.display())))?;
+    if meta.len() > 4 * 1024 * 1024 {
+        return Err(ApiError("file is too large to view (over 4 MB)".into()));
+    }
+    let bytes = tokio::fs::read(&path).await.map_err(|e| ApiError(e.to_string()))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    Ok(Json(json!({
+        "path": path.to_string_lossy(),
+        "dir": path.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default(),
+        "name": name,
+        "text": String::from_utf8_lossy(&bytes),
+    })))
+}
+
 /// Open a path: in VS Code when available ("editor"), or in Explorer ("reveal").
-async fn open_path(Json(b): Json<Value>) -> ApiResult {
-    let path = s(&b, "path").unwrap_or("").to_string();
-    if path.is_empty() || !std::path::Path::new(&path).exists() {
+async fn open_path(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
+    let resolved = resolve_path(&app, s(&b, "path").unwrap_or(""), s(&b, "base"));
+    let path = resolved.to_string_lossy().to_string();
+    if path.is_empty() || !resolved.exists() {
         return Err(ApiError(format!("not found: {path}")));
     }
     let how = s(&b, "how").unwrap_or("editor").to_string();

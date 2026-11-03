@@ -74,6 +74,8 @@ To uninstall, use Settings → Apps → Installed apps → Orchestrator.
   open it, click a link to open it beside the chat, or pop it out into its own
   window (⧉). Each thread has a task list, and threads can ask you multiple-choice
   questions and show you images, video, audio or PDFs.
+- **Files**: click a file path in any message to show it in Explorer (Ctrl+click
+  opens it in your editor). Markdown files open rendered in a tab inside the app.
 - **Composer**: messages stream in as they're written. A message you send while a
   turn runs goes straight into it (Claude reads it at its next step, like in Claude
   desktop); Alt+Enter queues it for after the turn instead. You can edit or retry
