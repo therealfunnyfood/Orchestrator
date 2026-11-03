@@ -124,7 +124,7 @@ impl Hub {
                     "subtype": line.get("subtype"),
                     "is_error": line.get("is_error").and_then(Value::as_bool).unwrap_or(false),
                     "turns": line.get("num_turns"),
-                    "cost": line.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
+                    "cost": line.get("turn_cost_usd").or(line.get("total_cost_usd")).and_then(Value::as_f64).unwrap_or(0.0),
                     "duration_ms": line.get("duration_ms"),
                 }));
             }

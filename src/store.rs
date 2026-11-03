@@ -94,6 +94,10 @@ pub struct Store {
     pub plan_usage: Option<serde_json::Value>,
     /// One record per finished thread turn, for the orchestrator's self-tuning.
     pub efficiency: Vec<EffRecord>,
+    /// Claude Code's running cost total per session id, as of its last turn.
+    pub session_costs: BTreeMap<String, f64>,
+    /// Version of the cost accounting the saved numbers were counted with.
+    pub cost_version: u32,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -105,6 +109,20 @@ impl Store {
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
         store.path = path;
+        if store.cost_version < 1 {
+            // Before 0.4.4 every resumed turn counted the session's whole running total
+            // again, so saved costs were far too high. Start them over.
+            store.usage.clear();
+            store.efficiency.clear();
+            for t in &mut store.threads {
+                t.cost_usd = 0.0;
+            }
+            for o in store.orchestrators.values_mut() {
+                o.cost_usd = 0.0;
+            }
+            store.cost_version = 1;
+            store.save();
+        }
         // Anything mid-turn when the app last closed was cut off.
         for t in &mut store.threads {
             if t.status == "running" || t.status == "queued" {
@@ -171,6 +189,27 @@ impl Store {
 pub const MIX_WINDOW_SECS: f64 = 24.0 * 3600.0;
 
 impl Store {
+    /// Remember a session's running total for its next turn (and forks of it).
+    pub fn note_session_cost(&mut self, session: Option<&str>, total: f64) {
+        if let Some(s) = session {
+            self.session_costs.insert(s.to_string(), total);
+        }
+    }
+
+    pub fn session_cost(&self, session: Option<&str>) -> Option<f64> {
+        session.and_then(|s| self.session_costs.get(s).copied())
+    }
+
+    /// Record a finished turn's cost; the part that ran on the plan before an auto
+    /// fallback counts as plan.
+    pub fn record_turn_usage(&mut self, r: &crate::runner::TurnResult) {
+        if r.plan_cost > 0.0 {
+            self.record_usage("plan", r.plan_cost);
+        }
+        self.record_usage(&r.backend_used, r.cost_usd - r.plan_cost);
+        self.note_session_cost(r.session_id.as_deref(), r.session_total);
+    }
+
     pub fn record_usage(&mut self, backend: &str, cost: f64) {
         let t = now();
         let ws = self.workspace.clone();

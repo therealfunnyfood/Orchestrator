@@ -604,6 +604,7 @@ impl App {
         self.touch();
         let (prompt, images) = with_attachments(text, attach);
 
+        let prior_cost = self.store.lock().unwrap().session_cost(resume.as_deref());
         let spec = TurnSpec {
             prompt,
             cwd: PathBuf::from(&row.cwd),
@@ -620,6 +621,7 @@ impl App {
             fork_session: row.fork_pending && msg.fork.is_none(),
             permission_mode: self.permission_for(&row),
             inject: Some(self.open_injector(name)),
+            prior_cost,
         };
         let settings = self.settings();
         let app = self.clone();
@@ -659,7 +661,7 @@ impl App {
                 row.last_uuid = last_uuid;
             }
             if let Ok(r) = &result {
-                st.record_usage(&r.backend_used, r.cost_usd);
+                st.record_turn_usage(r);
                 st.record_efficiency(EffRecord {
                     thread: name.to_string(),
                     task: msg.text.chars().take(160).collect(),
@@ -875,6 +877,7 @@ impl App {
             format!("[thread updates]\n{}\n\n{text}", notices.join("\n"))
         };
         let s = self.settings();
+        let prior_cost = self.store.lock().unwrap().session_cost(resume.as_deref());
         let spec = TurnSpec {
             prompt,
             cwd: PathBuf::from(&ws),
@@ -891,6 +894,7 @@ impl App {
             fork_session: false,
             permission_mode: self.project_permission(),
             inject: Some(self.open_injector(key)),
+            prior_cost,
         };
         let app = self.clone();
         let k = key.to_string();
@@ -928,7 +932,7 @@ impl App {
         match result {
             Ok(r) => {
                 let mut st = self.store.lock().unwrap();
-                st.record_usage(&r.backend_used, r.cost_usd);
+                st.record_turn_usage(&r);
                 let o = st.orchestrators.entry(key.into()).or_default();
                 o.cost_usd += r.cost_usd;
                 o.turns += 1;
@@ -1082,6 +1086,7 @@ impl App {
                 fork_session: false,
                 permission_mode: String::new(),
                 inject: None,
+                prior_cost: None,
             };
             let (_tx, mut rx) = watch::channel(false);
             let mut sink = |_: &Value| {};
@@ -1198,6 +1203,7 @@ impl App {
             fork_session: false,
             permission_mode: String::new(),
             inject: None,
+            prior_cost: None,
         };
         let (_tx, mut rx) = watch::channel(false);
         let app = self.clone();

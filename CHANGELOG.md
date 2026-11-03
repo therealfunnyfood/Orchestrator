@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.4 (2026-11-02)
+
+- **Fixed: costs were counted far too high.** Claude Code reports a session's cost as a
+  running total that includes every earlier turn, and the app added that total up again
+  on every turn. Thread, orchestrator and plan/API mix numbers are now each turn's own
+  cost, so they match Claude Code. Because the old numbers were inflated, saved cost
+  history (cost totals, the 24h mix ledger and the efficiency table) restarts from zero
+  on this update. Your project notes and tuning notes are kept.
+- When a plan turn hits a usage limit and falls back to the API, the plan part is now
+  counted as plan.
+- Cost labels now say they're estimates at API prices covering plan and API turns.
+  Only API turns use credits.
+
 ## 0.4.3 (2026-11-02)
 
 - **The orchestrator and its threads now talk throughout the work**, the way a Claude Code

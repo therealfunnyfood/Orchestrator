@@ -1573,7 +1573,7 @@ function renderStatus() {
     item("", `<span class="mono">${esc(inf.isOrch ? "orchestrator" : inf.name)}</span>`, () => goToThread());
     item("", `<span class="mono">${esc(modelLabel(inf.model))}</span>`, () => pickModel(), "Model");
     item("", `effort <span class="mono">${esc(effortLabel(inf.effort))}</span>`, () => pickEffort(), "Reasoning effort");
-    item("", `<span class="mono">${money(inf.cost_usd)}</span>`, null, "API-rate cost so far (plan turns aren't charged)");
+    item("", `<span class="mono">${money(inf.cost_usd)}</span>`, null, "Estimated cost at API prices, plan and API turns together (plan turns use your plan, not credits)");
   }
   item("", theme(S.state.defaults.theme) === "dark" ? "☾" : "☀", () => toggleTheme(), "Toggle theme");
 }
@@ -2053,7 +2053,7 @@ async function renderManage() {
   stat(shown.length, "threads");
   stat(shown.filter((r) => r.busy).length, "running");
   stat(shown.reduce((a, r) => a + r.turns, 0), "turns");
-  stat(money(shown.reduce((a, r) => a + r.cost_usd, 0)), "API-rate cost");
+  stat(money(shown.reduce((a, r) => a + r.cost_usd, 0)), "est. at API prices (plan + API)");
   page.append(stats);
 
   const table = h("table", "grid");
@@ -2127,7 +2127,7 @@ async function efficiencyView() {
     box.append(h("div", "sub", "No finished thread turns recorded yet. The orchestrator uses these stats to tune which model and effort it picks."));
     return box;
   }
-  box.append(h("div", "sub", `${e.turns} thread turns · ${money(e.total_cost)} at API rates. Verdicts are the orchestrator's: right fit / needed stronger / could be cheaper.`));
+  box.append(h("div", "sub", `${e.turns} thread turns · ${money(e.total_cost)} estimated at API prices (plan and API turns). Verdicts are the orchestrator's: right fit / needed stronger / could be cheaper.`));
   const t = h("table", "grid");
   t.innerHTML = "<tr><th>Model</th><th>Effort</th><th class='num'>Turns</th><th class='num'>Avg cost</th><th class='num'>Total</th><th class='num'>Avg time</th><th class='num'>Avg steps</th><th class='num'>Errors</th><th>Verdicts</th></tr>";
   for (const g of [...e.groups].sort((a, b) => b.total_cost - a.total_cost)) {

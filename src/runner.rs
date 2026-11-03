@@ -42,6 +42,11 @@ pub struct TurnSpec {
     /// Messages sent while the turn runs (stream-json user lines, see `user_line`).
     /// Claude Code reads them at its next step, like typing while Claude works.
     pub inject: Option<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>,
+    /// Claude Code's running cost total for the resumed session when it last finished
+    /// (None = not known). Its reported total includes every earlier turn of the
+    /// session (and of the session a fork came from), so a turn's own cost is the
+    /// difference.
+    pub prior_cost: Option<f64>,
 }
 
 /// One stream-json user message for Claude Code's stdin.
@@ -58,7 +63,12 @@ pub struct TurnResult {
     pub session_id: Option<String>,
     pub text: String,
     pub is_error: bool,
+    /// This turn's own API-rate cost.
     pub cost_usd: f64,
+    /// Part of cost_usd that ran on the plan before an auto fallback to api.
+    pub plan_cost: f64,
+    /// Claude Code's running total for the session after this turn (next turn's prior_cost).
+    pub session_total: f64,
     /// Agent steps (model round trips) and wall time of the turn.
     pub steps: u64,
     pub duration_ms: u64,
@@ -167,6 +177,22 @@ pub fn kill_tree(pid: u32) {
     let _ = k.status();
 }
 
+/// Rough share of a session's running total that one run used, from token counts
+/// weighted by price (cache writes 1.25x input, cache reads 0.1x, output 5x). Only
+/// used when the session's earlier total isn't known.
+fn estimate_turn_cost(line: &Value, total: f64) -> f64 {
+    let n = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    let turn = line.get("usage").map_or(0.0, |u| {
+        n(u, "input_tokens") + 1.25 * n(u, "cache_creation_input_tokens") + 0.1 * n(u, "cache_read_input_tokens") + 5.0 * n(u, "output_tokens")
+    });
+    let all: f64 = line.get("modelUsage").and_then(Value::as_object).map_or(0.0, |m| {
+        m.values()
+            .map(|u| n(u, "inputTokens") + 1.25 * n(u, "cacheCreationInputTokens") + 0.1 * n(u, "cacheReadInputTokens") + 5.0 * n(u, "outputTokens"))
+            .sum()
+    });
+    if all <= 0.0 { total } else { total * (turn / all).min(1.0) }
+}
+
 fn looks_limited(line: &Value) -> bool {
     if !line.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
         return false;
@@ -211,6 +237,7 @@ async fn run_once(
         Some(rx) => Some(rx.lock().await),
         None => None,
     };
+    let mut prior = if resume.is_none() { Some(0.0) } else { spec.prior_cost };
     let mut stderr = child.stderr.take().unwrap();
     let stderr_task = tokio::spawn(async move {
         let mut buf = Vec::new();
@@ -227,7 +254,7 @@ async fn run_once(
         tokio::select! {
             line = lines.next_line() => {
                 let Ok(Some(line)) = line else { break };
-                let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                let Ok(mut v) = serde_json::from_str::<Value>(&line) else { continue };
                 if let Some(sid) = v.get("session_id").and_then(Value::as_str) {
                     out.session_id = Some(sid.to_string());
                 }
@@ -246,7 +273,15 @@ async fn run_once(
                         // A message that came in as the turn ended gets one more result.
                         out.text = v.get("result").and_then(Value::as_str).unwrap_or("").to_string();
                         out.is_error = v.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-                        out.cost_usd = out.cost_usd.max(v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0));
+                        let total = v.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
+                        let turn = match prior {
+                            Some(p) => (total - p).max(0.0),
+                            None => estimate_turn_cost(&v, total),
+                        };
+                        prior = Some(total);
+                        out.cost_usd += turn;
+                        out.session_total = total;
+                        v["turn_cost_usd"] = serde_json::json!(turn);
                         out.steps += v.get("num_turns").and_then(Value::as_u64).unwrap_or(0);
                         out.duration_ms += v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
                         out.limited |= looks_limited(&v);
@@ -315,8 +350,9 @@ pub async fn run_turn(
         let plain = TurnSpec { resume_at: None, images: spec.images.clone(), tools: spec.tools.clone(), mcp_config: spec.mcp_config.clone(),
             prompt: spec.prompt.clone(), cwd: spec.cwd.clone(), resume: None, model: spec.model.clone(), effort: spec.effort.clone(),
             backend: spec.backend.clone(), append_system: spec.append_system.clone(), long_tool_calls: spec.long_tool_calls, fork_session: false,
-            permission_mode: spec.permission_mode.clone(), inject: None };
+            permission_mode: spec.permission_mode.clone(), inject: None, prior_cost: Some(result.session_total) };
         let mut retry = run_once(settings, &plain, &retry_prompt, "api", result.session_id.as_deref(), cancel, on_line).await?;
+        retry.plan_cost = result.cost_usd;
         retry.cost_usd += result.cost_usd;
         retry.steps += result.steps;
         retry.duration_ms += result.duration_ms;
