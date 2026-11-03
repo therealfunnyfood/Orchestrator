@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 (2026-11-02)
+
+- **Permission levels**: Full access, Auto, Edits OK (ask for the rest), Ask for
+  everything, or Plan only (read-only), set per project with an optional override per
+  thread. When a thread needs approval, a card shows the exact tool and input with
+  Allow, Always allow (for that thread) or Deny with a reason. Your Claude Code
+  allow and deny rules still apply. The first-run setup now asks which level to use.
+- **One-click updates**: when a new release is out, ⬆ update in the status bar
+  downloads it, checks its SHA-256 against the release's checksum file, closes the app,
+  updates it and reopens it.
+- Long waits (approvals, questions, `wait_for_threads`) no longer time out after five
+  minutes: tool calls now stream progress while they wait.
+
 ## 0.3.1 (2026-11-02)
 
 - If Orchestrator was first run from inside a packaged app such as the Claude

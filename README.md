@@ -6,9 +6,10 @@ in parallel. You can watch every thread live, talk to any of them directly, and 
 usage down with per-thread model and effort choices that the orchestrator tunes over
 time.
 
-Threads run Claude Code with **permissions bypassed**. They can run commands and edit
-files in the workspace folder without asking, so only point it at folders you're
-comfortable with that.
+You choose how much threads may do without asking, from full access to read-only
+(see [Permission levels](#permission-levels)). At *Full access* they can run commands
+and edit files in the workspace without asking, so only use that level on folders
+you're comfortable with.
 
 ## Requirements
 
@@ -33,6 +34,10 @@ The installer is unsigned, so Windows SmartScreen may warn you. Choose
 *More info → Run anyway*. It needs the Microsoft Edge WebView2 Runtime, which is
 built into Windows 11; the installer links to it if it's missing.
 
+To update, click **⬆ update** in the status bar when a new version is out. It
+downloads the installer, checks it against the release's checksum, and restarts into
+the new version. You can also run a newer installer by hand.
+
 To uninstall, use Settings → Apps → Installed apps → Orchestrator.
 
 ## Using it
@@ -53,6 +58,26 @@ To uninstall, use Settings → Apps → Installed apps → Orchestrator.
   Right-click the tray icon → Quit to stop.
 
 Type `/` for commands, or press Ctrl+Shift+P for the command palette.
+
+### Permission levels
+
+Set per project (🛡 in the status bar, `/permissions`, or Settings). Each thread can
+override it from the Threads tab.
+
+| Level | What threads can do without asking |
+|---|---|
+| Full access | everything |
+| Auto | routine actions; Claude Code's safety check asks you about risky ones |
+| Edits OK, ask for the rest | edit files; commands and other actions need your OK |
+| Ask for everything | read; anything that changes something asks first |
+| Plan only | read and plan; nothing can be changed |
+
+An approval shows up as a card in the thread's chat with the tool and its input, and
+the sidebar marks the thread with **?**. You can choose **Allow**, **Always allow**
+(that tool, in that thread) or **Deny**, and add a note telling the agent what to do
+instead. Your own Claude Code permission rules (`allow` and `deny` in
+`~/.claude/settings.json` and project settings) still apply on top of the level. For
+example, if you've allowed `Bash`, shell commands won't ask.
 
 ### Usage and cost
 
@@ -101,8 +126,8 @@ Settings are stored in `%APPDATA%\Orchestrator`, and threads and transcripts in
 Orchestrator has no telemetry. Everything stays on your computer except:
 
 - the work itself, which Claude Code sends to Anthropic under your plan or API key;
-- an update check that asks GitHub for the latest release. You can turn it off in
-  Settings → About.
+- an update check that asks GitHub for the latest release, and the installer
+  download when you choose to update. You can turn the check off in Settings → About.
 
 The local server listens only on 127.0.0.1 and requires a random token that changes
 every launch. Your API key is stored in `%APPDATA%\Orchestrator\settings.json`.

@@ -32,6 +32,10 @@ pub struct ThreadRow {
     pub last_uuid: Option<String>,
     /// The session came from Claude Code; fork it on the first turn so the original stays untouched.
     pub fork_pending: bool,
+    /// Permission level override ("" = the project's level).
+    pub permission: String,
+    /// Tools the user chose "always allow" for in this thread.
+    pub always_allow: Vec<String>,
 }
 
 impl Default for ThreadRow {
@@ -53,6 +57,8 @@ impl Default for ThreadRow {
             updated_at: 0.0,
             last_uuid: None,
             fork_pending: false,
+            permission: String::new(),
+            always_allow: vec![],
         }
     }
 }
@@ -82,6 +88,8 @@ pub struct Store {
     pub usage: Vec<(f64, String, f64, String)>,
     /// Plan/API mix per workspace (0 = all plan, 10 = all API).
     pub mixes: BTreeMap<String, u8>,
+    /// Permission level per workspace.
+    pub permissions: BTreeMap<String, String>,
     /// Latest plan usage limits reported by Claude Code (rate_limit_info), with when we saw it.
     pub plan_usage: Option<serde_json::Value>,
     /// One record per finished thread turn, for the orchestrator's self-tuning.
@@ -182,6 +190,16 @@ impl Store {
     /// This project's plan/API mix, or `default` if it hasn't been set.
     pub fn mix(&self, default: u8) -> u8 {
         self.mixes.iter().find(|(k, _)| same_path(k, &self.workspace)).map(|(_, v)| *v).unwrap_or(default)
+    }
+
+    pub fn permission(&self, default: &str) -> String {
+        self.permissions.iter().find(|(k, _)| same_path(k, &self.workspace)).map(|(_, v)| v.clone()).unwrap_or_else(|| default.to_string())
+    }
+
+    pub fn set_permission(&mut self, value: &str) {
+        let ws = self.workspace.clone();
+        self.permissions.retain(|k, _| !same_path(k, &ws));
+        self.permissions.insert(ws, value.to_string());
     }
 
     pub fn set_mix(&mut self, value: u8) {

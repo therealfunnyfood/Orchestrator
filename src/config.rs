@@ -9,6 +9,16 @@ use std::path::PathBuf;
 
 pub const BACKENDS: [&str; 3] = ["plan", "api", "auto"];
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// Claude Code permission modes offered as permission levels, most to least access.
+pub const PERMISSIONS: [&str; 5] = ["bypassPermissions", "auto", "acceptEdits", "manual", "plan"];
+
+pub fn check_permission(p: &str) -> Result<(), String> {
+    if PERMISSIONS.contains(&p) {
+        Ok(())
+    } else {
+        Err(format!("permission level must be one of {}", PERMISSIONS.join(", ")))
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -36,6 +46,8 @@ pub struct Settings {
     pub setup_done: bool,
     /// Check GitHub for a newer release (at startup and twice a day).
     pub check_updates: bool,
+    /// Permission level for projects that haven't set one.
+    pub permission_default: String,
 }
 
 impl Default for Settings {
@@ -55,6 +67,7 @@ impl Default for Settings {
             max_effort: "high".into(),
             setup_done: false,
             check_updates: true,
+            permission_default: "bypassPermissions".into(),
         }
     }
 }

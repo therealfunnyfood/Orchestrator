@@ -13,6 +13,14 @@ function h(tag, cls, text) {
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const PERMS = [
+  ["bypassPermissions", "Full access", "Never asks. Threads can run any command and edit any file."],
+  ["auto", "Auto", "Claude Code's safety check approves routine actions and asks you about risky ones."],
+  ["acceptEdits", "Edits OK, ask for the rest", "File edits run freely; commands and other actions need your OK."],
+  ["manual", "Ask for everything", "Reading is free; anything that changes something asks you first."],
+  ["plan", "Plan only", "Read-only: threads can look and plan but not change anything."],
+];
+const permLabel = (p) => (PERMS.find((x) => x[0] === p) || [p, p])[1];
 const mixLabel = (m) => m === 0 ? "all plan" : m === 10 ? "all API" : `${10 - m} plan · ${m} API`;
 const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"];
 const SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
@@ -673,7 +681,7 @@ function setupSteps() {
   if (SETUP.mode === "plan" || SETUP.mode === "both") s.push("plan");
   if (SETUP.mode === "api" || SETUP.mode === "both") s.push("api");
   if (SETUP.mode === "both") s.push("mix");
-  s.push("done");
+  s.push("perms", "done");
   return s;
 }
 
@@ -821,6 +829,19 @@ async function drawSetup() {
     setupNav(box);
   }
 
+  if (SETUP.step === "perms") {
+    box.append(h("h1", null, "How much can threads do on their own?"));
+    box.append(h("p", "lead", "Threads are Claude Code agents. Choose how often they should stop and ask you. You can change this per project or per thread later."));
+    SETUP.perm = SETUP.perm || "acceptEdits";
+    for (const [v, l, d] of PERMS) {
+      const c = h("button", "choice" + (SETUP.perm === v ? " sel" : ""));
+      c.innerHTML = `<span class="ic">${v === "bypassPermissions" ? "⚡" : v === "plan" ? "◇" : "🛡"}</span><span><b>${esc(l)}${v === "acceptEdits" ? " (recommended)" : ""}</b><span>${esc(d)}</span></span>`;
+      c.onclick = () => { SETUP.perm = v; drawSetup(); };
+      box.append(c);
+    }
+    setupNav(box);
+  }
+
   if (SETUP.step === "done") {
     box.append(h("h1", null, "You're set up"));
     const lines = {
@@ -829,12 +850,12 @@ async function drawSetup() {
       both: `About ${SETUP.mix}/10 of the work runs on API credits, the rest on your plan.`,
     };
     box.append(h("p", "lead", `${lines[SETUP.mode] || ""} Pick a project folder as your workspace (bottom of the window), or import a Claude Code project with /import, then tell the orchestrator what to build.`));
-    const note = h("div", "note", "Threads run Claude Code with permissions bypassed: they can run commands and edit files in the workspace without asking. Choose folders you're comfortable with that.");
+    const note = h("div", "note", `Permission level: ${permLabel(SETUP.perm)}. ${SETUP.perm === "bypassPermissions" ? "Threads can run commands and edit files in the workspace without asking, so choose folders you're comfortable with that." : "When a thread needs your OK, a card appears in its chat and the sidebar shows a ?."}`);
     box.append(note);
     setupNav(box, {
       next: "Start using Orchestrator",
       onNext: async () => {
-        await api("/api/setup/finish", { body: { mode: SETUP.mode, mix: SETUP.mix } }).catch(fail);
+        await api("/api/setup/finish", { body: { mode: SETUP.mode, mix: SETUP.mix, permission: SETUP.perm } }).catch(fail);
         closeSetup();
         return false;
       },
@@ -1178,6 +1199,20 @@ function wireSplit() {
   });
 }
 
+async function updateNow(upd) {
+  const it = await quickPick([
+    { label: `Update to ${upd.version} now`, desc: "downloads, verifies, closes, updates and reopens", value: "now" },
+    { label: "See what's new", desc: "opens the release page", value: "notes" },
+  ], `Orchestrator ${upd.version} is available. Running threads stop and can be continued after.`);
+  if (!it) return;
+  if (it.value === "notes") return openUrl(upd.url);
+  toast("Downloading the update…");
+  try {
+    await api("/api/update/install", { body: {} });
+    toast("Updating: Orchestrator will reopen in a few seconds");
+  } catch (e) { fail(e); }
+}
+
 function openUrl(url) {
   return api("/api/open-url", { body: { url } }).catch(fail);
 }
@@ -1237,9 +1272,10 @@ function mediaView(ev) {
 // ---------------------------------------------------------------- questions
 
 function questionCard(ev) {
-  const card = h("div", "ev question");
+  const card = h("div", "ev question" + (ev.permission ? " perm" : ""));
   card.dataset.id = ev.id;
-  card.append(h("div", "q-head", "needs your input"));
+  card.append(h("div", "q-head", ev.permission ? `permission · ${toolName(ev.permission.tool)}` : "needs your input"));
+  if (ev.permission?.input && ev.permission.input !== "{}") card.append(h("div", "perm-input", ev.permission.input));
   const qs = Array.isArray(ev.questions) ? ev.questions : [];
   qs.forEach((q, qi) => {
     const multi = !!q.multi_select;
@@ -1472,6 +1508,7 @@ function renderChips() {
     ? "Queue a message — it runs when the current turn finishes…"
     : inf.isOrch ? "Message the orchestrator…" : `Message ${inf.name}…`;
   chip("target", "to", inf.isOrch ? "orchestrator" : inf.name, () => goToThread(), "Switch conversation (Ctrl+P)");
+  chip("", "access", permLabel(inf.permission_effective || S.state.permission), () => pickPermission(k), "Permission level");
   chip("", "mix", mixLabel(S.state.usage.mix), (e) => mixPopover(e.currentTarget), "Plan/API mix for this whole project");
   chip("", "model", modelLabel(inf.model), () => pickModel(), "Model for this conversation");
   chip("", "effort", effortLabel(inf.effort), () => pickEffort(), "Reasoning effort for this conversation");
@@ -1504,7 +1541,7 @@ function renderStatus() {
   }
   const u = S.state.usage;
   const upd = S.state.app?.update;
-  if (upd) item("wait", `⬆ update ${esc(upd.version)}`, () => openUrl(upd.url), "A new version of Orchestrator is available");
+  if (upd) item("wait", `⬆ update ${esc(upd.version)}`, () => updateNow(upd), "A new version of Orchestrator is available: click to update");
   const pu = S.state.plan_usage?.unifiedWindows;
   if (pu?.five_hour) {
     const f = pu.five_hour.utilization, w = pu.seven_day?.utilization ?? 0;
@@ -1518,6 +1555,7 @@ function renderStatus() {
     puItem.style.cursor = "pointer";
     puItem.onclick = () => usagePopover(puItem);
   }
+  item(S.state.permission === "bypassPermissions" ? "perm-open" : "", `🛡 ${esc(permLabel(S.state.permission))}`, () => pickPermission(orchKey()), "Permission level for this project");
   const mixItem = item("", `⚖ <span class="mono">${esc(mixLabel(u.mix))}</span>`, null, "Plan/API mix for this project");
   mixItem.style.cursor = "pointer";
   mixItem.onclick = () => mixPopover(mixItem);
@@ -1651,6 +1689,21 @@ async function pickEffort(key = curKey()) {
   if (it) await configure(key, { effort: it.value }).then(() => toast(`effort: ${it.value || "default"}`)).catch(fail);
 }
 
+async function pickPermission(key = curKey()) {
+  const thread = key && !isOrch(key) ? threadRow(key) : null;
+  const project = S.state.permission;
+  const items = [];
+  if (thread) items.push({ label: `Project default (${permLabel(project)})`, desc: "follow the project's level", value: "", current: !thread.permission });
+  for (const [v, l, d] of PERMS) items.push({ label: l, desc: d, value: v, current: thread ? thread.permission === v : project === v });
+  const it = await quickPick(items, thread ? `Permission level for ${thread.name}` : "Permission level for this project (every thread without its own)");
+  if (!it) return;
+  try {
+    await api("/api/permission", { body: { thread: thread ? thread.name : "", level: it.value } });
+    await loadState();
+    toast(`${thread ? thread.name : "project"}: ${it.value ? permLabel(it.value) : "project default"} (from the next turn)`);
+  } catch (e) { fail(e); }
+}
+
 async function goToThread() {
   const o = S.state.orchestrator;
   const items = [{ label: "orchestrator", desc: baseName(S.state.workspace), key: "Ctrl+1", value: o.name },
@@ -1694,7 +1747,7 @@ async function threadMenu(name) {
   const items = [
     { label: "Open", value: "open" }, { label: "Open to the side", desc: "Alt+click", value: "side" },
     { label: "Open in new window", desc: "Shift+click", value: "pop" }, { label: "Stop", value: "stop" },
-    { label: "Set model…", value: "model" }, { label: "Set effort…", value: "effort" },
+    { label: "Set model…", value: "model" }, { label: "Set permission level…", value: "perm" }, { label: "Set effort…", value: "effort" },
     { label: "Delete", desc: "forget the conversation; files stay", value: "delete" },
   ];
   const it = await quickPick(items, name);
@@ -1704,6 +1757,7 @@ async function threadMenu(name) {
   if (it.value === "pop") popOut(name);
   if (it.value === "stop") api("/api/stop", { body: { thread: name } }).then((r) => toast(r.stopped ? "stopped" : "not running")).catch(fail);
   if (it.value === "model") pickModel(name);
+  if (it.value === "perm") pickPermission(name);
   if (it.value === "effort") pickEffort(name);
   if (it.value === "delete") deleteThread(name);
 }
@@ -1723,6 +1777,13 @@ const COMMANDS = [
   { cmd: "/stop", args: "[thread]", desc: "Stop the running turn (Esc)", cat: "Thread", complete: "thread", run: (a) => stopTurn(a) },
   { cmd: "/effort", args: "<level>", desc: "Reasoning effort for this conversation", cat: "Config", complete: "effort", run: (a) => a ? setField("effort", a === "default" ? "" : a) : pickEffort() },
   { cmd: "/model", args: "<model>", desc: "Model for this conversation", cat: "Config", complete: "model", run: (a) => a ? setField("model", a === "default" ? "" : a) : pickModel() },
+  { cmd: "/permissions", args: "[level]", desc: "Permission level (project, or this thread)", cat: "Config", complete: "perm", run: (a) => {
+    if (!a) return pickPermission(curKey());
+    const p = PERMS.find((x) => x[0].toLowerCase() === a.toLowerCase() || x[1].toLowerCase().startsWith(a.toLowerCase()));
+    if (!p) throw new Error("levels: " + PERMS.map((x) => x[0]).join(", "));
+    const k = curKey();
+    return api("/api/permission", { body: { thread: k && !isOrch(k) ? k : "", level: p[0] } }).then(loadState).then(() => toast(`permission: ${p[1]}`));
+  } },
   { cmd: "/usage", args: "", desc: "Show your plan's usage limits", cat: "Config", run: () => usagePopover($("#composer")) },
   { cmd: "/mix", args: "<0-10>", desc: "Plan/API mix for the whole project (0 = all plan, 10 = all API)", cat: "Config", complete: "mix", run: (a) => {
     if (a === "") return mixPopover($("#composer"));
@@ -1849,6 +1910,7 @@ function suggestions(value) {
     ...S.state.threads.map((t) => ({ v: t.name, d: `${stClass(t)} · ${effortLabel(t.effort)}` }))];
   if (cmd.complete === "effort") vals = [{ v: "default", d: "the model's default" }, ...EFFORTS.map((e) => ({ v: e, d: EFFORT_DESC[e] }))];
   if (cmd.complete === "model") vals = [{ v: "default", d: "" }, ...MODELS.map((m) => ({ v: m, d: "" }))];
+  if (cmd.complete === "perm") vals = PERMS.map(([v, l, d]) => ({ v, d: `${l}: ${d}` }));
   if (cmd.complete === "mix") vals = [...Array(11).keys()].map((m) => ({ v: String(m), d: mixLabel(m) }));
   if (cmd.complete === "workspace") vals = S.state.recent_workspaces.map((p) => ({ v: p, d: baseName(p) }));
   if (cmd.complete === "theme") vals = [{ v: "dark", d: "" }, { v: "light", d: "" }];
@@ -1988,7 +2050,7 @@ async function renderManage() {
   page.append(stats);
 
   const table = h("table", "grid");
-  table.innerHTML = "<tr><th>Thread</th><th>Status</th><th>Model</th><th>Effort</th><th class='num'>Turns</th><th class='num'>Cost</th><th>Folder</th><th>Updated</th><th></th></tr>";
+  table.innerHTML = "<tr><th>Thread</th><th>Status</th><th>Access</th><th>Model</th><th>Effort</th><th class='num'>Turns</th><th class='num'>Cost</th><th>Folder</th><th>Updated</th><th></th></tr>";
   for (const r of [...shown].sort((a, b) => b.updated_at - a.updated_at)) {
     const tr = h("tr");
     const here = r.workspace.toLowerCase() === S.state.workspace.toLowerCase();
@@ -2006,7 +2068,9 @@ async function renderManage() {
       const s = h("select");
       for (const [v, l] of opts) { const o = h("option", null, l); o.value = v; s.append(o); }
       s.value = value;
-      s.onchange = () => configure(r.name, { [field]: s.value }).then(() => toast(`${r.name}: ${field} ${s.value || "default"}`)).catch(fail);
+      s.onchange = () => (field === "permission"
+        ? api("/api/permission", { body: { thread: r.name, level: s.value } }).then(loadState)
+        : configure(r.name, { [field]: s.value })).then(() => toast(`${r.name}: ${field} ${s.value || "default"}`)).catch(fail);
       td.append(s);
       return td;
     };
@@ -2031,6 +2095,7 @@ async function renderManage() {
     del.onclick = () => deleteThread(r.name);
     acts.append(del);
     tr.append(name, st,
+      sel([["", `project (${permLabel(S.state.permission)})`], ...PERMS.map(([v, l]) => [v, l])], r.permission || "", "permission"),
       model,
       sel([["", "default"], ...EFFORTS.map((e) => [e, e])], r.effort, "effort"),
       h("td", "num", String(r.turns)), h("td", "num", money(r.cost_usd)), folder,
@@ -2153,6 +2218,16 @@ async function renderSettings() {
     b.onclick = openSetup;
     setting("Billing", "Setup", "Sign in to a Claude plan and/or add an API key, step by step.", b);
   }
+  section("Permissions");
+  {
+    const el = h("select");
+    for (const [v, l, d] of PERMS) { const o = h("option", null, `${l}: ${d}`); o.value = v; el.append(o); }
+    el.value = S.state.permission;
+    el.onchange = () => api("/api/permission", { body: { level: el.value } }).then(() => { toast("saved"); loadState(); }).catch(fail);
+    setting("Permissions", "This project", "How much threads may do without asking you. Approvals appear as cards in the chat. Each thread can override it (Threads tab). Your Claude Code allow and deny rules still apply.", el);
+  }
+  setting("Permissions", "Default for new projects", "", select("permission_default", PERMS.map(([v, l]) => [v, l]), s.permission_default || "bypassPermissions"));
+
   section("Orchestrator");
   setting("Orchestrator", "Model", "Blank uses Claude Code's default.", text("orch_model", s.orch_model, "default", "models"));
   setting("Orchestrator", "Effort", "Reasoning effort for the orchestrator.", select("orch_effort", effortOpts, s.orch_effort));
@@ -2180,7 +2255,7 @@ async function renderSettings() {
       chk.disabled = true;
       try {
         const r = await api("/api/check-update", { body: {} });
-        toast(r.update ? `Version ${r.update.version} is available` : `You're on the latest version (${r.version})`);
+        toast(r.update ? `Version ${r.update.version} is available: click ⬆ update in the status bar` : `You're on the latest version (${r.version})`);
         await loadState();
       } catch (e) { fail(e); }
       chk.disabled = false;

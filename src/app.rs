@@ -1,6 +1,6 @@
 //! Core state: threads, the per-workspace orchestrator, and running turns.
 
-use crate::config::{check_backend, check_effort, Paths, Settings};
+use crate::config::{check_backend, check_effort, check_permission, Paths, Settings};
 use crate::claude_projects::{self, SessionInfo};
 use crate::events::Hub;
 use crate::runner::{run_turn, TurnError, TurnSpec};
@@ -20,6 +20,9 @@ given end to end without asking for permission. When you finish a turn, end with
 what you did, what changed (files, commands), and anything left open. That summary is what the \
 orchestrator reads.
 
+Depending on the project's permission level, some actions may need the user's approval. If one is
+denied, don't retry it the same way: adjust your approach, or explain what you need and why.
+
 You have tools from the `app` MCP server, shown to the user in their window:
 - update_plan: for work with several steps, keep a task list (send the whole list each time;
   exactly one item in_progress while working). The user sees it live.
@@ -30,7 +33,7 @@ You have tools from the `app` MCP server, shown to the user in their window:
 
 const ORCH_APPEND: &str = r#"
 You are the orchestrator. The user talks to you; you get work done by managing worker threads.
-Each thread is a full Claude Code agent running in bypass-permissions mode, and it keeps its own
+Each thread is a full Claude Code agent with its own working folder, and it keeps its own
 conversation history. Your thread tools come from the "app" MCP server.
 
 How to work:
@@ -211,6 +214,8 @@ impl App {
         v["plan"] = self.store.lock().unwrap().plans.get(key).cloned().unwrap_or(json!([]));
         v["needs_input"] = json!(self.questions.lock().unwrap().values().any(|q| q.key == key));
         v["started_at"] = json!(self.started.lock().unwrap().get(key));
+        let thread_perm = self.store.lock().unwrap().get(key).map(|t| t.permission.clone()).unwrap_or_default();
+        v["permission_effective"] = json!(if thread_perm.is_empty() { self.project_permission() } else { thread_perm });
         let queue: Vec<Value> = self.queues.lock().unwrap().get(key).map(|q| {
             q.iter().map(|m| json!({"id": m.id, "text": m.text, "attachments": m.attach, "sender": m.sender, "edit": m.fork.is_some()})).collect()
         }).unwrap_or_default();
@@ -255,6 +260,7 @@ impl App {
             },
             "app": {"version": crate::updates::VERSION, "repo": crate::updates::REPO, "update": self.update.lock().unwrap().clone()},
             "usage": self.usage_json(),
+            "permission": self.project_permission(),
             "plan_usage": self.store.lock().unwrap().plan_usage.clone(),
         })
     }
@@ -523,6 +529,7 @@ impl App {
             long_tool_calls: true,
             images,
             fork_session: row.fork_pending && msg.fork.is_none(),
+            permission_mode: self.permission_for(&row),
         };
         let settings = self.settings();
         let app = self.clone();
@@ -707,6 +714,7 @@ impl App {
             long_tool_calls: true,
             images,
             fork_session: false,
+            permission_mode: self.project_permission(),
         };
         let app = self.clone();
         let k = key.to_string();
@@ -832,6 +840,10 @@ impl App {
         if let Some(v) = patch.get("check_updates").and_then(Value::as_bool) {
             s.check_updates = v;
         }
+        if let Some(v) = patch.get("permission_default").and_then(Value::as_str) {
+            check_permission(v)?;
+            s.permission_default = v.into();
+        }
         if let Some(v) = patch.get("max_effort").and_then(Value::as_str) {
             check_effort(v)?;
             s.max_effort = v.into();
@@ -857,7 +869,9 @@ impl App {
             "api_mix": s.api_mix,
             "max_effort": s.max_effort,
             "check_updates": s.check_updates,
+            "permission_default": s.permission_default,
             "usage": self.usage_json(),
+            "permission": self.project_permission(),
             "plan_usage": self.store.lock().unwrap().plan_usage.clone(),
             "config_file": self.paths.settings_file().to_string_lossy(),
             "data_dir": self.paths.data_dir.to_string_lossy(),
@@ -887,6 +901,7 @@ impl App {
                 images: vec![],
                 resume_at: None,
                 fork_session: false,
+                permission_mode: String::new(),
             };
             let (_tx, mut rx) = watch::channel(false);
             let mut sink = |_: &Value| {};
@@ -921,10 +936,21 @@ impl App {
 
     /// Post multiple-choice questions to the user and wait for the answers.
     pub async fn ask_user(self: &Arc<Self>, key: &str, questions: Value) -> Result<Value, String> {
-        let id = format!("q{}", (now() * 1000.0) as u64);
+        self.ask_user_with(key, questions, json!({})).await
+    }
+
+    /// Like ask_user, with extra fields on the question event (e.g. a permission request).
+    pub async fn ask_user_with(self: &Arc<Self>, key: &str, questions: Value, extra: Value) -> Result<Value, String> {
+        let id = format!("q{}-{:04x}", (now() * 1000.0) as u64, rand::random::<u16>());
         let (tx, rx) = oneshot::channel();
         self.questions.lock().unwrap().insert(id.clone(), PendingQuestion { key: key.into(), tx });
-        self.hub.emit(key, json!({"kind": "question", "id": id, "questions": questions}));
+        let mut ev = json!({"kind": "question", "id": id, "questions": questions});
+        if let Some(obj) = extra.as_object() {
+            for (k, v) in obj {
+                ev[k] = v.clone();
+            }
+        }
+        self.hub.emit(key, ev);
         self.touch();
         crate::attention();
 
@@ -990,6 +1016,7 @@ impl App {
             images: vec![],
             resume_at: None,
             fork_session: false,
+            permission_mode: String::new(),
         };
         let (_tx, mut rx) = watch::channel(false);
         let app = self.clone();
@@ -1000,6 +1027,85 @@ impl App {
             Err(TurnError::Stopped) => return Err("stopped".into()),
         }
         self.store.lock().unwrap().plan_usage.clone().ok_or("Claude Code didn't report plan usage (is the CLI logged in with a Claude plan?)".into())
+    }
+
+    /// This project's permission level.
+    pub fn project_permission(&self) -> String {
+        let default = self.settings().permission_default;
+        self.store.lock().unwrap().permission(&default)
+    }
+
+    fn permission_for(&self, row: &ThreadRow) -> String {
+        if row.permission.is_empty() { self.project_permission() } else { row.permission.clone() }
+    }
+
+    pub fn set_project_permission(&self, level: &str) -> Result<(), String> {
+        check_permission(level)?;
+        let mut st = self.store.lock().unwrap();
+        st.set_permission(level);
+        st.save();
+        drop(st);
+        self.touch();
+        Ok(())
+    }
+
+    pub fn set_thread_permission(&self, name: &str, level: &str) -> Result<(), String> {
+        if !level.is_empty() {
+            check_permission(level)?;
+        }
+        let mut st = self.store.lock().unwrap();
+        let row = st.get_mut(name).ok_or(format!("no thread named '{name}'"))?;
+        row.permission = level.into();
+        st.save();
+        drop(st);
+        self.touch();
+        Ok(())
+    }
+
+    /// Claude Code asks before running a tool: show the user a card and wait.
+    /// Returns the permission-prompt-tool answer ({"behavior": "allow" | "deny", ...}).
+    pub async fn approve(self: &Arc<Self>, key: &str, tool: &str, input: Value) -> Value {
+        let allow = |input: &Value| json!({"behavior": "allow", "updatedInput": input});
+        // The app's own tools (task list, questions, thread management) never need a prompt.
+        if tool.starts_with("mcp__app__") {
+            return allow(&input);
+        }
+        if self.store.lock().unwrap().get(key).is_some_and(|t| t.always_allow.iter().any(|a| a == tool)) {
+            return allow(&input);
+        }
+        let preview = crate::events::clip(&serde_json::to_string_pretty(&input).unwrap_or_default());
+        let short = tool.trim_start_matches("mcp__");
+        let questions = json!([{
+            "header": "Permission",
+            "question": format!("Allow {short}?"),
+            "options": [
+                {"label": "Allow", "description": "Just this once"},
+                {"label": format!("Always allow {short}"), "description": "In this conversation, from now on"},
+                {"label": "Deny", "description": "Type a reason below to tell the agent what to do instead"},
+            ],
+        }]);
+        let extra = json!({"permission": {"tool": tool, "input": preview}});
+        let Ok(answer) = self.ask_user_with(key, questions, extra).await else {
+            return json!({"behavior": "deny", "message": "The permission request was cancelled."});
+        };
+        let selected: Vec<String> = answer.pointer("/0/selected").and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let other = answer.pointer("/0/other").and_then(Value::as_str).unwrap_or("").trim().to_string();
+        if selected.iter().any(|s| s.starts_with("Always")) {
+            let mut st = self.store.lock().unwrap();
+            if let Some(t) = st.get_mut(key) {
+                if !t.always_allow.iter().any(|a| a == tool) {
+                    t.always_allow.push(tool.to_string());
+                }
+            }
+            st.save();
+            return allow(&input);
+        }
+        if selected.iter().any(|s| s == "Allow") {
+            return allow(&input);
+        }
+        let message = if other.is_empty() { "The user denied this action.".to_string() } else { format!("The user denied this action: {other}") };
+        json!({"behavior": "deny", "message": message})
     }
 
     /// This project's plan/API mix (0 = all plan, 10 = all API).

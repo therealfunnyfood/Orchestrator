@@ -97,7 +97,10 @@ fn main() {
     // --dir <path>: install somewhere else; --no-shortcuts / --no-register skip those steps.
     let args: Vec<String> = std::env::args().collect();
     let flag = |f: &str| args.iter().any(|a| a == f);
-    let silent = flag("--silent");
+    // --update: started by the app's "Update now": no questions, wait for the app to
+    // quit, update it and reopen it.
+    let update_mode = flag("--update");
+    let silent = flag("--silent") || update_mode;
     let dir = args.iter().position(|a| a == "--dir").and_then(|i| args.get(i + 1)).map(PathBuf::from).unwrap_or_else(install_dir);
     let exe = dir.join("orchestrator.exe");
     let upgrading = exe.exists();
@@ -133,6 +136,18 @@ fn main() {
         return;
     }
 
+    if update_mode {
+        // The app quits on its own right after starting us; give it a moment.
+        for _ in 0..40 {
+            if !running_installed(&exe) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if running_installed(&exe) {
+            stop_installed(&exe);
+        }
+    }
     if running_installed(&exe) {
         if silent {
             std::process::exit(3); // never stop a running copy without asking
@@ -156,6 +171,16 @@ fn main() {
     if let Err(e) = std::fs::write(&tmp, APP).and_then(|_| std::fs::rename(&tmp, &exe)) {
         let _ = std::fs::remove_file(&tmp);
         fail(&format!("Couldn't write {}:\n{e}", exe.display()));
+    }
+    if update_mode {
+        if !flag("--no-shortcuts") {
+            shortcuts(&exe);
+        }
+        if !flag("--no-register") {
+            register(&dir, &exe);
+        }
+        let _ = Command::new(&exe).current_dir(&dir).spawn();
+        return;
     }
     if !flag("--no-shortcuts") && !shortcuts(&exe) && !silent {
         dialog(

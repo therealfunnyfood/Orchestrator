@@ -1,5 +1,5 @@
 //! Orchestrator: a desktop app where an orchestrator agent runs parallel
-//! Claude Code threads (permissions bypassed), each viewable and chattable.
+//! Claude Code threads, each viewable and chattable, at a permission level you choose.
 //!
 //!   orchestrator.exe                     native window (closing it keeps running in the tray)
 //!   orchestrator.exe --serve [--port N]  server only; prints the URL (for a browser)
@@ -33,6 +33,8 @@ enum UiEvent {
     PopOut { key: String, title: String },
     /// Bring the main window back (tray click, or a second launch of the app).
     Show,
+    /// Close everything (e.g. so the installer can update the app).
+    Quit,
     Tray(tray_icon::TrayIconEvent),
     Menu(tray_icon::menu::MenuEvent),
 }
@@ -51,6 +53,16 @@ pub fn pop_out(key: &str, title: &str) -> bool {
     match PROXY.get() {
         Some(p) => p.lock().unwrap().send_event(UiEvent::PopOut { key: key.into(), title: title.into() }).is_ok(),
         None => false,
+    }
+}
+
+/// Quit the app (window mode), or the process (--serve). Used before updating.
+pub fn quit_app() {
+    match PROXY.get() {
+        Some(p) => {
+            let _ = p.lock().unwrap().send_event(UiEvent::Quit);
+        }
+        None => std::process::exit(0),
     }
 }
 
@@ -245,6 +257,7 @@ fn run_windows(app: Arc<app::App>, url: String) {
         let mut quit = false;
         match event {
             Event::UserEvent(UiEvent::Show) => show(&main_window),
+            Event::UserEvent(UiEvent::Quit) => quit = true,
             Event::UserEvent(UiEvent::Tray(tray_icon::TrayIconEvent::Click {
                 button: tray_icon::MouseButton::Left,
                 button_state: tray_icon::MouseButtonState::Up,

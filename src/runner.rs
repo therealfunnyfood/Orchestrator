@@ -36,6 +36,9 @@ pub struct TurnSpec {
     /// Continue `resume` under a new session id, leaving the original untouched
     /// (used for conversations imported from Claude Code).
     pub fork_session: bool,
+    /// Claude Code permission mode. Anything but bypassPermissions routes approvals
+    /// to the app's `approve` tool (needs mcp_config).
+    pub permission_mode: String,
 }
 
 #[derive(Default)]
@@ -68,7 +71,12 @@ fn launched_inside_claude() -> bool {
 fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Option<&str>) -> Result<Command, String> {
     let mut cmd = Command::new(settings.claude_exe());
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
-    cmd.args(["--include-partial-messages", "--permission-mode", "bypassPermissions"]);
+    let mode = if spec.permission_mode.is_empty() { "bypassPermissions" } else { spec.permission_mode.as_str() };
+    cmd.args(["--include-partial-messages", "--permission-mode", mode]);
+    if mode != "bypassPermissions" && spec.mcp_config.is_some() {
+        // Approvals show up in the app as cards (see mcp.rs `approve`).
+        cmd.args(["--permission-prompt-tool", "mcp__app__approve"]);
+    }
     cmd.arg("--setting-sources=user,project,local");
     // Questions go through the app's own ask_user tool (rendered as clickable cards).
     cmd.args(["--disallowedTools", "AskUserQuestion"]);
@@ -262,7 +270,8 @@ pub async fn run_turn(
         );
         let plain = TurnSpec { resume_at: None, images: spec.images.clone(), tools: spec.tools.clone(), mcp_config: spec.mcp_config.clone(),
             prompt: spec.prompt.clone(), cwd: spec.cwd.clone(), resume: None, model: spec.model.clone(), effort: spec.effort.clone(),
-            backend: spec.backend.clone(), append_system: spec.append_system.clone(), long_tool_calls: spec.long_tool_calls, fork_session: false };
+            backend: spec.backend.clone(), append_system: spec.append_system.clone(), long_tool_calls: spec.long_tool_calls, fork_session: false,
+            permission_mode: spec.permission_mode.clone() };
         let mut retry = run_once(settings, &plain, &retry_prompt, "api", result.session_id.as_deref(), cancel, on_line).await?;
         retry.cost_usd += result.cost_usd;
         retry.steps += result.steps;

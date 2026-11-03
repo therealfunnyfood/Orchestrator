@@ -1,7 +1,7 @@
 //! Local HTTP server behind the window: UI, JSON API, live websocket, and the
 //! orchestrator's MCP endpoint.
 //!
-//! Threads run with permissions bypassed, so this server is effectively remote
+//! Threads can run with permissions bypassed, so this server is effectively remote
 //! code execution for anyone who can call it. It listens on 127.0.0.1 only,
 //! checks the Host header (DNS rebinding) and requires a random per-launch
 //! token on every call (other websites can't read it, so they can't forge
@@ -88,8 +88,10 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/past-sessions", get(past_sessions))
         .route("/api/notes", post(notes))
         .route("/api/mix", post(set_mix))
+        .route("/api/permission", post(set_permission))
         .route("/api/open-url", post(open_url))
         .route("/api/check-update", post(check_update))
+        .route("/api/update/install", post(install_update))
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/install-cli", post(|| async { crate::setup::install_cli().map(|_| Json(json!({"ok": true}))).map_err(ApiError) }))
         .route("/api/setup/login", post(setup_login))
@@ -139,7 +141,12 @@ async fn pump(app: Shared, mut socket: WebSocket) {
     }
 }
 
-async fn mcp(State(app): State<Shared>, Path(key): Path<String>, Json(body): Json<Value>) -> Response {
+async fn mcp(State(app): State<Shared>, Path(key): Path<String>, headers: axum::http::HeaderMap, Json(body): Json<Value>) -> Response {
+    let streams = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/event-stream"));
+    let token = body.pointer("/params/_meta/progressToken").cloned();
+    if body.get("method").and_then(Value::as_str) == Some("tools/call") && streams && token.is_some() {
+        return mcp_streamed(app, key, body, token.unwrap());
+    }
     match crate::mcp::handle(&app, &key, &body).await {
         Some(reply) => Json(reply).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
@@ -433,6 +440,10 @@ async fn setup_finish(State(app): State<Shared>, Json(b): Json<Value>) -> ApiRes
     };
     app.update_settings(&json!({"setup_done": true, "api_mix": mix}))?;
     app.set_mix(mix as u8);
+    if let Some(level) = s(&b, "permission").filter(|l| !l.is_empty()) {
+        app.update_settings(&json!({"permission_default": level}))?;
+        app.set_project_permission(level)?;
+    }
     Ok(Json(json!({"ok": true})))
 }
 
@@ -460,4 +471,66 @@ async fn check_update(State(app): State<Shared>) -> ApiResult {
     *app.update.lock().unwrap() = found.clone();
     app.touch();
     Ok(Json(json!({"update": found, "version": crate::updates::VERSION})))
+}
+
+/// Set the project's permission level, or a thread's override ({thread, level}; level "" = project's).
+async fn set_permission(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
+    let level = s(&b, "level").unwrap_or("");
+    match s(&b, "thread").filter(|t| !t.is_empty() && !t.starts_with(ORCHESTRATOR)) {
+        Some(t) => app.set_thread_permission(t, level)?,
+        None => app.set_project_permission(level)?,
+    }
+    Ok(Json(json!({"ok": true, "permission": app.project_permission()})))
+}
+
+/// A tool call answered as a server-sent event stream: progress pings every 20s
+/// while it waits (on the user, or on threads), then the result. Claude Code
+/// gives up on a tool that's silent for 5 minutes.
+fn mcp_streamed(app: Shared, key: String, body: Value, token: Value) -> Response {
+    use axum::response::sse::{Event, Sse};
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(8);
+    tokio::spawn(async move {
+        let call = crate::mcp::handle(&app, &key, &body);
+        tokio::pin!(call);
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
+        tick.tick().await;
+        let mut n = 0u64;
+        loop {
+            tokio::select! {
+                reply = &mut call => {
+                    if let Some(reply) = reply {
+                        let _ = tx.send(Event::default().event("message").data(reply.to_string())).await;
+                    }
+                    break;
+                }
+                _ = tick.tick() => {
+                    n += 1;
+                    let progress = json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                        "params": {"progressToken": token, "progress": n, "message": "still waiting"}});
+                    // The client hung up (turn stopped): drop the call, which cleans up its question.
+                    if tx.send(Event::default().event("message").data(progress.to_string())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|ev| (Ok::<_, std::convert::Infallible>(ev), rx))
+    });
+    Sse::new(stream).into_response()
+}
+
+/// Download the newer release, verify it, start its installer and quit so it can update.
+async fn install_update(State(app): State<Shared>) -> ApiResult {
+    let update = app.update.lock().unwrap().clone().ok_or(ApiError("no update available".into()))?;
+    tokio::task::spawn_blocking(move || crate::updates::download_and_launch(&update))
+        .await
+        .map_err(|e| ApiError(e.to_string()))??;
+    // Give the response time to reach the page, then quit (stopping threads cleanly).
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        crate::quit_app();
+    });
+    Ok(Json(json!({"ok": true})))
 }

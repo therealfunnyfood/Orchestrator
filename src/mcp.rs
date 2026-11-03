@@ -14,6 +14,13 @@ const MAX_RESULT_CHARS: usize = 12000;
 fn ui_tools() -> Value {
     json!([
         {
+            "name": "approve",
+            "description": "Internal: Claude Code calls this to ask the user for permission. Never call it yourself.",
+            "inputSchema": {"type": "object", "properties": {
+                "tool_name": {"type": "string"}, "input": {"type": "object"}, "tool_use_id": {"type": "string"},
+            }, "required": ["tool_name"]},
+        },
+        {
             "name": "update_plan",
             "description": "Show the user a live task list for this conversation. Send the whole list every time \
 (it replaces the previous one). Keep exactly one item in_progress while working; mark items completed as you \
@@ -471,6 +478,14 @@ pub async fn handle(app: &Arc<App>, key: &str, msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            if name == "approve" {
+                let tool = args.get("tool_name").and_then(Value::as_str).unwrap_or("").to_string();
+                let input = args.get("input").cloned().unwrap_or(json!({}));
+                let decision = app.approve(key, &tool, input).await;
+                return Some(json!({"jsonrpc": "2.0", "id": id, "result": {
+                    "content": [{"type": "text", "text": decision.to_string()}], "isError": false,
+                }}));
+            }
             let allowed = key.starts_with(ORCHESTRATOR)
                 || ["update_plan", "ask_user", "show_media"].contains(&name);
             let outcome = if allowed { call(app, key, name, &args).await } else { Err(format!("{name} is only available to the orchestrator")) };
