@@ -1,15 +1,41 @@
 # Orchestrator
 
-A Windows desktop app where an **orchestrator** agent splits your work into
-**threads**, full [Claude Code](https://claude.com/claude-code) sessions that run
-in parallel. You can watch every thread live, talk to any of them directly, and keep
-usage down with per-thread model and effort choices that the orchestrator tunes over
-time.
+**A desktop app for running a team of [Claude Code](https://claude.com/claude-code)
+agents on one project.**
 
-You choose how much threads may do without asking, from full access to read-only
-(see [Permission levels](#permission-levels)). At *Full access* they can run commands
-and edit files in the workspace without asking, so only use that level on folders
-you're comfortable with.
+You give the work to the **orchestrator**, a lead agent. It breaks the work into
+tasks and hands each one to a **thread**. A thread is a full Claude Code session
+working in your project folder, and several threads run at once. The orchestrator
+talks with its threads while they work: it answers their questions, redirects them,
+passes results from one to another, and checks what they did before it reports back
+to you. It works like a Claude Project for Claude Code, on your own Windows PC.
+
+### Why use it
+
+- **Parallel work with a lead.** Big jobs get split up and run at the same time,
+  and one agent keeps track of all of it and reviews the results.
+- **Everything happens live.** Watch every thread stream in real time and jump into
+  any of them. Messages you send while an agent is working go straight into its
+  current turn, the same as in Claude desktop.
+- **Threads and the orchestrator keep talking.** Threads report milestones, ask
+  questions and flag blockers. When a thread finishes, its report goes straight to
+  the orchestrator.
+- **Your plan, your API key, or both.** A slider per project sets how much runs on
+  your Claude Pro or Max plan and how much on API credits. When the plan hits its
+  usage limit, turns can switch to the API.
+- **The right model for each task.** The orchestrator picks Haiku, Sonnet or Opus
+  and an effort level for each thread. It learns which choices worked from each
+  thread's time and cost.
+- **You decide what agents may do.** Choose a permission level per project, from
+  full access to read-only. Approval requests show up as cards in the chat.
+- **It's your real Claude Code.** Threads use your own Claude Code login, settings,
+  `CLAUDE.md` files, MCP servers and permission rules. `/import` brings in an
+  existing Claude Code project with its history.
+- **Local and private.** No telemetry and no account with this app. Your work goes
+  only to Anthropic, through Claude Code.
+
+At *Full access*, threads can run commands and edit files in the workspace without
+asking. Only use that level on folders you're comfortable with.
 
 ## Requirements
 
@@ -50,8 +76,9 @@ To uninstall, use Settings → Apps → Installed apps → Orchestrator.
   questions and show you images, video, audio or PDFs.
 - **Composer**: messages stream in as they're written. A message you send while a
   turn runs goes straight into it (Claude reads it at its next step, like in Claude
-  desktop); Alt+Enter queues it for after the turn instead. You can edit or retry earlier messages (the conversation branches from
-  that point), and paste or drop images and files.
+  desktop); Alt+Enter queues it for after the turn instead. You can edit or retry
+  earlier messages (the conversation branches from that point), and paste or drop
+  images and files.
 - **Workspace**: the project folder it works in. Each workspace has its own
   orchestrator conversation, threads, brief and rules. `/import` brings in a Claude
   Code project, including its history, your rules and its unfinished work.
@@ -154,8 +181,9 @@ every launch. Your API key is stored in `%APPDATA%\Orchestrator\settings.json`.
 
 ## Notes
 
-- On the plan, the `$` figures are what the work would cost at API rates. Nothing
-  is charged for them.
+- The `$` figures are estimates of what the work would cost at API rates, covering
+  both plan and API turns. Only API turns use credits; check your real balance in
+  the [Anthropic Console](https://console.anthropic.com).
 - Anthropic's terms limit how a subscription login may be used by automated
   tools. This app drives your own Claude Code login on your own machine; check the
   current terms if you run it heavily.
