@@ -23,6 +23,8 @@ to you. It works like a Claude Project for Claude Code, on your own Windows PC.
 - **Your plan, your API key, or both.** A slider per project sets how much runs on
   your Claude Pro or Max plan and how much on API credits. When the plan hits its
   usage limit, turns can switch to the API.
+- **Timelines that learn.** The orchestrator says how long work will take, and the
+  app checks every estimate against the real time so the next ones are more realistic.
 - **The right model for each task.** The orchestrator picks Haiku, Sonnet or Opus
   and an effort level for each thread. It learns which choices worked from each
   thread's time and cost.
@@ -122,6 +124,10 @@ example, if you've allowed `Bash`, shell commands won't ask.
 - **Models and effort**: the orchestrator uses Haiku for simple work, Sonnet for
   routine coding and Opus for hard problems. It uses medium effort by default and
   high only when needed, and it asks you before using xhigh or max.
+- **Timelines**: the orchestrator tells you how long work should take and gives each
+  thread task an estimate. The app times the real work and shows the orchestrator how
+  its estimates compare by kind of work, so its timelines get more realistic over time.
+  Running work shows how long is left; see Threads → Timelines for the history.
 - **Self-tuning**: each thread turn records its model, effort, time and cost. The
   orchestrator rates the fit and keeps tuning notes, which you can see under
   Threads → Efficiency and on the 📋 brief page.

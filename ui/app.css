@@ -573,3 +573,8 @@ code.tlink { background: none; padding: 0; }
 .ev.handoff { display: flex; align-items: center; gap: 10px; color: var(--accent); font-size: 12px; margin: 14px 0; }
 .ev.handoff::before, .ev.handoff::after { content: ""; flex: 1; border-top: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent); }
 .ev.user.setup .body { white-space: pre-wrap; }
+
+/* time estimates */
+.est { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+.est.over { color: var(--warn, #d7a65f); }
+#tree .est { margin-left: auto; padding-left: 6px; font-size: 10.5px; }

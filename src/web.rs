@@ -99,6 +99,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/setup/login", post(setup_login))
         .route("/api/setup/finish", post(setup_finish))
         .route("/api/efficiency", get(|State(a): State<Shared>| async move { Json(a.efficiency_json(7.0)) }))
+        .route("/api/timing", get(|State(a): State<Shared>| async move { Json(a.timing_json(30.0)) }))
         .route("/api/tuning", post(tuning))
         .route("/api/show", post(|| async { Json(json!({"shown": crate::show_main()})) }))
         .route("/api/plan-usage/refresh", post(refresh_plan_usage))

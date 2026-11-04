@@ -98,6 +98,24 @@ or too_strong (a cheaper one would have done). After a batch of work, or about o
 efficiency_report and update save_tuning_notes with concrete rules you've learned for this project
 (e.g. "docs/README edits: haiku, low"; "parser bugs in src/: opus, medium"). Follow your tuning notes.
 
+# Timelines
+Give the user realistic timelines, learned from this project's history:
+- When you take on a request that will take more than a couple of minutes, tell the user how long
+  you expect it to take as a range (e.g. "about 10-20 minutes"), and record it with set_estimate
+  (low/high minutes for the whole request, until all of its threads are done, and a kind).
+- Give every spawn_thread / send_to_thread that starts real work estimate_minutes (and
+  estimate_max_minutes for a range) and a kind.
+- Base estimates on "Timing history" below and timing_report: how long similar kinds of work really
+  took here, and how far off your past estimates were. Don't guess optimistically: include time for
+  reading code, testing, fixing and your own review. Parallel threads overlap; work that waits on
+  another thread doesn't.
+- Use short, reusable kinds so the history groups well: small-fix, bugfix, feature, refactor, tests,
+  research, docs, review, setup, ops, or another short word when none fits.
+- If the work turns out bigger or smaller than expected, tell the user and call set_estimate again
+  with the new range.
+- The app times everything and shows the user each estimate counting down. After a batch of work,
+  look at timing_report and note lessons in your tuning notes (e.g. "bugfixes here take 2x my guess").
+
 Whenever you mention a thread to the user, write it as a link: [thread-name](thread:thread-name).
 The user can click it to open that thread beside your chat.
 
@@ -167,6 +185,10 @@ pub struct App {
     answered_ids: Mutex<std::collections::HashSet<String>>,
     /// When the running turn on each key started (for the UI's timer).
     started: Mutex<HashMap<String, f64>>,
+    /// The orchestrator's time estimate for the task each key is working on (a thread's
+    /// turn, or the orchestrator's whole request), and ones for messages not started yet.
+    estimates: Mutex<HashMap<String, Estimate>>,
+    pending_estimates: Mutex<HashMap<String, Estimate>>,
     changed: Notify,
     /// Cached index of Claude Code's saved conversations.
     pub sessions_index: claude_projects::Index,
@@ -204,6 +226,8 @@ impl App {
             questions: Mutex::new(HashMap::new()),
             answered_ids: Mutex::new(Default::default()),
             started: Mutex::new(HashMap::new()),
+            estimates: Mutex::new(HashMap::new()),
+            pending_estimates: Mutex::new(HashMap::new()),
             changed: Notify::new(),
             sessions_index: claude_projects::Index::new(),
             update: Mutex::new(None),
@@ -259,6 +283,10 @@ impl App {
         v["plan"] = self.store.lock().unwrap().plans.get(key).cloned().unwrap_or(json!([]));
         v["needs_input"] = json!(self.questions.lock().unwrap().values().any(|q| q.key == key));
         v["started_at"] = json!(self.started.lock().unwrap().get(key));
+        v["estimate"] = match self.estimates.lock().unwrap().get(key) {
+            Some(e) => json!({"low_s": e.low_s, "high_s": e.high_s, "kind": e.kind, "set_at": e.set_at, "task": e.task}),
+            None => Value::Null,
+        };
         let thread_perm = self.store.lock().unwrap().get(key).map(|t| t.permission.clone()).unwrap_or_default();
         v["permission_effective"] = json!(if thread_perm.is_empty() { self.project_permission() } else { thread_perm });
         let queue: Vec<Value> = self.queues.lock().unwrap().get(key).map(|q| {
@@ -458,6 +486,7 @@ impl App {
                     }
                     app.touch();
                 }
+                app.finish_jobs();
                 app.touch();
             });
         }
@@ -651,7 +680,14 @@ Pick up where it left off. Check the current state before relying on anything ab
         };
         let (tx, mut rx) = watch::channel(false);
         self.cancels.lock().unwrap().insert(name.into(), tx);
-        self.started.lock().unwrap().insert(name.into(), now());
+        let t0 = now();
+        self.started.lock().unwrap().insert(name.into(), t0);
+        if msg.sender == "orchestrator" {
+            if let Some(mut e) = self.pending_estimates.lock().unwrap().remove(name) {
+                e.set_at = t0;
+                self.estimates.lock().unwrap().insert(name.into(), e);
+            }
+        }
         let (resume, resume_at, start_point) = branch_point(row.session_id.clone(), row.last_uuid.clone(), msg);
         if let Some(f) = &msg.fork {
             self.hub.emit(name, json!({"kind": "fork", "at": f.at_ts}));
@@ -716,9 +752,15 @@ Pick up where it left off. Check the current state before relying on anything ab
             if let Some(row) = st.get_mut(name) {
                 row.last_uuid = last_uuid;
             }
+            let est = self.estimates.lock().unwrap().remove(name);
             if let Ok(r) = &result {
                 st.record_turn_usage(r);
+                let est_ref = est.as_ref();
                 st.record_efficiency(EffRecord {
+                    wall_s: now() - est_ref.map_or(t0, |e| e.set_at.min(t0)),
+                    est_low_s: est_ref.map_or(0.0, |e| e.low_s),
+                    est_high_s: est_ref.map_or(0.0, |e| e.high_s),
+                    kind: est_ref.map_or(String::new(), |e| e.kind.clone()),
                     thread: name.to_string(),
                     task: msg.text.chars().take(160).collect(),
                     model: if row.model.is_empty() { "default".into() } else { row.model.clone() },
@@ -1417,8 +1459,9 @@ Mention it only if the user asks about cost or usage.{}\n",
         };
         let cap = format!("\n# Effort cap\nAbove effort {} needs the user's approval (asked automatically when you request it).\n",
             { let c = self.settings().max_effort; if c.is_empty() { "high".to_string() } else { c } });
+        let timing = self.timing_summary();
         let st = self.store.lock().unwrap();
-        let mut p = ORCH_APPEND.to_string() + &mix + &cap;
+        let mut p = ORCH_APPEND.to_string() + &mix + &cap + &timing;
         if let Some(n) = st.notes(&st.workspace) {
             if !n.brief.trim().is_empty() {
                 p += &format!("\n# Project brief (saved with save_project_notes)\n{}\n", n.brief.trim());
@@ -1466,11 +1509,160 @@ Mention it only if the user asks about cost or usage.{}\n",
         Ok(())
     }
 
+    /// The orchestrator's estimate for the message it's about to send a thread. It applies
+    /// to the turn that message starts, or to the running turn if it lands mid-turn.
+    pub fn note_thread_estimate(&self, name: &str, est: Option<Estimate>) {
+        if let Some(e) = est {
+            self.pending_estimates.lock().unwrap().insert(name.into(), e);
+        }
+    }
+
+    /// The message went into the turn already running: its estimate now covers that turn.
+    pub fn estimate_landed_mid_turn(&self, name: &str) {
+        if let Some(mut e) = self.pending_estimates.lock().unwrap().remove(name) {
+            let prev = self.started.lock().unwrap().get(name).copied();
+            e.set_at = prev.unwrap_or_else(now);
+            self.estimates.lock().unwrap().insert(name.into(), e);
+            self.touch();
+        }
+    }
+
+    /// The orchestrator's estimate for the user's whole request. The clock runs until it
+    /// and all of this project's threads are idle.
+    pub fn set_job_estimate(&self, mut est: Estimate) {
+        let key = self.orch_key();
+        if let Some(prev) = self.estimates.lock().unwrap().get(&key) {
+            est.set_at = prev.set_at; // a revised estimate for the same request
+        } else if let Some(t) = self.started.lock().unwrap().get(&key) {
+            est.set_at = *t; // the request started with this turn
+        }
+        self.estimates.lock().unwrap().insert(key, est);
+        self.touch();
+    }
+
+    /// Record requests whose work is all done: the orchestrator and its threads are idle.
+    fn finish_jobs(&self) {
+        let keys: Vec<String> = self.estimates.lock().unwrap().keys().filter(|k| k.starts_with(ORCHESTRATOR)).cloned().collect();
+        for key in keys {
+            if self.busy(&key) {
+                continue;
+            }
+            let threads: Vec<String> = {
+                let st = self.store.lock().unwrap();
+                st.threads.iter().filter(|t| orch_key(&t.workspace) == key).map(|t| t.name.clone()).collect()
+            };
+            if threads.iter().any(|t| self.busy(t)) {
+                continue;
+            }
+            let Some(e) = self.estimates.lock().unwrap().remove(&key) else { continue };
+            let wall = now() - e.set_at;
+            let mut st = self.store.lock().unwrap();
+            st.record_efficiency(EffRecord {
+                thread: "orchestrator".into(),
+                task: e.task.clone(),
+                wall_s: wall,
+                duration_ms: (wall * 1000.0) as u64,
+                est_low_s: e.low_s,
+                est_high_s: e.high_s,
+                kind: e.kind.clone(),
+                job: true,
+                ok: true,
+                ..Default::default()
+            });
+            st.save();
+            drop(st);
+            let range = if e.high_s > e.low_s { format!("{}–{}", fmt_minutes(e.low_s), fmt_minutes(e.high_s)) } else { fmt_minutes(e.low_s) };
+            self.hub.emit(&key, json!({"kind": "notice", "text": format!("⏱ finished in {} (estimated {range})", fmt_minutes(wall))}));
+        }
+    }
+
+    /// How long work has really taken in this project, and how good the orchestrator's
+    /// estimates have been, so it can give realistic timelines.
+    pub fn timing_json(&self, days: f64) -> Value {
+        let st = self.store.lock().unwrap();
+        let since = now() - days * 86400.0;
+        let recs: Vec<&EffRecord> = st
+            .efficiency
+            .iter()
+            .filter(|r| r.ts >= since && same_path(&r.workspace, &st.workspace) && r.ok && r.wall_s > 0.0)
+            .collect();
+        let stats = |rs: &[&EffRecord]| {
+            let mut secs: Vec<f64> = rs.iter().map(|r| r.wall_s).collect();
+            let mut ratios: Vec<f64> = rs.iter().filter(|r| r.est_high_s > 0.0).map(|r| r.wall_s / ((r.est_low_s + r.est_high_s) / 2.0)).collect();
+            let est: Vec<&&EffRecord> = rs.iter().filter(|r| r.est_high_s > 0.0).collect();
+            let within = est.iter().filter(|r| r.wall_s >= r.est_low_s * 0.9 && r.wall_s <= r.est_high_s * 1.1).count();
+            let over = est.iter().filter(|r| r.wall_s > r.est_high_s * 1.1).count();
+            json!({
+                "count": rs.len(),
+                "median_minutes": (median(&mut secs) / 6.0).round() / 10.0,
+                "p80_minutes": (percentile(&mut secs, 0.8) / 6.0).round() / 10.0,
+                "estimated": est.len(),
+                "actual_over_estimate_median": if ratios.is_empty() { Value::Null } else { json!((median(&mut ratios) * 100.0).round() / 100.0) },
+                "within_range": within, "took_longer": over, "took_shorter": est.len() - within - over,
+            })
+        };
+        let mut groups: std::collections::BTreeMap<(bool, String), Vec<&EffRecord>> = Default::default();
+        for r in &recs {
+            let kind = if r.kind.is_empty() { "unlabeled".to_string() } else { r.kind.clone() };
+            groups.entry((r.job, kind)).or_default().push(r);
+        }
+        let by_kind = |job: bool| -> Vec<Value> {
+            groups.iter().filter(|((j, _), _)| *j == job).map(|((_, k), rs)| {
+                let mut v = stats(rs);
+                v["kind"] = json!(k);
+                v
+            }).collect()
+        };
+        let jobs: Vec<&EffRecord> = recs.iter().copied().filter(|r| r.job).collect();
+        let turns: Vec<&EffRecord> = recs.iter().copied().filter(|r| !r.job).collect();
+        let recent: Vec<Value> = recs.iter().rev().filter(|r| r.est_high_s > 0.0).take(15).map(|r| json!({
+            "what": if r.job { "request" } else { "thread turn" }, "thread": r.thread, "kind": r.kind, "task": r.task,
+            "estimated_minutes": format!("{}-{}", short_minutes(r.est_low_s), short_minutes(r.est_high_s)),
+            "actual_minutes": (r.wall_s / 6.0).round() / 10.0, "model": r.model, "effort": r.effort,
+        })).collect();
+        json!({
+            "days": days,
+            "requests": {"overall": stats(&jobs), "by_kind": by_kind(true)},
+            "thread_turns": {"overall": stats(&turns), "by_kind": by_kind(false)},
+            "recent_estimates": recent,
+        })
+    }
+
+    /// A few lines on timing history for the orchestrator's instructions.
+    fn timing_summary(&self) -> String {
+        let t = self.timing_json(60.0);
+        let line = |label: &str, v: &Value| -> Option<String> {
+            let n = v["count"].as_u64().unwrap_or(0);
+            if n == 0 { return None }
+            let mut s = format!("- {label}: {n} done, typically {} min (80% within {} min)", v["median_minutes"], v["p80_minutes"]);
+            if let Some(r) = v["actual_over_estimate_median"].as_f64() {
+                let e = v["estimated"].as_u64().unwrap_or(0);
+                s += &format!("; of {e} estimated, {} in range, {} took longer, {} shorter; actual/estimate median {r:.2}x",
+                    v["within_range"], v["took_longer"], v["took_shorter"]);
+            }
+            Some(s)
+        };
+        let mut out = vec![];
+        for (section, label) in [("requests", "whole requests"), ("thread_turns", "thread tasks")] {
+            if let Some(l) = line(label, &t[section]["overall"]) { out.push(l) }
+            for k in t[section]["by_kind"].as_array().cloned().unwrap_or_default() {
+                if let Some(l) = line(&format!("  {label}, {}", k["kind"].as_str().unwrap_or("")), &k) { out.push(l) }
+            }
+        }
+        if out.is_empty() {
+            "\n# Timing history\nNo timed work in this project yet. Estimate from the size of the work, and say the \
+estimate is a first guess. Every estimate you give is checked against the real time, and the results show up here.\n".into()
+        } else {
+            format!("\n# Timing history (last 60 days, wall-clock)\n{}\nUse this to calibrate: if actual/estimate is above 1, \
+your estimates have been too short, so scale them up by about that much; if below 1, scale them down.\n", out.join("\n"))
+        }
+    }
+
     /// Efficiency stats for this project: per model+effort, plus recent turns.
     pub fn efficiency_json(&self, days: f64) -> Value {
         let st = self.store.lock().unwrap();
         let since = now() - days * 86400.0;
-        let recs: Vec<&EffRecord> = st.efficiency.iter().filter(|r| r.ts >= since && same_path(&r.workspace, &st.workspace)).collect();
+        let recs: Vec<&EffRecord> = st.efficiency.iter().filter(|r| r.ts >= since && !r.job && same_path(&r.workspace, &st.workspace)).collect();
         let mut groups: std::collections::BTreeMap<(String, String), Vec<&EffRecord>> = Default::default();
         for r in &recs {
             groups.entry((r.model.clone(), r.effort.clone())).or_default().push(r);
@@ -1637,6 +1829,61 @@ fn with_attachments(text: &str, paths: &[String]) -> (String, Vec<(String, Strin
         return (text.to_string(), images);
     }
     (format!("{text}\n\nAttached files:\n{}", files.join("\n")), images)
+}
+
+#[derive(Clone, Debug)]
+pub struct Estimate {
+    pub low_s: f64,
+    pub high_s: f64,
+    pub kind: String,
+    pub task: String,
+    pub set_at: f64,
+}
+
+impl Estimate {
+    /// From minutes as given by the orchestrator; high defaults to low.
+    pub fn from_minutes(low: f64, high: Option<f64>, kind: &str, task: &str) -> Option<Estimate> {
+        if !(low > 0.0) {
+            return None;
+        }
+        let high = high.filter(|h| *h >= low).unwrap_or(low);
+        Some(Estimate {
+            low_s: low * 60.0,
+            high_s: high * 60.0,
+            kind: kind_name(kind),
+            task: task.chars().take(160).collect(),
+            set_at: now(),
+        })
+    }
+}
+
+/// Normalize a kind of work to a short lowercase label.
+fn kind_name(kind: &str) -> String {
+    let k: String = kind.trim().to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).take(24).collect();
+    if k.is_empty() { "other".into() } else { k }
+}
+
+fn median(v: &mut [f64]) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n == 0 { 0.0 } else if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
+}
+
+fn percentile(v: &mut [f64], p: f64) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if v.is_empty() { return 0.0 }
+    v[((v.len() - 1) as f64 * p).round() as usize]
+}
+
+/// Minutes with one decimal under 10 (0.5, 2, 15).
+fn short_minutes(s: f64) -> String {
+    let m = s / 60.0;
+    if m < 10.0 { format!("{:.1}", m).trim_end_matches(".0").to_string() } else { format!("{:.0}", m) }
+}
+
+pub fn fmt_minutes(s: f64) -> String {
+    let m = s / 60.0;
+    if m < 1.0 { "<1m".into() } else if m < 90.0 { format!("{:.0}m", m) } else { format!("{:.1}h", m / 60.0) }
 }
 
 #[derive(Clone)]

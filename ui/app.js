@@ -267,7 +267,7 @@ function changed(part, data) {
 }
 
 function renderTree() {
-  if (!changed("tree", [S.state.workspace, S.state.orchestrator, S.state.threads.map((t) => [t.name, stClass(t), t.model, t.effort, t.updated_at, t.needs_input, t.plan]), curKey(), [...S.unread]])) return;
+  if (!changed("tree", [S.state.workspace, S.state.orchestrator, S.state.threads.map((t) => [t.name, stClass(t), t.model, t.effort, t.updated_at, t.needs_input, t.plan, t.estimate]), curKey(), [...S.unread]])) return;
   $("#ws-name").textContent = baseName(S.state.workspace);
   $("#ws-row").title = S.state.workspace + " — click to switch";
   const tree = $("#tree");
@@ -293,7 +293,8 @@ function node({ key, name, cls, status, meta, row }) {
   if (row?.needs_input) { const q = h("span", "q-badge", "?"); q.title = "Waiting for your answer"; n.append(q); }
   const prog = row?.busy && planProgress(row.plan);
   if (prog) n.append(h("span", "prog", prog));
-  n.append(h("span", "meta", meta));
+  if (row?.estimate) n.append(estBadge(row.estimate, true));
+  else n.append(h("span", "meta", meta));
   n.title = `${name} · ${status}`;
   n.onmousedown = (e) => {
     if (e.button !== 0) return;
@@ -398,6 +399,7 @@ function renderCrumbs() {
   cwd.onclick = () => openPath(inf.cwd, "reveal");
   c.append(h("span", "sep", "·"), cwd);
   c.append(h("span", "sp"));
+  if (inf.estimate) c.append(estBadge(inf.estimate));
   c.append(h("span", "path", `${inf.turns || 0} turns · ${money(inf.cost_usd)}`));
   if (inf.isOrch && S.state.project?.brief) {
     const br = h("button", null, "📋 brief");
@@ -1538,6 +1540,35 @@ function addFiles(files) {
   $("#input").focus();
 }
 
+// ---------------------------------------------------------------- time estimates
+
+const mins = (s) => { const m = s / 60; return m < 1 ? "<1m" : m < 90 ? `${Math.round(m)}m` : `${(m / 60).toFixed(1)}h`; };
+const estRange = (e) => (e.high_s > e.low_s ? `${mins(e.low_s)}–${mins(e.high_s)}` : mins(e.low_s));
+
+// Live text for an estimate: how far in, and how much is left (or how far over).
+function estText(e, short = false) {
+  const el = Math.max(0, Date.now() / 1000 - e.set_at);
+  if (el > e.high_s * 1.1) return short ? `⏱ +${mins(el - e.high_s)}` : `⏱ ${mins(el)} in · est ${estRange(e)} · running over`;
+  const left = e.high_s - el;
+  return short ? `⏱ ~${mins(Math.max(left, 0))} left` : `⏱ ${mins(el)} in · est ${estRange(e)} · ~${mins(Math.max(left, 60))} left`;
+}
+
+// An element that keeps an estimate's text current.
+function estBadge(e, short = false) {
+  const b = h("span", "est" + (Date.now() / 1000 - e.set_at > e.high_s * 1.1 ? " over" : ""), estText(e, short));
+  b.dataset.est = JSON.stringify(e);
+  if (short) b.dataset.short = "1";
+  b.title = `${e.kind || "task"}: estimated ${estRange(e)}${e.task ? `\n${e.task}` : ""}`;
+  return b;
+}
+setInterval(() => {
+  for (const b of $$("[data-est]")) {
+    const e = JSON.parse(b.dataset.est);
+    b.textContent = estText(e, !!b.dataset.short);
+    b.classList.toggle("over", Date.now() / 1000 - e.set_at > e.high_s * 1.1);
+  }
+}, 15000);
+
 let spinTimer = null;
 function updateWorking() {
   $("#working")?.remove();
@@ -1549,7 +1580,9 @@ function updateWorking() {
   w.id = "working";
   const label = inf.needs_input ? "Waiting for your answer…" : inf.status === "queued" ? "Queued…" : "Working…";
   const tm = h("span", "tm");
-  w.append(document.createTextNode(label + " "), tm, h("span", "hint", " (esc to stop)"));
+  w.append(document.createTextNode(label + " "), tm);
+  if (inf.estimate && !inf.isOrch) w.append(h("span", "hint", " · "), estBadge(inf.estimate));
+  w.append(h("span", "hint", " (esc to stop)"));
   let f = 0;
   w.dataset.g = SPINNER[0];
   const tick = () => {
@@ -2224,6 +2257,7 @@ async function renderManage() {
   }
   page.append(table);
   page.append(await efficiencyView());
+  page.append(await timingView());
   if (!shown.length) page.append(h("div", "sub", "\nNo threads. Ask the orchestrator to start some, or create one."));
   pane.append(page);
   page.scrollTop = scrollTop;
@@ -2249,6 +2283,35 @@ async function efficiencyView() {
     tr.innerHTML = `<td class="mono">${esc(modelLabel(g.model))}</td><td class="mono">${esc(g.effort)}</td><td class="num">${g.turns}</td>
       <td class="num">${money(g.avg_cost)}</td><td class="num">${money(g.total_cost)}</td><td class="num">${g.avg_seconds.toFixed(0)}s</td>
       <td class="num">${g.avg_steps.toFixed(1)}</td><td class="num">${g.errors}</td><td class="mono">${esc(verdicts)}</td>`;
+    t.append(tr);
+  }
+  box.append(t);
+  return box;
+}
+
+async function timingView() {
+  const box = h("div");
+  box.append(h("div", "set-section", "Timelines · last 30 days"));
+  let r;
+  try { r = await api("/api/timing"); } catch (err) { box.append(h("div", "sub", err.message)); return box; }
+  const rows = [
+    ...(r.requests.by_kind || []).map((k) => ({ ...k, what: "Whole requests" })),
+    ...(r.thread_turns.by_kind || []).map((k) => ({ ...k, what: "Thread tasks" })),
+  ];
+  if (!rows.length) {
+    box.append(h("div", "sub", "Nothing timed yet. The orchestrator estimates how long each request and thread task will take, the app times the real work, and it uses the results to give more realistic timelines."));
+    return box;
+  }
+  box.append(h("div", "sub", "Real wall-clock time by kind of work, and how the orchestrator's estimates compared. It sees these numbers every turn and adjusts its estimates."));
+  const t = h("table", "grid");
+  t.innerHTML = "<tr><th></th><th>Kind</th><th class='num'>Done</th><th class='num'>Typical</th><th class='num'>80% within</th><th class='num'>Estimated</th><th class='num'>Actual ÷ estimate</th><th>Estimates</th></tr>";
+  for (const g of rows) {
+    const tr = h("tr");
+    const ratio = g.actual_over_estimate_median;
+    const acc = g.estimated ? [g.within_range && `✓ ${g.within_range} in range`, g.took_longer && `↑ ${g.took_longer} longer`, g.took_shorter && `↓ ${g.took_shorter} shorter`].filter(Boolean).join("  ") : "—";
+    tr.innerHTML = `<td>${esc(g.what)}</td><td class="mono">${esc(g.kind)}</td><td class="num">${g.count}</td>
+      <td class="num">${g.median_minutes} min</td><td class="num">${g.p80_minutes} min</td><td class="num">${g.estimated}</td>
+      <td class="num">${ratio == null ? "—" : ratio.toFixed(2) + "×"}</td><td class="mono">${esc(acc)}</td>`;
     t.append(tr);
   }
   box.append(t);

@@ -264,6 +264,15 @@ pub struct EffRecord {
     /// The orchestrator's verdict: right | too_weak | too_strong.
     pub verdict: String,
     pub note: String,
+    /// Wall-clock seconds the turn (or, for a job, the whole request) took.
+    pub wall_s: f64,
+    /// The orchestrator's estimate, in seconds (0 = none given).
+    pub est_low_s: f64,
+    pub est_high_s: f64,
+    /// Kind of work, e.g. bugfix, feature, tests (set with the estimate).
+    pub kind: String,
+    /// A whole request the orchestrator estimated (all its threads), not one thread turn.
+    pub job: bool,
 }
 
 impl Store {

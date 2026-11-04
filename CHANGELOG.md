@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.7 (2026-11-04)
+
+- **Realistic timelines that improve with use.** The orchestrator now tells you how long
+  a request should take, as a range, and gives each thread task its own estimate. The
+  app times the real work: a thread task until its turn ends, a whole request until the
+  orchestrator and all its threads are done. Every turn, the orchestrator sees how long
+  each kind of work (bugfix, feature, tests and so on) has really taken in this project
+  and how far off its past estimates were, and adjusts. If its bugfixes keep running
+  twice as long as it said, its next bugfix estimate is about twice as long.
+- Running work shows its estimate: time in and about how long is left in the working
+  line, the chat header and the sidebar, marked when it's running over. A finished
+  request posts "finished in 12m (estimated 10–20m)".
+- Threads → Timelines shows typical and 80th-percentile times by kind of work, and how
+  the estimates compared with what really happened. The orchestrator can read the same
+  numbers with `timing_report`.
+
 ## 0.4.6 (2026-11-03)
 
 - **Handoff to a new session**: every chat, the orchestrator and each thread, has a

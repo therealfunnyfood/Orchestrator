@@ -69,6 +69,12 @@ documents the user should look at. Relative paths are taken from your working di
     ])
 }
 
+/// A thread task's estimate from spawn_thread / send_to_thread arguments.
+fn task_estimate(args: &Value, task: &str) -> Option<crate::app::Estimate> {
+    let low = args.get("estimate_minutes").and_then(Value::as_f64)?;
+    crate::app::Estimate::from_minutes(low, args.get("estimate_max_minutes").and_then(Value::as_f64), arg(args, "kind").unwrap_or(""), task)
+}
+
 fn thread_tools() -> Value {
     let effort = json!({"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]});
     json!([
@@ -83,6 +89,9 @@ optional: low, medium, high, xhigh or max.",
                 "task": {"type": "string", "description": "the full brief for the thread"},
                 "cwd": {"type": "string"}, "model": {"type": "string"}, "effort": effort,
                 "effort_reason": {"type": "string", "description": "required for xhigh/max: why it's worth it (shown to the user, who must approve)"},
+                "estimate_minutes": {"type": "number", "description": "how long you expect this task to take, in minutes (low end if you give a range)"},
+                "estimate_max_minutes": {"type": "number", "description": "high end of the range"},
+                "kind": {"type": "string", "description": "kind of work, e.g. small-fix, bugfix, feature, refactor, tests, research, docs, review, setup"},
             }, "required": ["name", "task"]},
         },
         {
@@ -93,7 +102,28 @@ it to run once the current turn finishes instead.",
             "inputSchema": {"type": "object", "properties": {
                 "name": {"type": "string"}, "message": {"type": "string"},
                 "when": {"type": "string", "enum": ["now", "after"], "description": "default now"},
+                "estimate_minutes": {"type": "number", "description": "if this starts new work: how long you expect it to take, in minutes"},
+                "estimate_max_minutes": {"type": "number"},
+                "kind": {"type": "string"},
             }, "required": ["name", "message"]},
+        },
+        {
+            "name": "set_estimate",
+            "description": "Record how long you expect the user's current request to take as a whole, until it and \
+all its threads are done. Tell the user the same range. The app shows it counting down, times the real \
+duration, and uses the results to calibrate your future estimates. Call again to revise it.",
+            "inputSchema": {"type": "object", "properties": {
+                "low_minutes": {"type": "number"}, "high_minutes": {"type": "number"},
+                "kind": {"type": "string", "description": "kind of work, e.g. bugfix, feature, refactor, research"},
+                "summary": {"type": "string", "description": "a few words on what's being done"},
+            }, "required": ["low_minutes", "high_minutes", "summary"]},
+        },
+        {
+            "name": "timing_report",
+            "description": "How long work has really taken in this project over the last `days` (default 30): whole \
+requests and thread tasks by kind (median and 80th-percentile minutes), how your estimates compared with \
+the actual times, and your recent estimates. Use it to give realistic timelines.",
+            "inputSchema": {"type": "object", "properties": {"days": {"type": "number"}}},
         },
         {
             "name": "wait_for_threads",
@@ -318,6 +348,7 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             let task = arg(args, "task").ok_or("task is required")?;
             let effort = approved_effort(app, key, n, arg(args, "effort"), arg(args, "effort_reason").unwrap_or("")).await?;
             let row = app.create_thread(n, arg(args, "cwd"), None, arg(args, "model"), effort.as_deref())?;
+            app.note_thread_estimate(n, task_estimate(args, task));
             app.send_to_thread(n, task, "orchestrator", vec![], false)?;
             Ok(format!(
                 "started thread {} in {} (model {}, effort {})",
@@ -328,8 +359,12 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             let n = arg(args, "name").ok_or("name is required")?;
             let msg = arg(args, "message").ok_or("message is required")?;
             let now = arg(args, "when") != Some("after");
+            app.note_thread_estimate(n, task_estimate(args, msg));
             Ok(match app.send_to_thread(n, msg, "orchestrator", vec![], now)? {
-                "injected" => format!("delivered to {n} mid-turn; it reads it at its next step"),
+                "injected" => {
+                    app.estimate_landed_mid_turn(n);
+                    format!("delivered to {n} mid-turn; it reads it at its next step")
+                }
                 "queued" => format!("queued for {n}; runs after its current turn"),
                 _ => format!("sent to {n}"),
             })
@@ -456,6 +491,19 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             .await
             .map_err(|e| e.to_string())??;
             Ok(format!("thread {} continues that conversation (forked copy) in {}", row.name, row.cwd))
+        }
+        "set_estimate" => {
+            let low = args.get("low_minutes").and_then(Value::as_f64).ok_or("low_minutes is required")?;
+            let high = args.get("high_minutes").and_then(Value::as_f64);
+            let est = crate::app::Estimate::from_minutes(low, high, arg(args, "kind").unwrap_or(""), arg(args, "summary").unwrap_or(""))
+                .ok_or("low_minutes must be more than 0")?;
+            let range = format!("{:.1}-{:.1} min", est.low_s / 60.0, est.high_s / 60.0).replace(".0", "");
+            app.set_job_estimate(est);
+            Ok(format!("recorded {range}; the clock runs until you and all threads are idle"))
+        }
+        "timing_report" => {
+            let days = args.get("days").and_then(Value::as_f64).unwrap_or(30.0).clamp(0.1, 365.0);
+            Ok(serde_json::to_string_pretty(&app.timing_json(days)).unwrap_or_default())
         }
         "efficiency_report" => {
             let days = args.get("days").and_then(Value::as_f64).unwrap_or(7.0).clamp(0.1, 90.0);
