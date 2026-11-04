@@ -82,6 +82,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/upload", post(upload))
         .route("/api/open", post(open_path))
         .route("/api/doc", post(read_doc))
+        .route("/api/handoff", post(handoff))
         .route("/api/popout", post(popout))
         .route("/api/edit", post(edit))
         .route("/api/claude-projects", get(claude_projects))
@@ -201,6 +202,13 @@ async fn patch_thread(State(app): State<Shared>, Path(name): Path<String>, Json(
 async fn delete_thread(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {
     app.delete_thread(&name)?;
     Ok(Json(json!({"ok": true})))
+}
+
+/// Hand a chat (orchestrator or thread) off to a new session.
+async fn handoff(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
+    let key = s(&b, "key").unwrap_or("").to_string();
+    let delivery = app.handoff(&key)?;
+    Ok(Json(json!({"ok": true, "delivery": delivery})))
 }
 
 async fn patch_orchestrator(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {

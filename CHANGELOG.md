@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.6 (2026-11-03)
+
+- **Handoff to a new session**: every chat, the orchestrator and each thread, has a
+  ⇄ handoff button in its header (or type `/handoff`). The agent writes a handoff
+  covering the goal, what's done, what's next, decisions, key files and your
+  preferences. Then the chat carries on in a fresh Claude Code session that starts
+  from that handoff, so a long conversation gets a clean context without losing the
+  thread. If the agent is working, the handoff waits until its turn ends.
+- The handoff turn can only read files, so writing the handoff never changes anything.
+- Messages from before a handoff can't be edited or retried, since that session is gone.
+
 ## 0.4.5 (2026-11-03)
 
 - **File paths in messages are clickable.** Paths in links and in `code` (for example

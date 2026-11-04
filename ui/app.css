@@ -568,3 +568,8 @@ code.tlink { background: none; padding: 0; }
 .md.doc table { border-collapse: collapse; margin: .5em 0 1em; }
 .md.doc th, .md.doc td { border: 1px solid var(--border); padding: 5px 10px; }
 .doc-text { white-space: pre-wrap; font-family: var(--mono); font-size: 12.5px; }
+
+/* handoff to a new session */
+.ev.handoff { display: flex; align-items: center; gap: 10px; color: var(--accent); font-size: 12px; margin: 14px 0; }
+.ev.handoff::before, .ev.handoff::after { content: ""; flex: 1; border-top: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent); }
+.ev.user.setup .body { white-space: pre-wrap; }

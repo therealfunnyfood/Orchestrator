@@ -41,6 +41,11 @@ You have tools from the `app` MCP server, shown to the user in their window:
 - show_media: show the user an image, video, audio file or PDF (for example a screenshot or a
   chart you made) by its path.";
 
+/// Sender of a handoff request; when that turn ends, the session is replaced by a new
+/// one that starts from the handoff the agent wrote.
+const HANDOFF: &str = "handoff";
+const HANDOFF_PROMPT: &str = "[handoff] This conversation is about to continue in a fresh session that won't see anything above. Write the handoff it will start from. Cover: the goal and what the user asked for, in their words where it matters; what's done and how it was checked; what's in progress and the exact next steps; decisions made and why; files, commands, branches and links that matter; the user's preferences and constraints; open questions and anything risky. If you manage threads, list each one with its job and status. Be specific and complete, and leave out the story of how you got here. Don't take any other action: reply with the handoff only.";
+
 const ORCH_APPEND: &str = r#"
 You are the orchestrator. The user talks to you; you get work done by managing worker threads.
 Each thread is a full Claude Code agent with its own working folder, and it keeps its own
@@ -544,6 +549,47 @@ impl App {
         Ok(self.deliver(name, msg, now))
     }
 
+    /// Hand a conversation off to a new session: after the current turn (if any), the
+    /// agent writes a handoff, then a fresh session starts from it in the same chat.
+    pub fn handoff(self: &Arc<Self>, key: &str) -> Result<&'static str, String> {
+        if !key.starts_with(ORCHESTRATOR) && self.store.lock().unwrap().get(key).is_none() {
+            return Err(format!("no thread named '{key}'"));
+        }
+        if self.queues.lock().unwrap().get(key).is_some_and(|q| q.iter().any(|m| m.sender == HANDOFF)) {
+            return Err("a handoff is already queued".into());
+        }
+        let msg = Queued { id: String::new(), text: HANDOFF_PROMPT.into(), sender: HANDOFF.into(), attach: vec![], fork: None };
+        Ok(self.deliver(key, msg, false))
+    }
+
+    /// The handoff turn finished: forget the old session and start the new one from it.
+    fn finish_handoff(self: &Arc<Self>, key: &str, handoff: &str) {
+        {
+            let mut st = self.store.lock().unwrap();
+            if key.starts_with(ORCHESTRATOR) {
+                let o = st.orchestrators.entry(key.into()).or_default();
+                o.session_id = None;
+                o.last_uuid = None;
+            } else if let Some(row) = st.get_mut(key) {
+                row.session_id = None;
+                row.last_uuid = None;
+                row.fork_pending = false;
+            }
+            st.save();
+        }
+        self.hub.emit(key, json!({"kind": "handoff", "text": "handed off: continuing in a new session"}));
+        let text = format!(
+            "[handoff from your previous session]
+You're continuing work from an earlier session of this conversation, which wrote this handoff for you:
+
+{handoff}
+
+Pick up where it left off. Check the current state before relying on anything above that may have changed."
+        );
+        let msg = Queued { id: String::new(), text, sender: "handoff-resume".into(), attach: vec![], fork: None };
+        self.enqueue(key, msg, true);
+    }
+
     pub fn submit_orchestrator(self: &Arc<Self>, text: &str, attach: Vec<String>, now: bool) -> &'static str {
         let key = self.orch_key();
         let msg = Queued { id: String::new(), text: text.into(), sender: "you".into(), attach, fork: None };
@@ -559,6 +605,16 @@ impl App {
             .into_iter()
             .find(|e| e.get("kind").and_then(Value::as_str) == Some("user") && e.get("ts").and_then(Value::as_f64).is_some_and(|t| (t - ts).abs() < 1e-6))
             .ok_or("couldn't find that message")?;
+        let last_handoff = self
+            .hub
+            .history(key, 100_000)
+            .into_iter()
+            .filter(|e| e.get("kind").and_then(Value::as_str) == Some("handoff"))
+            .filter_map(|e| e.get("ts").and_then(Value::as_f64))
+            .last();
+        if last_handoff.is_some_and(|h| ts < h) {
+            return Err("this message is from before a handoff to a new session, so it can't be edited".into());
+        }
         if original.get("injected").and_then(Value::as_bool).unwrap_or(false) {
             return Err("messages sent mid-turn can't be edited; send a follow-up instead".into());
         }
@@ -614,7 +670,7 @@ impl App {
             effort: row.effort.clone(),
             backend: self.resolve_backend(),
             append_system: self.worker_prompt(),
-            tools: None,
+            tools: (msg.sender == HANDOFF).then(|| "Read,Glob,Grep".into()),
             mcp_config: Some(self.mcp_config(name)),
             long_tool_calls: true,
             images,
@@ -710,6 +766,13 @@ impl App {
             st.save();
             notice
         };
+        if msg.sender == HANDOFF {
+            let row = self.store.lock().unwrap().get(name).map(|r| (r.status.clone(), r.last_result.clone()));
+            if let Some((_, text)) = row.filter(|(s, t)| s == "idle" && !t.trim().is_empty()) {
+                self.finish_handoff(name, &text);
+            }
+            return; // not news for the orchestrator
+        }
         let Some(n) = notice else { return };
         if msg.sender == "orchestrator" {
             // Its task: the orchestrator hears back right away, like a teammate reporting.
@@ -887,7 +950,7 @@ impl App {
             effort: s.orch_effort.clone(),
             backend: self.resolve_backend(),
             append_system: self.orchestrator_prompt(),
-            tools: Some("Read,Glob,Grep,WebSearch,WebFetch".into()),
+            tools: Some(if msg.sender == HANDOFF { "Read,Glob,Grep" } else { "Read,Glob,Grep,WebSearch,WebFetch" }.into()),
             mcp_config: Some(self.mcp_config(key)),
             long_tool_calls: true,
             images,
@@ -939,6 +1002,10 @@ impl App {
                 st.save();
                 let extra = if r.notes.is_empty() { String::new() } else { format!(" ({})", r.notes.join("; ")) };
                 self.hub.emit(key, json!({"kind": "notice", "text": format!("ran on {} via {}{extra}", r.backend_used, r.key_source)}));
+                drop(st);
+                if msg.sender == HANDOFF && !r.is_error && !r.text.trim().is_empty() {
+                    self.finish_handoff(key, &r.text);
+                }
             }
             Err(TurnError::Stopped) => self.hub.emit(key, json!({"kind": "notice", "text": "stopped"})),
             Err(TurnError::Failed(e)) => {

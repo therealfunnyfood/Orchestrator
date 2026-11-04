@@ -81,6 +81,9 @@ To uninstall, use Settings → Apps → Installed apps → Orchestrator.
   desktop); Alt+Enter queues it for after the turn instead. You can edit or retry
   earlier messages (the conversation branches from that point), and paste or drop
   images and files.
+- **Handoff**: when a conversation gets long, click **⇄ handoff** in any chat's header
+  (or type `/handoff`). The agent writes a handoff and the chat continues in a fresh
+  session that starts from it.
 - **Workspace**: the project folder it works in. Each workspace has its own
   orchestrator conversation, threads, brief and rules. `/import` brings in a Claude
   Code project, including its history, your rules and its unfinished work.

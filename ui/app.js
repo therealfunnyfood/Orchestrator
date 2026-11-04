@@ -405,6 +405,10 @@ function renderCrumbs() {
     br.onclick = openBrief;
     c.append(br);
   }
+  const ho = h("button", null, "⇄ handoff");
+  ho.title = "Write a handoff and continue in a new session (after the current turn)";
+  ho.onclick = () => handoff(k);
+  c.append(ho);
   if (inf.isOrch) {
     const b = h("button", null, "new conversation");
     b.onclick = () => runCommand("/reset").catch(fail);
@@ -563,6 +567,17 @@ function renderEventInner(ev, log) {
   $(".welcome", log)?.remove();
   const k = ev.kind;
   if (k === "user") {
+    if (ev.sender === "handoff" || ev.sender === "handoff-resume") {
+      const req = ev.sender === "handoff";
+      const e = h("div", "ev user setup");
+      e.append(h("span", "who", req ? "⇄ handoff" : "⇄ new session"),
+        h("span", "sum", req ? "Writing a handoff for the next session." : "Started from the handoff. Click to see it."));
+      e.append(h("div", "body", ev.text));
+      e.onclick = () => e.classList.toggle("open");
+      e.dataset.ts = String(ev.ts);
+      log.append(e);
+      return;
+    }
     if (ev.sender === "setup") {
       const e = h("div", "ev user setup");
       e.append(h("span", "who", "project import"), h("span", "sum", "Set up this project from its Claude Code history, carry over every rule, and continue unfinished work."));
@@ -663,6 +678,8 @@ function renderEventInner(ev, log) {
     acts.append(re);
     e.append(acts);
     log.append(e);
+  } else if (k === "handoff") {
+    log.append(h("div", "ev handoff", "⇄ " + ev.text));
   } else if (k === "notice") {
     const n = h("div", "ev notice" + (ev.is_error || ev.interrupted ? " err" : ""), ev.text);
     if (ev.interrupted) {
@@ -1188,6 +1205,15 @@ async function popOut(key) {
     const r = await api("/api/popout", { body: { thread: key } });
     if (!r.native) window.open(`/?t=${encodeURIComponent(ORCH.token)}&view=${encodeURIComponent(key)}`, "_blank", "width=920,height=860");
     if (S.side === key) closeSide();
+  } catch (e) { fail(e); }
+}
+
+// Have the agent write a handoff, then continue the chat in a fresh session from it.
+async function handoff(key = curKey()) {
+  if (!key) return toast("open a chat first", true);
+  try {
+    const r = await api("/api/handoff", { body: { key } });
+    toast(r.delivery === "queued" ? "Handoff queued: it runs after the current turn" : "Writing a handoff, then continuing in a new session…");
   } catch (e) { fail(e); }
 }
 
@@ -1866,6 +1892,7 @@ const COMMANDS = [
   { cmd: "/new", args: "<name> [task]", desc: "Create a thread, optionally starting it", cat: "Thread", key: "Ctrl+N", run: (a) => newThread(a) },
   { cmd: "/open", args: "<thread>", desc: "Open a conversation", cat: "Go", key: "Ctrl+P", complete: "thread", run: (a) => a ? openChat(a === "orchestrator" ? orchKey() : a) : goToThread() },
   { cmd: "/to", args: "<thread> <message>", desc: "Message a thread without leaving this view", cat: "Thread", complete: "thread", run: (a) => sendTo(a) },
+  { cmd: "/handoff", args: "", desc: "Write a handoff and continue in a new session", cat: "Thread", run: () => handoff() },
   { cmd: "/stop", args: "[thread]", desc: "Stop the running turn (Esc)", cat: "Thread", complete: "thread", run: (a) => stopTurn(a) },
   { cmd: "/effort", args: "<level>", desc: "Reasoning effort for this conversation", cat: "Config", complete: "effort", run: (a) => a ? setField("effort", a === "default" ? "" : a) : pickEffort() },
   { cmd: "/model", args: "<model>", desc: "Model for this conversation", cat: "Config", complete: "model", run: (a) => a ? setField("model", a === "default" ? "" : a) : pickModel() },
