@@ -70,6 +70,9 @@ How to work:
   - Relay between threads: when one thread's result unblocks or affects another, tell that thread.
   - Check in with read_thread on long-running threads, and nudge one that seems stuck.
   - Check results before reporting them as done; send a thread back to fix gaps.
+  - When you're done with a thread (its work is finished and checked, or you've handed its work to
+    another thread), resolve it with resolve_thread and a short note. That keeps the user's sidebar
+    tidy. Sending a resolved thread new work reopens it, so resolve freely.
 - Use wait_for_threads when you have nothing to do until threads report; it returns early when a
   thread messages you or finishes.
 - Do small lookups yourself with Read/Glob/Grep; delegate real work.
@@ -665,6 +668,22 @@ Pick up where it left off. Check the current state before relying on anything ab
 
     async fn thread_turn(self: &Arc<Self>, name: &str, msg: &Queued) {
         let (text, sender, attach) = (msg.text.as_str(), msg.sender.as_str(), &msg.attach);
+        let reopened = {
+            let mut st = self.store.lock().unwrap();
+            let was = st.get(name).is_some_and(|r| r.resolved);
+            if was && msg.sender != HANDOFF && msg.sender != "handoff-resume" {
+                if let Some(r) = st.get_mut(name) {
+                    r.resolved = false;
+                    r.resolved_note.clear();
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if reopened {
+            self.hub.emit(name, json!({"kind": "notice", "text": "reopened: it has new work"}));
+        }
         let Some(row) = ({
             let mut st = self.store.lock().unwrap();
             let row = st.get_mut(name).map(|r| {
@@ -1795,9 +1814,34 @@ Don't change project files yourself; threads do the work, following the rules."
         Ok(ws)
     }
 
+    /// This workspace's threads that aren't resolved.
     pub fn thread_names_here(&self) -> Vec<String> {
         let st = self.store.lock().unwrap();
-        st.threads.iter().filter(|t| same_path(&t.workspace, &st.workspace)).map(|t| t.name.clone()).collect()
+        st.threads.iter().filter(|t| same_path(&t.workspace, &st.workspace) && !t.resolved).map(|t| t.name.clone()).collect()
+    }
+
+    /// Mark a thread resolved (done with) or reopen it. `by` is "you" or "orchestrator".
+    pub fn set_resolved(&self, name: &str, resolved: bool, note: &str, by: &str) -> Result<(), String> {
+        {
+            let mut st = self.store.lock().unwrap();
+            let row = st.get_mut(name).ok_or(format!("no thread named '{name}'"))?;
+            if row.resolved == resolved {
+                return Ok(());
+            }
+            row.resolved = resolved;
+            row.resolved_at = if resolved { now() } else { 0.0 };
+            row.resolved_note = if resolved { note.trim().chars().take(300).collect() } else { String::new() };
+            st.save();
+        }
+        let who = if by == "orchestrator" { "the orchestrator" } else { "you" };
+        let text = match (resolved, note.trim()) {
+            (true, "") => format!("✓ resolved by {who}"),
+            (true, n) => format!("✓ resolved by {who}: {n}"),
+            (false, _) => format!("reopened by {who}"),
+        };
+        self.hub.emit(name, json!({"kind": "notice", "text": text}));
+        self.touch();
+        Ok(())
     }
 }
 

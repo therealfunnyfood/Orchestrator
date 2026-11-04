@@ -578,3 +578,11 @@ code.tlink { background: none; padding: 0; }
 .est { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
 .est.over { color: var(--warn, #d7a65f); }
 #tree .est { margin-left: auto; padding-left: 6px; font-size: 10.5px; }
+
+/* resolved threads */
+.group.resolved-group { cursor: pointer; gap: 4px; padding-left: 8px; user-select: none; }
+.group.resolved-group:hover { color: var(--muted); }
+.group.resolved-group .chev { width: 12px; text-align: center; }
+.node.resolved { opacity: .6; }
+.node.resolved .nm { text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); }
+.node.resolved:hover, .node.resolved.on { opacity: 1; }

@@ -196,6 +196,9 @@ async fn create_thread(State(app): State<Shared>, Json(b): Json<Value>) -> ApiRe
 }
 
 async fn patch_thread(State(app): State<Shared>, Path(name): Path<String>, Json(b): Json<Value>) -> ApiResult {
+    if let Some(r) = b.get("resolved").and_then(Value::as_bool) {
+        app.set_resolved(&name, r, s(&b, "note").unwrap_or(""), "you")?;
+    }
     app.configure_thread(&name, s(&b, "backend"), s(&b, "model"), s(&b, "effort"))?;
     Ok(Json(json!({"ok": true})))
 }

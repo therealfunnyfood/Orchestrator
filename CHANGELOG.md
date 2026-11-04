@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.8 (2026-11-05)
+
+- **Resolve threads you're done with.** Mark a thread resolved with ✓ resolve in its
+  header, Resolve in its right-click menu, or `/resolve`. The orchestrator resolves
+  threads too, with a short note, once their work is finished and checked or handed to
+  another thread.
+- Resolved threads move to a **resolved** group at the bottom of the sidebar that stays
+  collapsed until you open it, so finished work doesn't take up space.
+- Sending a resolved thread new work reopens it. ↺ reopen or Reopen does it by hand.
+- Resolved threads are left out of the orchestrator's `wait_for_threads` and
+  `list_threads`, which list them by name only.
+
 ## 0.4.7 (2026-11-04)
 
 - **Realistic timelines that improve with use.** The orchestrator now tells you how long

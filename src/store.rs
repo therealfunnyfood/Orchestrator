@@ -36,6 +36,11 @@ pub struct ThreadRow {
     pub permission: String,
     /// Tools the user chose "always allow" for in this thread.
     pub always_allow: Vec<String>,
+    /// Done with (finished, or its work moved elsewhere): listed apart and left out of
+    /// waits. Sending it new work reopens it.
+    pub resolved: bool,
+    pub resolved_at: f64,
+    pub resolved_note: String,
 }
 
 impl Default for ThreadRow {
@@ -59,6 +64,9 @@ impl Default for ThreadRow {
             fork_pending: false,
             permission: String::new(),
             always_allow: vec![],
+            resolved: false,
+            resolved_at: 0.0,
+            resolved_note: String::new(),
         }
     }
 }

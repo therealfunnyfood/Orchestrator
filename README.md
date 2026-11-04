@@ -83,6 +83,10 @@ To uninstall, use Settings → Apps → Installed apps → Orchestrator.
   desktop); Alt+Enter queues it for after the turn instead. You can edit or retry
   earlier messages (the conversation branches from that point), and paste or drop
   images and files.
+- **Resolve**: mark a thread you're done with as resolved (✓ resolve in its header,
+  or right-click it). The orchestrator resolves threads when their work is finished.
+  Resolved threads sit in a collapsed group at the bottom of the sidebar and reopen
+  when they get new work.
 - **Handoff**: when a conversation gets long, click **⇄ handoff** in any chat's header
   (or type `/handoff`). The agent writes a handoff and the chat continues in a fresh
   session that starts from it.

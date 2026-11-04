@@ -221,6 +221,17 @@ replaces the saved one.",
             }},
         },
         {
+            "name": "resolve_thread",
+            "description": "Mark a thread resolved once you're done with it: its work is finished and checked, or \
+it's been handed off to another thread. Resolved threads are tucked away in the user's sidebar and left out \
+of wait_for_threads and list_threads. Sending one new work reopens it. reopen=true reopens it now.",
+            "inputSchema": {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "note": {"type": "string", "description": "a few words: what it delivered, or where its work went"},
+                "reopen": {"type": "boolean"},
+            }, "required": ["name"]},
+        },
+        {
             "name": "stop_thread",
             "description": "Interrupt a thread's running turn. The thread keeps its history and can be messaged again.",
             "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
@@ -400,7 +411,12 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
         "list_threads" => {
             let st = app.store.lock().unwrap();
             let rows = st.in_workspace(&st.workspace);
-            Ok(if rows.is_empty() { "no threads yet".into() } else { rows.iter().map(|t| summary(app, t)).collect::<Vec<_>>().join("\n") })
+            let (done, open): (Vec<_>, Vec<_>) = rows.iter().partition(|t| t.resolved);
+            let mut out = if open.is_empty() { "no open threads".to_string() } else { open.iter().map(|t| summary(app, t)).collect::<Vec<_>>().join("\n") };
+            if !done.is_empty() {
+                out += &format!("\nresolved: {}", done.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "));
+            }
+            Ok(if rows.is_empty() { "no threads yet".into() } else { out })
         }
         "read_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
@@ -527,6 +543,12 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             let effort = approved_effort(app, key, n, arg(args, "effort"), arg(args, "effort_reason").unwrap_or("")).await?;
             app.configure_thread(n, None, arg(args, "model"), effort.as_deref())?;
             Ok(format!("updated {n}"))
+        }
+        "resolve_thread" => {
+            let n = arg(args, "name").ok_or("name is required")?;
+            let reopen = args.get("reopen").and_then(Value::as_bool).unwrap_or(false);
+            app.set_resolved(n, !reopen, arg(args, "note").unwrap_or(""), "orchestrator")?;
+            Ok(if reopen { format!("reopened {n}") } else { format!("resolved {n}") })
         }
         "stop_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;

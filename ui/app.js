@@ -267,17 +267,49 @@ function changed(part, data) {
 }
 
 function renderTree() {
-  if (!changed("tree", [S.state.workspace, S.state.orchestrator, S.state.threads.map((t) => [t.name, stClass(t), t.model, t.effort, t.updated_at, t.needs_input, t.plan, t.estimate]), curKey(), [...S.unread]])) return;
+  if (!changed("tree", [S.state.workspace, S.state.orchestrator, S.state.threads.map((t) => [t.name, stClass(t), t.model, t.effort, t.updated_at, t.needs_input, t.plan, t.estimate, t.resolved]), curKey(), [...S.unread]])) return;
   $("#ws-name").textContent = baseName(S.state.workspace);
   $("#ws-row").title = S.state.workspace + " — click to switch";
   const tree = $("#tree");
   tree.textContent = "";
   const o = S.state.orchestrator;
   tree.append(node({ key: o.name, name: "orchestrator", cls: "orch", status: stClass(o), meta: effortLabel(o.effort), row: o }));
-  const rows = [...S.state.threads].sort((a, b) => (b.busy - a.busy) || (b.updated_at - a.updated_at));
+  const all = [...S.state.threads].sort((a, b) => (b.busy - a.busy) || (b.updated_at - a.updated_at));
+  const rows = all.filter((t) => !t.resolved);
+  const done = all.filter((t) => t.resolved).sort((a, b) => b.resolved_at - a.resolved_at);
+  const meta = (t) => [modelLabel(t.model) === "default" ? "" : modelLabel(t.model).replace(/-\d.*/, ""), t.effort].filter(Boolean).join("·");
   tree.append(h("div", "group", `threads · ${rows.length}`));
-  if (!rows.length) tree.append(h("div", "empty-tree", "none yet — ask the orchestrator, or + to add one"));
-  for (const t of rows) tree.append(node({ key: t.name, name: t.name, status: stClass(t), meta: [modelLabel(t.model) === "default" ? "" : modelLabel(t.model).replace(/-\d.*/, ""), t.effort].filter(Boolean).join("·"), row: t }));
+  if (!rows.length) tree.append(h("div", "empty-tree", done.length ? "all resolved — ask the orchestrator for more, or + to add one" : "none yet — ask the orchestrator, or + to add one"));
+  for (const t of rows) tree.append(node({ key: t.name, name: t.name, status: stClass(t), meta: meta(t), row: t }));
+  if (done.length) {
+    const open = resolvedOpen();
+    const g = h("div", "group resolved-group" + (open ? " open" : ""));
+    g.append(h("span", "chev", open ? "⌄" : "›"), h("span", null, `resolved · ${done.length}`));
+    g.title = open ? "Hide resolved threads" : "Show resolved threads";
+    g.onclick = () => { resolvedOpen(!open); lastSig.tree = null; renderTree(); };
+    tree.append(g);
+    if (open) for (const t of done) {
+      const n = node({ key: t.name, name: t.name, cls: "resolved", status: stClass(t), meta: meta(t), row: t });
+      if (t.resolved_note) n.title = `${t.name} · resolved: ${t.resolved_note}`;
+      tree.append(n);
+    }
+  }
+}
+
+// Whether the sidebar's resolved group is expanded (remembered per browser).
+function resolvedOpen(set) {
+  try {
+    if (set !== undefined) localStorage.setItem("orch.resolvedOpen", set ? "1" : "");
+    return !!localStorage.getItem("orch.resolvedOpen");
+  } catch { return !!set; }
+}
+
+async function setResolved(name, resolved) {
+  try {
+    await api(`/api/threads/${encodeURIComponent(name)}`, { method: "PATCH", body: { resolved } });
+    toast(resolved ? `resolved ${name}` : `reopened ${name}`);
+    await loadState();
+  } catch (e) { fail(e); }
 }
 
 function planProgress(plan) {
@@ -415,6 +447,12 @@ function renderCrumbs() {
     const b = h("button", null, "new conversation");
     b.onclick = () => runCommand("/reset").catch(fail);
     c.append(b);
+  }
+  if (!inf.isOrch) {
+    const rs = h("button", null, inf.resolved ? "↺ reopen" : "✓ resolve");
+    rs.title = inf.resolved ? "Move back to the open threads" : "Done with this thread: tuck it away in Resolved";
+    rs.onclick = () => setResolved(inf.name, !inf.resolved);
+    c.append(rs);
   }
   if (!SOLO && !inf.isOrch) {
     const side = h("button", null, "⫽ to the side");
@@ -1899,6 +1937,9 @@ async function threadMenu(name) {
     { label: "Open", value: "open" }, { label: "Open to the side", desc: "Alt+click", value: "side" },
     { label: "Open in new window", desc: "Shift+click", value: "pop" }, { label: "Stop", value: "stop" },
     { label: "Set model…", value: "model" }, { label: "Set permission level…", value: "perm" }, { label: "Set effort…", value: "effort" },
+    threadRow(name)?.resolved
+      ? { label: "Reopen", desc: "move back to the open threads", value: "reopen" }
+      : { label: "Resolve", desc: "done with it: tuck it away", value: "resolve" },
     { label: "Delete", desc: "forget the conversation; files stay", value: "delete" },
   ];
   const it = await quickPick(items, name);
@@ -1910,6 +1951,8 @@ async function threadMenu(name) {
   if (it.value === "model") pickModel(name);
   if (it.value === "perm") pickPermission(name);
   if (it.value === "effort") pickEffort(name);
+  if (it.value === "resolve") setResolved(name, true);
+  if (it.value === "reopen") setResolved(name, false);
   if (it.value === "delete") deleteThread(name);
 }
 
@@ -1925,6 +1968,11 @@ const COMMANDS = [
   { cmd: "/new", args: "<name> [task]", desc: "Create a thread, optionally starting it", cat: "Thread", key: "Ctrl+N", run: (a) => newThread(a) },
   { cmd: "/open", args: "<thread>", desc: "Open a conversation", cat: "Go", key: "Ctrl+P", complete: "thread", run: (a) => a ? openChat(a === "orchestrator" ? orchKey() : a) : goToThread() },
   { cmd: "/to", args: "<thread> <message>", desc: "Message a thread without leaving this view", cat: "Thread", complete: "thread", run: (a) => sendTo(a) },
+  { cmd: "/resolve", args: "[thread]", desc: "Mark a thread resolved (or reopen it)", cat: "Thread", complete: "thread", run: (a) => {
+    const n = a?.trim() || (curKey() && !isOrch(curKey()) ? curKey() : "");
+    if (!n) return toast("open a thread or name one", true);
+    return setResolved(n, !threadRow(n)?.resolved);
+  } },
   { cmd: "/handoff", args: "", desc: "Write a handoff and continue in a new session", cat: "Thread", run: () => handoff() },
   { cmd: "/stop", args: "[thread]", desc: "Stop the running turn (Esc)", cat: "Thread", complete: "thread", run: (a) => stopTurn(a) },
   { cmd: "/effort", args: "<level>", desc: "Reasoning effort for this conversation", cat: "Config", complete: "effort", run: (a) => a ? setField("effort", a === "default" ? "" : a) : pickEffort() },
