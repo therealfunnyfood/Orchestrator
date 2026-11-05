@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.10 (2026-11-05)
+
+- **The orchestrator has to reply before it waits again.** In 0.4.9 your mid-turn
+  message reached it, but it could still go straight back to waiting without saying
+  anything. Now, after you message it, `wait_for_threads` refuses to wait until it has
+  written you a reply.
+
 ## 0.4.9 (2026-11-05)
 
 - **The orchestrator answers messages you send while it works.** A message sent while

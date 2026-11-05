@@ -185,6 +185,10 @@ pub struct App {
     /// User messages that arrived while the orchestrator was in wait_for_threads: handed
     /// over in that call's result (so they can't be missed) instead of between steps.
     held: Mutex<HashMap<String, Vec<Queued>>>,
+    /// Orchestrators that got a mid-turn message from the user and haven't written any
+    /// text since: (the message, how many waits were refused for it). wait_for_threads
+    /// won't block until they reply, since the user only sees what they write.
+    owes_reply: Mutex<HashMap<String, (String, u8)>>,
     /// Finished-turn notices handed to the orchestrator on its next turn.
     notices: Mutex<Vec<String>>,
     /// Mid-turn messages from threads to their orchestrator, by orchestrator key.
@@ -231,6 +235,7 @@ impl App {
             nudged: Mutex::new(HashSet::new()),
             waiting: Mutex::new(HashSet::new()),
             held: Mutex::new(HashMap::new()),
+            owes_reply: Mutex::new(HashMap::new()),
             notices: Mutex::new(Vec::new()),
             inbox: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
@@ -568,6 +573,9 @@ impl App {
         }
         self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach, "injected": true}));
         if key.starts_with(ORCHESTRATOR) {
+            if msg.sender == "you" {
+                self.owe_reply(key, &msg.text);
+            }
             self.nudged.lock().unwrap().insert(key.to_string());
         } else {
             let mut st = self.store.lock().unwrap();
@@ -926,11 +934,34 @@ Pick up where it left off. Check the current state before relying on anything ab
         self.nudged.lock().unwrap().remove(key)
     }
 
+    fn owe_reply(&self, key: &str, text: &str) {
+        let mut o = self.owes_reply.lock().unwrap();
+        let e = o.entry(key.to_string()).or_insert((String::new(), 0));
+        e.0 = text.chars().take(400).collect();
+        e.1 = 0;
+    }
+
+    /// The user message this orchestrator hasn't answered yet, if it should answer before
+    /// waiting again. Gives up after two refusals so a stubborn model can't loop.
+    pub fn unanswered(&self, key: &str) -> Option<String> {
+        let mut o = self.owes_reply.lock().unwrap();
+        let e = o.get_mut(key)?;
+        if e.1 >= 2 {
+            o.remove(key);
+            return None;
+        }
+        e.1 += 1;
+        Some(e.0.clone())
+    }
+
     /// User messages held for the wait_for_threads result, formatted for it.
     pub fn take_held(&self, key: &str) -> Option<String> {
         let msgs = self.held.lock().unwrap().remove(key).unwrap_or_default();
         if msgs.is_empty() {
             return None;
+        }
+        if let Some(m) = msgs.last() {
+            self.owe_reply(key, &m.text);
         }
         let body = msgs
             .iter()
@@ -1068,6 +1099,14 @@ The user can't see tool calls. Before your next tool call, write them a short re
         let lu = last_uuid.clone();
         let mut on_line = move |v: &Value| {
             app.observe_plan_usage(v);
+            if v.get("type").and_then(Value::as_str) == Some("assistant")
+                && v.pointer("/message/content").and_then(Value::as_array).is_some_and(|c| {
+                    c.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("text")
+                        && b.get("text").and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty()))
+                })
+            {
+                app.owes_reply.lock().unwrap().remove(&k);
+            }
             for ev in app.hub.translate(&k, v) {
                 app.hub.emit(&k, ev);
             }
@@ -1086,6 +1125,7 @@ The user can't see tool calls. Before your next tool call, write them a short re
         let result = run_turn(&s, &spec, &mut rx, &mut on_line).await;
         self.injectors.lock().unwrap().remove(key);
         self.nudged.lock().unwrap().remove(key);
+        self.owes_reply.lock().unwrap().remove(key);
         let left = self.held.lock().unwrap().remove(key).unwrap_or_default();
         {
             // Held for a wait that ended without reading them: run them next, in order.

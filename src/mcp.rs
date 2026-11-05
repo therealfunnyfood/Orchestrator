@@ -389,6 +389,13 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             if names.is_empty() {
                 names = app.thread_names_here();
             }
+            if let Some(m) = app.unanswered(key) {
+                return Ok(format!(
+                    "Not waiting yet: the user sent you a message and you haven't replied:\n\"{m}\"\n\n\
+They can't see tool calls, only text you write. Write your reply to them as text now (answer it, or \
+say what you'll do about it), then call wait_for_threads again."
+                ));
+            }
             let secs = args.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(900.0).clamp(1.0, 3500.0);
             app.wait_threads(&names, Duration::from_secs_f64(secs)).await;
             let st = app.store.lock().unwrap();
