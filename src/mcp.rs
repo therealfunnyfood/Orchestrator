@@ -395,14 +395,20 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             let mut lines: Vec<String> = names.iter().filter_map(|n| st.get(n)).map(|t| summary(app, t)).collect();
             let still: Vec<&String> = names.iter().filter(|n| app.busy(n)).collect();
             let still_list = still.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
-            if let Some(inbox) = app.drain_inbox(key) {
+            let held = app.take_held(key);
+            let nudged = app.take_nudge(key);
+            let inbox = app.drain_inbox(key);
+            let early = held.is_some() || nudged || inbox.is_some();
+            if let Some(inbox) = inbox {
                 lines.push(format!("\n[messages from threads]\n{inbox}"));
-                if !still.is_empty() {
-                    lines.push(format!("(returned early for these messages; still running: {still_list})"));
-                }
-            } else if app.take_nudge(key) {
-                lines.push(format!("(returned early: a message arrived, which follows this result{})",
-                    if still.is_empty() { String::new() } else { format!("; still running: {still_list}") }));
+            }
+            if let Some(h) = held {
+                lines.push(format!("\n{h}"));
+            } else if nudged {
+                lines.push("(the user sent you a message, which follows this result: reply to them as text before anything else)".into());
+            }
+            if early && !still.is_empty() {
+                lines.push(format!("(returned early; still running: {still_list})"));
             } else if !still.is_empty() {
                 lines.push(format!("still running after timeout: {still_list}"));
             }

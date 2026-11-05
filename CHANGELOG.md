@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.9 (2026-11-05)
+
+- **The orchestrator answers messages you send while it works.** A message sent while
+  it was waiting on threads used to end the wait, but the orchestrator often went
+  straight back to waiting without reading it or replying. Your message is now handed to
+  it in the wait's result, with an instruction to reply to you before doing anything
+  else, and its instructions now say to always answer you before carrying on.
+- A message sent just as a wait ended is no longer lost: it runs as the next turn.
+
 ## 0.4.8 (2026-11-05)
 
 - **Resolve threads you're done with.** Mark a thread resolved with ✓ resolve in its

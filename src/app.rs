@@ -129,8 +129,11 @@ resume_past_session only when the old conversation's detailed context really mat
 a forked copy, so the original is never changed. save_project_notes keeps a project brief and rules
 that are shown to you and every thread in this workspace.
 
-The user can message you while you work; those messages arrive mid-turn, between your steps.
-Read them and adjust what you're doing (they may redirect you or add information).
+The user can message you while you work; those messages arrive mid-turn, between your steps, or
+in the result of wait_for_threads as a [message from the user] block. The user can't see your tool
+calls, only what you write, so whenever one arrives, first write a short reply to them as text (answer
+the question, or say what you'll change), then act on it and carry on. Never go straight back to
+waiting without replying.
 
 Threads message you with message_orchestrator (progress, questions, blockers), and when a thread
 finishes a task you gave it, its final report comes to you automatically. These arrive as a
@@ -179,6 +182,9 @@ pub struct App {
     nudged: Mutex<HashSet<String>>,
     /// Orchestrators blocked in wait_for_threads (thread messages go into its result).
     waiting: Mutex<HashSet<String>>,
+    /// User messages that arrived while the orchestrator was in wait_for_threads: handed
+    /// over in that call's result (so they can't be missed) instead of between steps.
+    held: Mutex<HashMap<String, Vec<Queued>>>,
     /// Finished-turn notices handed to the orchestrator on its next turn.
     notices: Mutex<Vec<String>>,
     /// Mid-turn messages from threads to their orchestrator, by orchestrator key.
@@ -224,6 +230,7 @@ impl App {
             injectors: Mutex::new(HashMap::new()),
             nudged: Mutex::new(HashSet::new()),
             waiting: Mutex::new(HashSet::new()),
+            held: Mutex::new(HashMap::new()),
             notices: Mutex::new(Vec::new()),
             inbox: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
@@ -544,6 +551,17 @@ impl App {
     /// step. False when nothing is running or the turn is already wrapping up.
     fn inject(&self, key: &str, msg: &Queued) -> bool {
         let Some(tx) = self.injectors.lock().unwrap().get(key).cloned() else { return false };
+        if key.starts_with(ORCHESTRATOR) && msg.sender == "you" && !tx.is_closed() {
+            let waiting = self.waiting.lock().unwrap();
+            if waiting.contains(key) {
+                self.held.lock().unwrap().entry(key.to_string()).or_default().push(msg.clone());
+                drop(waiting);
+                self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach, "injected": true}));
+                self.nudged.lock().unwrap().insert(key.to_string());
+                self.touch();
+                return true;
+            }
+        }
         let (prompt, images) = with_attachments(&msg.text, &msg.attach);
         if tx.send(user_line(&prompt, &images)).is_err() {
             return false;
@@ -908,6 +926,30 @@ Pick up where it left off. Check the current state before relying on anything ab
         self.nudged.lock().unwrap().remove(key)
     }
 
+    /// User messages held for the wait_for_threads result, formatted for it.
+    pub fn take_held(&self, key: &str) -> Option<String> {
+        let msgs = self.held.lock().unwrap().remove(key).unwrap_or_default();
+        if msgs.is_empty() {
+            return None;
+        }
+        let body = msgs
+            .iter()
+            .map(|m| {
+                let mut t = m.text.clone();
+                if !m.attach.is_empty() {
+                    t += &format!("\n(attached: {})", m.attach.join(", "));
+                }
+                t
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        Some(format!(
+            "[message from the user, sent while you were waiting]\n{body}\n\n\
+The user can't see tool calls. Before your next tool call, write them a short reply as text \
+(answer it, or say what you'll do), then act on it."
+        ))
+    }
+
     fn open_injector(&self, key: &str) -> tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<String>> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.injectors.lock().unwrap().insert(key.to_string(), tx);
@@ -1044,6 +1086,16 @@ Pick up where it left off. Check the current state before relying on anything ab
         let result = run_turn(&s, &spec, &mut rx, &mut on_line).await;
         self.injectors.lock().unwrap().remove(key);
         self.nudged.lock().unwrap().remove(key);
+        let left = self.held.lock().unwrap().remove(key).unwrap_or_default();
+        {
+            // Held for a wait that ended without reading them: run them next, in order.
+            let mut queues = self.queues.lock().unwrap();
+            let q = queues.entry(key.to_string()).or_default();
+            for mut m in left.into_iter().rev() {
+                m.id = format!("m{}-held", (now() * 1000.0) as u64);
+                q.push_front(m);
+            }
+        }
         self.waiting.lock().unwrap().remove(key); // in case the turn ended mid-wait
         self.cancels.lock().unwrap().remove(key);
         self.started.lock().unwrap().remove(key);
