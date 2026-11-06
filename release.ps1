@@ -3,6 +3,10 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $version = (Select-String -Path (Join-Path $root 'Cargo.toml') -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
 
+# Keep local paths (user name, folders) out of the binaries: remap source paths and
+# store only the PDB's file name, not its full path.
+$env:RUSTFLAGS = "--remap-path-prefix=$env:USERPROFILE=~ --remap-path-prefix=$root=. -C link-arg=/PDBALTPATH:%_PDB%"
+
 Push-Location $root
 try {
     # via cmd: Windows PowerShell treats cargo's progress output on stderr as errors

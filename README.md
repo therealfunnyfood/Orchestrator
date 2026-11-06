@@ -206,4 +206,4 @@ every launch. Your API key is stored in `%APPDATA%\Orchestrator\settings.json`.
 
 ## License
 
-[MIT](LICENSE) © 2026 therealfunnyfood
+[MIT](LICENSE) © 2026 Orchestrator contributors

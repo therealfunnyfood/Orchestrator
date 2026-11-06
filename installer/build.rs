@@ -28,11 +28,11 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
-      VALUE "CompanyName", "therealfunnyfood"
+      VALUE "CompanyName", "Orchestrator contributors"
       VALUE "FileDescription", "{file_description}"
       VALUE "FileVersion", "{version}"
       VALUE "InternalName", "{original_filename}"
-      VALUE "LegalCopyright", "Copyright (c) 2026 therealfunnyfood. MIT License."
+      VALUE "LegalCopyright", "Copyright (c) 2026 Orchestrator contributors. MIT License."
       VALUE "OriginalFilename", "{original_filename}"
       VALUE "ProductName", "Orchestrator"
       VALUE "ProductVersion", "{version}"
