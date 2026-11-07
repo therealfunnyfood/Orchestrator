@@ -54,8 +54,12 @@ recommended option first and add ' (Recommended)' to its label.",
             "description": "Send a message to the orchestrator that manages you, right now, without ending your turn: \
 e.g. a shared resource is free, you're blocked and need something, or a result it asked you to report straight \
 away. It's delivered immediately (and wakes the orchestrator if it's idle). Your final reply also reaches it, so \
-use this only for things it needs before you finish.",
-            "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]},
+use this only for things it needs before you finish. Set for_user=true when the user has to do, check or \
+decide something now (say exactly what): the orchestrator is then made to tell them right away.",
+            "inputSchema": {"type": "object", "properties": {
+                "message": {"type": "string"},
+                "for_user": {"type": "boolean", "description": "the user needs to act on this now"},
+            }, "required": ["message"]},
         },
         {
             "name": "show_media",
@@ -314,8 +318,9 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
                 return Err("you are the orchestrator; use send_to_thread to message threads".into());
             }
             let text = arg(args, "message").or(arg(args, "text")).filter(|m| !m.trim().is_empty()).ok_or("message is required")?;
-            app.message_orchestrator(key, text)?;
-            Ok("delivered to the orchestrator".into())
+            let for_user = args.get("for_user").and_then(Value::as_bool).unwrap_or(false);
+            app.message_orchestrator(key, text, for_user)?;
+            Ok(if for_user { "delivered to the orchestrator, which will pass it on to the user".into() } else { "delivered to the orchestrator".into() })
         }
         "update_plan" => {
             let items = args.get("items").cloned().unwrap_or(json!([]));
@@ -391,9 +396,17 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             }
             if let Some(m) = app.unanswered(key) {
                 return Ok(format!(
-                    "Not waiting yet: the user sent you a message and you haven't replied:\n\"{m}\"\n\n\
-They can't see tool calls, only text you write. Write your reply to them as text now (answer it, or \
-say what you'll do about it), then call wait_for_threads again."
+                    "Not waiting yet: {m}\n\n\
+The user can't see tool calls or their results, only text you write. Write to them as text now, \
+then call wait_for_threads again."
+                ));
+            }
+            if let Some(gap) = app.silent_for(key, 20.0 * 60.0) {
+                return Ok(format!(
+                    "Not waiting yet: you haven't written anything the user can see in {} minutes. They can't see \
+tool calls or their results. Write them a one- or two-line status (what's done, what's running, anything \
+they need to do or that you said you'd tell them), then call wait_for_threads again.",
+                    (gap / 60.0).round()
                 ));
             }
             let secs = args.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(900.0).clamp(1.0, 3500.0);
@@ -408,6 +421,8 @@ say what you'll do about it), then call wait_for_threads again."
             let early = held.is_some() || nudged || inbox.is_some();
             if let Some(inbox) = inbox {
                 lines.push(format!("\n[messages from threads]\n{inbox}"));
+                lines.push("\n(The user sees none of this. If any of it needs them, or is something you said you'd tell them, \
+tell them now as text before your next tool call.)".into());
             }
             if let Some(h) = held {
                 lines.push(format!("\n{h}"));

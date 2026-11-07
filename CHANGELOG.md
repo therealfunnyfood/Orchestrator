@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.11 (2026-11-07)
+
+- **Threads can flag things you need to do, and the orchestrator has to pass them on.**
+  Before, a thread could report "you can start the test now" and the orchestrator would
+  read it, say nothing, and keep waiting, so you never heard. Threads now mark these
+  messages as for you, and the orchestrator can't wait on threads again until it has told
+  you what to do.
+- **Regular status during long work.** If the orchestrator hasn't written anything you
+  can see for 20 minutes, its next wait is refused until it gives you a short status:
+  what's done, what's running, and anything you need to do or that it said it would tell
+  you.
+- Whenever thread reports arrive, the orchestrator is reminded that you can't see them,
+  and that anything you need to know has to go to you as a message.
+- Builds no longer contain local folder paths.
+
 ## 0.4.10 (2026-11-05)
 
 - **The orchestrator has to reply before it waits again.** In 0.4.9 your mid-turn

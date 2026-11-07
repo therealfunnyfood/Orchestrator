@@ -26,6 +26,9 @@ Keep your orchestrator in the loop, the way a teammate would. Call message_orche
 - ask it a question or for a decision you can't make yourself, then carry on with what you can
   (its answer arrives mid-turn, between your steps; or end your turn with the question open);
 - say you're blocked, or that a shared resource (a port, a device, a branch) is free again.
+When the user has to do, check or decide something now (a step in a hands-on test, a device to
+plug in, an approval), call it with for_user=true and say exactly what they need to do: the
+orchestrator is then made to pass it on to them straight away.
 Keep messages short and purposeful: one or two sentences, not a running commentary.
 The orchestrator may also message you mid-turn to redirect you or add information: follow it.
 Never try to message other Claude sessions any other way.
@@ -43,6 +46,8 @@ You have tools from the `app` MCP server, shown to the user in their window:
 
 /// Sender of a handoff request; when that turn ends, the session is replaced by a new
 /// one that starts from the handoff the agent wrote.
+/// Marks a thread message the user has to act on (message_orchestrator for_user).
+const NEEDS_USER: &str = "[needs the user] ";
 const HANDOFF: &str = "handoff";
 const HANDOFF_PROMPT: &str = "[handoff] This conversation is about to continue in a fresh session that won't see anything above. Write the handoff it will start from. Cover: the goal and what the user asked for, in their words where it matters; what's done and how it was checked; what's in progress and the exact next steps; decisions made and why; files, commands, branches and links that matter; the user's preferences and constraints; open questions and anything risky. If you manage threads, list each one with its job and status. Be specific and complete, and leave out the story of how you got here. Don't take any other action: reply with the handoff only.";
 
@@ -135,6 +140,11 @@ calls, only what you write, so whenever one arrives, first write a short reply t
 the question, or say what you'll change), then act on it and carry on. Never go straight back to
 waiting without replying.
 
+Tool results (including everything wait_for_threads returns) are invisible to the user. When a thread
+reports something the user has to act on, or something you promised to tell them ("wait for my next
+message"), tell them right away as text, with exactly what to do, before your next tool call. During
+long work, write the user a one- or two-line status now and then so they know where things stand.
+
 Threads message you with message_orchestrator (progress, questions, blockers), and when a thread
 finishes a task you gave it, its final report comes to you automatically. These arrive as a
 [messages from threads] block: mid-turn between your steps if you're working, in the result of
@@ -189,6 +199,8 @@ pub struct App {
     /// text since: (the message, how many waits were refused for it). wait_for_threads
     /// won't block until they reply, since the user only sees what they write.
     owes_reply: Mutex<HashMap<String, (String, u8)>>,
+    /// When each running orchestrator turn last wrote the user text (or started).
+    last_text: Mutex<HashMap<String, f64>>,
     /// Finished-turn notices handed to the orchestrator on its next turn.
     notices: Mutex<Vec<String>>,
     /// Mid-turn messages from threads to their orchestrator, by orchestrator key.
@@ -236,6 +248,7 @@ impl App {
             waiting: Mutex::new(HashSet::new()),
             held: Mutex::new(HashMap::new()),
             owes_reply: Mutex::new(HashMap::new()),
+            last_text: Mutex::new(HashMap::new()),
             notices: Mutex::new(Vec::new()),
             inbox: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
@@ -875,9 +888,27 @@ Pick up where it left off. Check the current state before relying on anything ab
     /// A thread's mid-turn message to its orchestrator. Delivered right away: into a
     /// new orchestrator turn if it's idle, otherwise into its current turn (it wakes
     /// wait_for_threads) or the start of its next one.
-    pub fn message_orchestrator(self: &Arc<Self>, from: &str, text: &str) -> Result<(), String> {
-        self.hub.emit(from, json!({"kind": "notice", "text": format!("→ messaged the orchestrator: {}", crate::events::clip(text))}));
-        self.post_to_orchestrator(from, text)
+    pub fn message_orchestrator(self: &Arc<Self>, from: &str, text: &str, for_user: bool) -> Result<(), String> {
+        let label = if for_user { "→ messaged the orchestrator (for you)" } else { "→ messaged the orchestrator" };
+        self.hub.emit(from, json!({"kind": "notice", "text": format!("{label}: {}", crate::events::clip(text))}));
+        if for_user {
+            self.post_to_orchestrator(from, &format!("{NEEDS_USER}{text}"))
+        } else {
+            self.post_to_orchestrator(from, text)
+        }
+    }
+
+    /// Seconds since the orchestrator last wrote the user any text in this turn, the
+    /// first time that passes `limit`; then the clock restarts.
+    pub fn silent_for(&self, key: &str, limit: f64) -> Option<f64> {
+        let mut m = self.last_text.lock().unwrap();
+        let t = m.get_mut(key)?;
+        let gap = now() - *t;
+        if gap < limit {
+            return None;
+        }
+        *t = now();
+        Some(gap)
     }
 
     /// Hand a thread's message or report to its orchestrator: into its turn if it's
@@ -909,6 +940,13 @@ Pick up where it left off. Check the current state before relying on anything ab
     /// Take the orchestrator's pending thread messages, formatted for a prompt.
     pub fn drain_inbox(&self, key: &str) -> Option<String> {
         let msgs = self.inbox.lock().unwrap().remove(key).filter(|m| !m.is_empty())?;
+        if let Some((from, text)) = msgs.iter().rev().find(|(_, t)| t.starts_with(NEEDS_USER)) {
+            let t: String = text[NEEDS_USER.len()..].chars().take(600).collect();
+            self.owe(key, format!(
+                "thread {from} says the user needs to act, and you haven't told them:\n\"{t}\"\n\
+Pass on exactly what they need to do."
+            ));
+        }
         Some(
             msgs.iter()
                 .map(|(from, text)| if from.is_empty() { text.clone() } else { format!("[from thread {from}]\n{text}") })
@@ -934,11 +972,14 @@ Pick up where it left off. Check the current state before relying on anything ab
         self.nudged.lock().unwrap().remove(key)
     }
 
+    /// The user sent this orchestrator `text` mid-turn: it must answer before waiting again.
     fn owe_reply(&self, key: &str, text: &str) {
-        let mut o = self.owes_reply.lock().unwrap();
-        let e = o.entry(key.to_string()).or_insert((String::new(), 0));
-        e.0 = text.chars().take(400).collect();
-        e.1 = 0;
+        let t: String = text.chars().take(400).collect();
+        self.owe(key, format!("the user sent you a message and you haven't replied:\n\"{t}\""));
+    }
+
+    fn owe(&self, key: &str, reason: String) {
+        self.owes_reply.lock().unwrap().insert(key.to_string(), (reason, 0));
     }
 
     /// The user message this orchestrator hasn't answered yet, if it should answer before
@@ -1106,6 +1147,7 @@ The user can't see tool calls. Before your next tool call, write them a short re
                 })
             {
                 app.owes_reply.lock().unwrap().remove(&k);
+                app.last_text.lock().unwrap().insert(k.clone(), now());
             }
             for ev in app.hub.translate(&k, v) {
                 app.hub.emit(&k, ev);
@@ -1122,10 +1164,12 @@ The user can't see tool calls. Before your next tool call, write them a short re
                 }
             }
         };
+        self.last_text.lock().unwrap().insert(key.to_string(), now());
         let result = run_turn(&s, &spec, &mut rx, &mut on_line).await;
         self.injectors.lock().unwrap().remove(key);
         self.nudged.lock().unwrap().remove(key);
         self.owes_reply.lock().unwrap().remove(key);
+        self.last_text.lock().unwrap().remove(key);
         let left = self.held.lock().unwrap().remove(key).unwrap_or_default();
         {
             // Held for a wait that ended without reading them: run them next, in order.
