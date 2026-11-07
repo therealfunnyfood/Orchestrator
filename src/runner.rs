@@ -75,6 +75,8 @@ pub struct TurnResult {
     pub backend_used: String,
     pub key_source: String,
     pub limited: bool,
+    /// When the usage limit that stopped this turn resets (unix seconds), if reported.
+    pub resets_at: Option<f64>,
     pub notes: Vec<String>,
 }
 
@@ -266,6 +268,7 @@ async fn run_once(
                     Some("rate_limit_event") => {
                         if v.pointer("/rate_limit_info/status").and_then(Value::as_str) == Some("rejected") {
                             out.limited = true;
+                            out.resets_at = v.pointer("/rate_limit_info/resetsAt").and_then(Value::as_f64);
                         }
                     }
                     Some("result") => {

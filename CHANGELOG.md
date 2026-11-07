@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.13 (2026-11-07)
+
+- **Work continues by itself after a usage limit.** When the orchestrator or a thread is
+  stopped by your plan's usage limit, it now picks up where it left off a minute after the
+  limit resets. Its chat shows when that will be. Sending it a message or pressing stop
+  first cancels the automatic restart. Restarting the app also cancels it.
+
 ## 0.4.12 (2026-11-07)
 
 - **The orchestrator now follows up when a thread reports back.** Before, if it said

@@ -199,6 +199,8 @@ pub struct App {
     /// text since: (the message, how many waits were refused for it). wait_for_threads
     /// won't block until they reply, since the user only sees what they write.
     owes_reply: Mutex<HashMap<String, (String, u8)>>,
+    /// Conversations stopped by a usage limit, and when they continue by themselves.
+    resumes: Mutex<HashMap<String, f64>>,
     /// When each running orchestrator turn last wrote the user text (or started).
     last_text: Mutex<HashMap<String, f64>>,
     /// Finished-turn notices handed to the orchestrator on its next turn.
@@ -248,6 +250,7 @@ impl App {
             waiting: Mutex::new(HashSet::new()),
             held: Mutex::new(HashMap::new()),
             owes_reply: Mutex::new(HashMap::new()),
+            resumes: Mutex::new(HashMap::new()),
             last_text: Mutex::new(HashMap::new()),
             notices: Mutex::new(Vec::new()),
             inbox: Mutex::new(HashMap::new()),
@@ -457,8 +460,46 @@ impl App {
         Ok(())
     }
 
+    /// A turn cut off by a usage limit: continue the conversation by itself once the
+    /// limit resets. Returns a note for the turn's notice.
+    fn resume_after_limit(self: &Arc<Self>, key: &str, r: &crate::runner::TurnResult) -> Option<String> {
+        if !r.limited || !r.is_error {
+            return None;
+        }
+        // A minute after the reset; if Claude Code didn't say when, try again in 30 minutes.
+        let at = r.resets_at.map_or(now() + 1800.0, |t| t + 60.0).max(now() + 60.0);
+        self.resumes.lock().unwrap().insert(key.to_string(), at);
+        let (app, key) = (self.clone(), key.to_string());
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs_f64((at - now()).max(0.0))).await;
+            {
+                // Something else ran (or the user stopped it) since: nothing to do.
+                let mut m = app.resumes.lock().unwrap();
+                if m.get(&key) != Some(&at) {
+                    return;
+                }
+                m.remove(&key);
+            }
+            if !key.starts_with(ORCHESTRATOR) && app.store.lock().unwrap().get(&key).is_none() {
+                return; // deleted
+            }
+            let text = if key.starts_with(ORCHESTRATOR) {
+                "Your last turn was cut off by a usage limit, which has now reset. Pick up where you left off: check on your threads (some may have been stopped by the same limit and are continuing by themselves), then carry on. Tell the user in a line that you're back."
+            } else {
+                "Your last turn was cut off by a usage limit, which has now reset. Pick up where you left off and finish the task."
+            };
+            app.enqueue(&key, Queued { id: String::new(), text: text.into(), sender: "app".into(), attach: vec![], fork: None }, false);
+        });
+        let mins = ((at - now()) / 60.0).round() as i64;
+        let when = if mins >= 60 { format!("{}h {}m", mins / 60, mins % 60) } else { format!("{mins}m") };
+        Some(format!("usage limit: continues by itself in about {when}, when it resets"))
+    }
+
     pub fn stop(&self, key: &str) -> bool {
         self.questions.lock().unwrap().retain(|_, q| q.key != key);
+        if self.resumes.lock().unwrap().remove(key).is_some() {
+            self.hub.emit(key, json!({"kind": "notice", "text": "won't continue by itself after the usage limit resets"}));
+        }
         match self.cancels.lock().unwrap().get(key) {
             Some(tx) => tx.send(true).is_ok(),
             None => false,
@@ -736,6 +777,7 @@ Pick up where it left off. Check the current state before relying on anything ab
         }) else {
             return; // deleted while queued
         };
+        self.resumes.lock().unwrap().remove(name);
         let (tx, mut rx) = watch::channel(false);
         self.cancels.lock().unwrap().insert(name.into(), tx);
         let t0 = now();
@@ -841,7 +883,9 @@ Pick up where it left off. Check the current state before relying on anything ab
                     row.turns += 1;
                     row.cost_usd += r.cost_usd;
                     row.updated_at = now();
-                    let extra = if r.notes.is_empty() { String::new() } else { format!(" ({})", r.notes.join("; ")) };
+                    let mut notes = r.notes.clone();
+                    notes.extend(self.resume_after_limit(name, r));
+                    let extra = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
                     self.hub.emit(name, json!({"kind": "notice", "text": format!("ran on {} via {}{extra}", r.backend_used, r.key_source)}));
                     Some(format!(
                         "thread {name} {} on {}{extra}",
@@ -1104,6 +1148,7 @@ The user can't see tool calls. Before your next tool call, write them a short re
     }
 
     async fn orchestrator_turn(self: &Arc<Self>, key: &str, msg: &Queued) {
+        self.resumes.lock().unwrap().remove(key);
         let (tx, mut rx) = watch::channel(false);
         self.cancels.lock().unwrap().insert(key.into(), tx);
         self.started.lock().unwrap().insert(key.into(), now());
@@ -1215,9 +1260,11 @@ The user can't see tool calls. Before your next tool call, write them a short re
                 o.cost_usd += r.cost_usd;
                 o.turns += 1;
                 st.save();
-                let extra = if r.notes.is_empty() { String::new() } else { format!(" ({})", r.notes.join("; ")) };
-                self.hub.emit(key, json!({"kind": "notice", "text": format!("ran on {} via {}{extra}", r.backend_used, r.key_source)}));
                 drop(st);
+                let mut notes = r.notes.clone();
+                notes.extend(self.resume_after_limit(key, &r));
+                let extra = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
+                self.hub.emit(key, json!({"kind": "notice", "text": format!("ran on {} via {}{extra}", r.backend_used, r.key_source)}));
                 if msg.sender == HANDOFF && !r.is_error && !r.text.trim().is_empty() {
                     self.finish_handoff(key, &r.text);
                 }
