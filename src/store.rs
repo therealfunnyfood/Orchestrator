@@ -106,6 +106,12 @@ pub struct Store {
     pub session_costs: BTreeMap<String, f64>,
     /// Version of the cost accounting the saved numbers were counted with.
     pub cost_version: u32,
+    /// The orchestrator's lessons about working with this user (all workspaces): mistakes
+    /// it made and how the user talks. Written with save_lessons.
+    pub lessons: String,
+    pub lessons_updated_at: f64,
+    /// User messages to the orchestrator since it last reviewed its lessons.
+    pub since_lessons: u32,
     #[serde(skip)]
     path: PathBuf,
 }

@@ -80,6 +80,9 @@ How to work:
     tidy. Sending a resolved thread new work reopens it, so resolve freely.
 - Use wait_for_threads when you have nothing to do until threads report; it returns early when a
   thread messages you or finishes.
+- If the plan's usage limit stops you or a thread, the app restarts it by itself a minute after the
+  limit resets, with a note to pick up where it left off. So "carry on when my usage comes back" needs
+  nothing from the user: say it will continue automatically when the limit resets.
 - Do small lookups yourself with Read/Glob/Grep; delegate real work.
 - Keep the user informed: say what you started, and summarize results when done.
 
@@ -105,6 +108,19 @@ a thread's result, give a verdict with rate_thread: right, too_weak (needed a st
 or too_strong (a cheaper one would have done). After a batch of work, or about once a day, call
 efficiency_report and update save_tuning_notes with concrete rules you've learned for this project
 (e.g. "docs/README edits: haiku, low"; "parser bugs in src/: opus, medium"). Follow your tuning notes.
+
+# Learning from the user
+You keep lessons about working with this user (shown below under "Lessons", saved with save_lessons,
+shared across all their projects). They're how you get better over time, so keep them current:
+- When the user corrects you, repeats themselves, or is frustrated ("I told you…", "that's not what I
+  meant", "why didn't you…"), first fix the problem, then save a lesson: what you did wrong and the
+  rule that prevents it next time.
+- Learn how they talk: their shorthand, what they mean by phrases they use often, how much detail
+  they want, what they care about. E.g. "'when my usage comes back' means resume automatically when
+  the limit resets, not when they tell you".
+- save_lessons replaces the whole list: merge new lessons into the old ones, keep each to one or two
+  lines, combine duplicates, and drop ones that turned out wrong. Keep it under about 40 lines.
+- Follow your lessons. They come from the user and outrank your defaults (but not their newer words).
 
 # Timelines
 Give the user realistic timelines, learned from this project's history:
@@ -199,6 +215,8 @@ pub struct App {
     /// text since: (the message, how many waits were refused for it). wait_for_threads
     /// won't block until they reply, since the user only sees what they write.
     owes_reply: Mutex<HashMap<String, (String, u8)>>,
+    /// Orchestrators the user corrected that haven't saved a lesson yet.
+    owes_lesson: Mutex<HashSet<String>>,
     /// Conversations stopped by a usage limit, and when they continue by themselves.
     resumes: Mutex<HashMap<String, f64>>,
     /// When each running orchestrator turn last wrote the user text (or started).
@@ -250,6 +268,7 @@ impl App {
             waiting: Mutex::new(HashSet::new()),
             held: Mutex::new(HashMap::new()),
             owes_reply: Mutex::new(HashMap::new()),
+            owes_lesson: Mutex::new(HashSet::new()),
             resumes: Mutex::new(HashMap::new()),
             last_text: Mutex::new(HashMap::new()),
             notices: Mutex::new(Vec::new()),
@@ -349,12 +368,18 @@ impl App {
         let threads: Vec<Value> = rows.iter().map(|t| self.thread_json(t)).collect();
         let running = self.workers.lock().unwrap().len();
         let waiting = self.questions.lock().unwrap().len();
+        let project = {
+            let st = self.store.lock().unwrap();
+            let n = st.notes(&ws).cloned().unwrap_or_default();
+            json!({
+                "brief": n.brief, "rules": n.rules, "tuning": n.tuning, "imported_at": n.imported_at, "updated_at": n.updated_at,
+                "lessons": st.lessons, "lessons_updated_at": st.lessons_updated_at,
+            })
+        };
         json!({
             "workspace": ws, "recent_workspaces": recent, "orchestrator": self.orch_json(),
             "threads": threads, "running": running, "waiting": waiting,
-            "project": self.store.lock().unwrap().notes(&ws).cloned().map(|n| json!({
-                "brief": n.brief, "rules": n.rules, "tuning": n.tuning, "imported_at": n.imported_at, "updated_at": n.updated_at,
-            })),
+            "project": project,
             "defaults": {
                 "thread_backend": s.thread_backend, "thread_model": s.thread_model,
                 "thread_effort": s.thread_effort, "api_key_set": !s.api_key.trim().is_empty(),
@@ -621,7 +646,12 @@ impl App {
                 return true;
             }
         }
-        let (prompt, images) = with_attachments(&msg.text, &msg.attach);
+        let (mut prompt, images) = with_attachments(&msg.text, &msg.attach);
+        if key.starts_with(ORCHESTRATOR) && msg.sender == "you" {
+            if let Some(n) = self.lesson_note(key, &msg.text) {
+                prompt = format!("{prompt}\n\n{n}");
+            }
+        }
         if tx.send(user_line(&prompt, &images)).is_err() {
             return false;
         }
@@ -1077,6 +1107,8 @@ Tell them in a line or two what changed, and anything they're waiting on or now 
             })
             .collect::<Vec<_>>()
             .join("\n---\n");
+        let notes: Vec<String> = msgs.iter().filter_map(|m| self.lesson_note(key, &m.text)).collect();
+        let body = if notes.is_empty() { body } else { format!("{body}\n\n{}", notes.join("\n")) };
         Some(format!(
             "[message from the user, sent while you were waiting]\n{body}\n\n\
 The user can't see tool calls. Before your next tool call, write them a short reply as text \
@@ -1163,7 +1195,12 @@ The user can't see tool calls. Before your next tool call, write them a short re
         }
         self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach, "resume_at": start_point}));
         self.touch();
-        let (text, images) = with_attachments(&msg.text, &msg.attach);
+        let (mut text, images) = with_attachments(&msg.text, &msg.attach);
+        if msg.sender == "you" {
+            if let Some(n) = self.lesson_note(key, &msg.text) {
+                text = format!("{text}\n\n{n}");
+            }
+        }
         let text = text.as_str();
 
         let notices: Vec<String> = std::mem::take(&mut *self.notices.lock().unwrap());
@@ -1693,6 +1730,9 @@ Mention it only if the user asks about cost or usage.{}\n",
                 p += &format!("\n# Your tuning notes (model/effort lessons for this project)\n{}\n", n.tuning.trim());
             }
         }
+        if !st.lessons.trim().is_empty() {
+            p += &format!("\n# Lessons (yours, about working with this user; saved with save_lessons)\n{}\n", st.lessons.trim());
+        }
         p
     }
 
@@ -1703,6 +1743,47 @@ Mention it only if the user asks about cost or usage.{}\n",
             p += &format!("\n\nRules for this project (never break these without asking the user via ask_user):\n{}", n.rules.trim());
         }
         p
+    }
+
+    /// Replace the orchestrator's lessons about working with the user.
+    pub fn save_lessons(&self, key: &str, lessons: &str) -> Result<(), String> {
+        let lessons = lessons.trim();
+        if lessons.chars().count() > 8000 {
+            return Err("too long: keep lessons under about 40 short lines (merge and trim, then save again)".into());
+        }
+        let mut st = self.store.lock().unwrap();
+        st.lessons = lessons.to_string();
+        st.lessons_updated_at = now();
+        st.since_lessons = 0;
+        st.save();
+        drop(st);
+        self.owes_lesson.lock().unwrap().remove(key);
+        self.touch();
+        Ok(())
+    }
+
+    /// Notes the app adds to a user message for the orchestrator: a correction should
+    /// become a lesson, and every so often it reviews how the user talks.
+    fn lesson_note(&self, key: &str, text: &str) -> Option<String> {
+        if looks_like_correction(text) {
+            self.owes_lesson.lock().unwrap().insert(key.to_string());
+            return Some("(App note: this reads like a correction. Fix it first; then, before you wait on threads \
+again, call save_lessons with what went wrong and the rule that prevents it, merged into your existing lessons.)".into());
+        }
+        let mut st = self.store.lock().unwrap();
+        st.since_lessons += 1;
+        let due = st.since_lessons >= 25;
+        if due {
+            st.since_lessons = 0;
+        }
+        st.save();
+        due.then(|| "(App note: at a quiet moment this turn, look back over your recent exchanges with the user and \
+update save_lessons with anything you've learned about how they talk, what they mean, and what they want.)".into())
+    }
+
+    /// Whether the orchestrator still has to save a lesson from a correction (asked once).
+    pub fn take_owed_lesson(&self, key: &str) -> bool {
+        self.owes_lesson.lock().unwrap().remove(key)
     }
 
     pub fn save_tuning(&self, tuning: &str) {
@@ -2166,4 +2247,19 @@ fn transcript_uuid(v: &Value) -> Option<String> {
         return v.get("uuid").and_then(Value::as_str).map(str::to_string);
     }
     None
+}
+
+/// Whether a user message reads like a correction of the orchestrator.
+fn looks_like_correction(text: &str) -> bool {
+    let t = text.to_lowercase().replace('\u{2019}', "").replace('\'', "");
+    let t = t.trim();
+    const PHRASES: &[&str] = &[
+        "i told you", "i said", "like i said", "as i said", "i already", "i meant", "not what i",
+        "thats not", "that is not", "thats what i", "you didnt", "you did not", "why didnt you",
+        "why did you", "why are you", "you forgot", "you were supposed", "you keep", "you still",
+        "you never", "i asked you", "i asked for", "didnt i", "you misunderstood", "stop doing",
+        "dont do that", "wrong", "not like that",
+    ];
+    t.starts_with("no ") || t.starts_with("no,") || t.starts_with("nope") || t == "no"
+        || PHRASES.iter().any(|p| t.contains(p))
 }

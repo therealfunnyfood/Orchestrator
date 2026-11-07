@@ -1119,6 +1119,7 @@ function renderBrief() {
     edit.onclick = () => { view.classList.toggle("hidden"); ta.classList.toggle("hidden"); saveB.classList.toggle("hidden"); edit.textContent = ta.classList.contains("hidden") ? "Edit" : "Cancel"; };
     saveB.onclick = async () => {
       if (field === "tuning") await api("/api/tuning", { body: { notes: ta.value } }).catch(fail);
+      else if (field === "lessons") await api("/api/lessons", { body: { lessons: ta.value } }).catch(fail);
       else await api("/api/notes", { body: { [field]: ta.value } }).catch(fail);
       await loadState();
       renderBrief();
@@ -1127,6 +1128,7 @@ function renderBrief() {
     row.append(edit, saveB);
     page.append(view, ta, row);
   };
+  section("Lessons", "lessons", "What the orchestrator has learned about working with you: mistakes it shouldn't repeat and how you talk. Shared across all your projects. It updates these itself; you can edit them too.");
   section("Rules", "rules", "Added to every thread's instructions in this workspace.");
   section("Tuning notes", "tuning", "The orchestrator's own lessons about which model and effort fit which work in this project. It updates these from the efficiency stats; you can edit them too.");
   section("Brief", "brief", "Shown to the orchestrator in every conversation in this workspace.");

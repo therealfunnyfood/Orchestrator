@@ -172,6 +172,14 @@ stronger model/effort) or too_strong (a cheaper one would have done). note: a fe
             }, "required": ["name", "verdict"]},
         },
         {
+            "name": "save_lessons",
+            "description": "Replace your lessons about working with this user (all their projects): mistakes you made \
+and the rules that prevent them, and how they talk (shorthand, what phrases mean, what they want). Merge new \
+lessons into the existing ones, one or two lines each, under about 40 lines. Shown to you in every future \
+conversation; the user can read and edit them.",
+            "inputSchema": {"type": "object", "properties": {"lessons": {"type": "string"}}, "required": ["lessons"]},
+        },
+        {
             "name": "save_tuning_notes",
             "description": "Replace your tuning notes for this project: concrete rules about which model and effort \
 fit which kinds of work, learned from efficiency_report and your verdicts. They're shown to you in every \
@@ -401,6 +409,10 @@ The user can't see tool calls or their results, only text you write. Write to th
 then call wait_for_threads again."
                 ));
             }
+            if app.take_owed_lesson(key) {
+                return Ok("Not waiting yet: the user corrected you and you haven't saved the lesson. Call save_lessons \
+with what went wrong and the rule that prevents it (merged into your existing lessons), then wait again.".into());
+            }
             if let Some(gap) = app.silent_for(key, 20.0 * 60.0) {
                 return Ok(format!(
                     "Not waiting yet: you haven't written anything the user can see in {} minutes. They can't see \
@@ -557,6 +569,10 @@ tell them now as text before your next tool call.)".into());
             let n = arg(args, "name").ok_or("name is required")?;
             app.rate_thread(n, arg(args, "verdict").unwrap_or(""), arg(args, "note").unwrap_or(""))?;
             Ok("recorded".into())
+        }
+        "save_lessons" => {
+            app.save_lessons(key, arg(args, "lessons").ok_or("lessons is required")?)?;
+            Ok("saved".into())
         }
         "save_tuning_notes" => {
             app.save_tuning(arg(args, "notes").ok_or("notes is required")?);

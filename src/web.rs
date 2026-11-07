@@ -101,6 +101,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/efficiency", get(|State(a): State<Shared>| async move { Json(a.efficiency_json(7.0)) }))
         .route("/api/timing", get(|State(a): State<Shared>| async move { Json(a.timing_json(30.0)) }))
         .route("/api/tuning", post(tuning))
+        .route("/api/lessons", post(lessons))
         .route("/api/show", post(|| async { Json(json!({"shown": crate::show_main()})) }))
         .route("/api/plan-usage/refresh", post(refresh_plan_usage))
         .route("/api/queue", post(queue))
@@ -484,6 +485,11 @@ async fn set_mix(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
 
 async fn refresh_plan_usage(State(app): State<Shared>) -> ApiResult {
     Ok(Json(json!({"plan_usage": app.refresh_plan_usage().await?})))
+}
+
+async fn lessons(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
+    app.save_lessons("", s(&b, "lessons").unwrap_or("")).map_err(ApiError)?;
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn tuning(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {

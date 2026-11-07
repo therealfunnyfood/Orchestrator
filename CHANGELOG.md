@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.14 (2026-11-07)
+
+- **The orchestrator learns from its mistakes and from how you talk.** It keeps a list of
+  lessons that it reads at the start of every conversation, in all your projects. When you
+  correct it ("I told you…", "that's not what I meant", "no, …"), it has to fix the problem and
+  save a lesson before it can wait on threads again. Every 25 messages it also looks back at
+  how you phrase things and what you meant, and updates the list.
+- **See and edit the lessons** on the brief page, under "Lessons".
+- The orchestrator now knows that work stopped by a usage limit continues by itself when the
+  limit resets.
+
 ## 0.4.13 (2026-11-07)
 
 - **Work continues by itself after a usage limit.** When the orchestrator or a thread is
