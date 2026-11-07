@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.12 (2026-11-07)
+
+- **The orchestrator now follows up when a thread reports back.** Before, if it said
+  "wait for my message" and a thread then finished the step, it could read the report and
+  go straight back to waiting, so you never heard. Now any thread report means it has to
+  write to you before it can wait again.
+- If it still won't pass something on, the app shows you the thread's report itself in
+  the orchestrator's chat.
+
 ## 0.4.11 (2026-11-07)
 
 - **Threads can flag things you need to do, and the orchestrator has to pass them on.**

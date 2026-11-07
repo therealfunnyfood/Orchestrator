@@ -946,6 +946,15 @@ Pick up where it left off. Check the current state before relying on anything ab
                 "thread {from} says the user needs to act, and you haven't told them:\n\"{t}\"\n\
 Pass on exactly what they need to do."
             ));
+        } else if let Some((from, text)) = msgs.last() {
+            // Any thread news: the user may be waiting on it ("wait for switched"), and they
+            // can't see tool results, so the orchestrator says something before waiting again.
+            let t: String = text.chars().take(600).collect();
+            let who = if from.is_empty() { "a thread".to_string() } else { format!("thread {from}") };
+            self.owe_news(key, format!(
+                "{who} reported news the user hasn't heard:\n\"{t}\"\n\
+Tell them in a line or two what changed, and anything they're waiting on or now need to do."
+            ));
         }
         Some(
             msgs.iter()
@@ -982,13 +991,22 @@ Pass on exactly what they need to do."
         self.owes_reply.lock().unwrap().insert(key.to_string(), (reason, 0));
     }
 
+    /// Like `owe`, but never replaces a pending reply to the user's own message.
+    fn owe_news(&self, key: &str, reason: String) {
+        self.owes_reply.lock().unwrap().entry(key.to_string()).or_insert((reason, 0));
+    }
+
     /// The user message this orchestrator hasn't answered yet, if it should answer before
     /// waiting again. Gives up after two refusals so a stubborn model can't loop.
     pub fn unanswered(&self, key: &str) -> Option<String> {
         let mut o = self.owes_reply.lock().unwrap();
         let e = o.get_mut(key)?;
         if e.1 >= 2 {
-            o.remove(key);
+            // It ignored two refusals: show the user what it wouldn't pass on.
+            let (reason, _) = o.remove(key).unwrap_or_default();
+            drop(o);
+            self.hub.emit(key, json!({"kind": "notice", "text": format!(
+                "The orchestrator went back to waiting without telling you this: {reason}")}));
             return None;
         }
         e.1 += 1;
