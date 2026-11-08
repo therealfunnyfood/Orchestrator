@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.15 (2026-11-07)
+
+- **No more "your message didn't come through".** When a thread's report arrived while the
+  orchestrator was waiting, the app told it that *you* had sent a message. It then went looking
+  for a message from you and asked you to send it again. Now it's told the report came from a
+  thread.
+- **Automatic restarts are labelled.** The message that restarts work after a usage limit resets
+  now shows in the chat as "↻ automatic", not as a message from you. The orchestrator and threads
+  are told it came from the app, not from you.
+
 ## 0.4.14 (2026-11-07)
 
 - **The orchestrator learns from its mistakes and from how you talk.** It keeps a list of

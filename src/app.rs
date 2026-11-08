@@ -205,7 +205,8 @@ pub struct App {
     /// Feeds messages into the turn currently running on each key.
     injectors: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>,
     /// Orchestrators with a mid-turn message from the user waiting; it ends wait_for_threads.
-    nudged: Mutex<HashSet<String>>,
+    /// Orchestrators that got a message mid-wait: true if one was from the user.
+    nudged: Mutex<HashMap<String, bool>>,
     /// Orchestrators blocked in wait_for_threads (thread messages go into its result).
     waiting: Mutex<HashSet<String>>,
     /// User messages that arrived while the orchestrator was in wait_for_threads: handed
@@ -264,7 +265,7 @@ impl App {
             workers: Mutex::new(HashSet::new()),
             cancels: Mutex::new(HashMap::new()),
             injectors: Mutex::new(HashMap::new()),
-            nudged: Mutex::new(HashSet::new()),
+            nudged: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashSet::new()),
             held: Mutex::new(HashMap::new()),
             owes_reply: Mutex::new(HashMap::new()),
@@ -509,9 +510,11 @@ impl App {
                 return; // deleted
             }
             let text = if key.starts_with(ORCHESTRATOR) {
-                "Your last turn was cut off by a usage limit, which has now reset. Pick up where you left off: check on your threads (some may have been stopped by the same limit and are continuing by themselves), then carry on. Tell the user in a line that you're back."
+                "[Automatic message from the Orchestrator app. The user did NOT send this; don't treat it as their message or thank them for it.]
+Your last turn was cut off by a usage limit, which has now reset. Pick up where you left off: check on your threads (some may have been stopped by the same limit and are continuing by themselves), then carry on. Tell the user in a line that you're back."
             } else {
-                "Your last turn was cut off by a usage limit, which has now reset. Pick up where you left off and finish the task."
+                "[Automatic message from the Orchestrator app, not from the user or the orchestrator.]
+Your last turn was cut off by a usage limit, which has now reset. Pick up where you left off and finish the task."
             };
             app.enqueue(&key, Queued { id: String::new(), text: text.into(), sender: "app".into(), attach: vec![], fork: None }, false);
         });
@@ -641,7 +644,7 @@ impl App {
                 self.held.lock().unwrap().entry(key.to_string()).or_default().push(msg.clone());
                 drop(waiting);
                 self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach, "injected": true}));
-                self.nudged.lock().unwrap().insert(key.to_string());
+                self.nudged.lock().unwrap().insert(key.to_string(), true);
                 self.touch();
                 return true;
             }
@@ -660,7 +663,9 @@ impl App {
             if msg.sender == "you" {
                 self.owe_reply(key, &msg.text);
             }
-            self.nudged.lock().unwrap().insert(key.to_string());
+            let mut n = self.nudged.lock().unwrap();
+            let from_user = msg.sender == "you" || n.get(key).copied().unwrap_or(false);
+            n.insert(key.to_string(), from_user);
         } else {
             let mut st = self.store.lock().unwrap();
             if let Some(r) = st.get_mut(key) {
@@ -1050,8 +1055,9 @@ Tell them in a line or two what changed, and anything they're waiting on or now 
         }
     }
 
-    /// Whether the user messaged this orchestrator mid-turn since it last checked.
-    pub fn take_nudge(&self, key: &str) -> bool {
+    /// Whether a message reached this orchestrator mid-turn since it last checked:
+    /// None, Some(true) if the user sent one, Some(false) if only threads or the app did.
+    pub fn take_nudge(&self, key: &str) -> Option<bool> {
         self.nudged.lock().unwrap().remove(key)
     }
 
@@ -1130,7 +1136,7 @@ The user can't see tool calls. Before your next tool call, write them a short re
         self.waiting.lock().unwrap().insert(key.clone());
         loop {
             let notified = self.changed.notified();
-            if !names.iter().any(|n| self.busy(n)) || self.has_inbox(&key) || self.nudged.lock().unwrap().contains(&key) {
+            if !names.iter().any(|n| self.busy(n)) || self.has_inbox(&key) || self.nudged.lock().unwrap().contains_key(&key) {
                 break;
             }
             tokio::select! {

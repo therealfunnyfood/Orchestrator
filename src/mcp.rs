@@ -430,7 +430,7 @@ they need to do or that you said you'd tell them), then call wait_for_threads ag
             let held = app.take_held(key);
             let nudged = app.take_nudge(key);
             let inbox = app.drain_inbox(key);
-            let early = held.is_some() || nudged || inbox.is_some();
+            let early = held.is_some() || nudged.is_some() || inbox.is_some();
             if let Some(inbox) = inbox {
                 lines.push(format!("\n[messages from threads]\n{inbox}"));
                 lines.push("\n(The user sees none of this. If any of it needs them, or is something you said you'd tell them, \
@@ -438,8 +438,10 @@ tell them now as text before your next tool call.)".into());
             }
             if let Some(h) = held {
                 lines.push(format!("\n{h}"));
-            } else if nudged {
+            } else if nudged == Some(true) {
                 lines.push("(the user sent you a message, which follows this result: reply to them as text before anything else)".into());
+            } else if nudged == Some(false) {
+                lines.push("(a message from a thread or the app follows this result; it's not from the user)".into());
             }
             if early && !still.is_empty() {
                 lines.push(format!("(returned early; still running: {still_list})"));

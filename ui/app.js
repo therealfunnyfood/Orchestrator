@@ -618,6 +618,15 @@ function renderEventInner(ev, log) {
       log.append(e);
       return;
     }
+    if (ev.sender === "app") {
+      const e = h("div", "ev user setup");
+      e.append(h("span", "who", "↻ automatic"), h("span", "sum", "Sent by the app, not you: the usage limit reset, so it's carrying on. Click to see the message."));
+      e.append(h("div", "body", ev.text));
+      e.onclick = () => e.classList.toggle("open");
+      e.dataset.ts = String(ev.ts);
+      log.append(e);
+      return;
+    }
     if (ev.sender === "setup") {
       const e = h("div", "ev user setup");
       e.append(h("span", "who", "project import"), h("span", "sum", "Set up this project from its Claude Code history, carry over every rule, and continue unfinished work."));
@@ -1192,6 +1201,7 @@ function renderQueue() {
     r.append(h("span", "n", String(i + 1)));
     if (m.edit) r.append(h("span", "tag", "edit"));
     if (m.sender === "orchestrator") r.append(h("span", "tag", "from orchestrator"));
+    if (m.sender === "app") r.append(h("span", "tag", "automatic"));
     const t = h("span", "t", m.text + (m.attachments?.length ? `  📎${m.attachments.length}` : ""));
     t.title = m.text;
     r.append(t);
