@@ -48,7 +48,7 @@ const S = {
   seen: new Set(),   // events already rendered in the current log (history + live can overlap)
   side: null,        // thread shown in the side panel
 };
-const APP_TOOLS = new Set(["mcp__app__update_plan", "mcp__app__ask_user", "mcp__app__show_media"]);
+const APP_TOOLS = new Set(["mcp__app__update_plan", "mcp__app__ask_user", "mcp__app__show_media", "mcp__app__tell_user"]);
 const fileUrl = (p) => `/file?t=${encodeURIComponent(ORCH.token)}&path=${encodeURIComponent(p)}`;
 const IMG_EXT = /\.(png|jpe?g|gif|webp|svg|bmp)$/i;
 

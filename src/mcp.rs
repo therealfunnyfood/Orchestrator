@@ -130,11 +130,20 @@ the actual times, and your recent estimates. Use it to give realistic timelines.
             "inputSchema": {"type": "object", "properties": {"days": {"type": "number"}}},
         },
         {
+            "name": "tell_user",
+            "description": "Show the user a message in the chat, right now. Use it to reply to them, give status, \
+and tell them what you're about to wait for. It's the sure way they hear from you: your thinking and tool \
+calls are invisible to them, so a reply you only think doesn't reach them.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+        },
+        {
             "name": "wait_for_threads",
-            "description": "Wait until the named threads (or all of this workspace's threads if names is empty) finish their current turn, or until timeout_seconds passes (default 900).",
+            "description": "Wait until the named threads (or all of this workspace's threads if names is empty) finish their current turn, or until timeout_seconds passes (default 900). \
+message, if given, is shown to the user first (like tell_user): use it to reply or say what you're waiting for.",
             "inputSchema": {"type": "object", "properties": {
                 "names": {"type": "array", "items": {"type": "string"}},
                 "timeout_seconds": {"type": "number"},
+                "message": {"type": "string"},
             }},
         },
         {
@@ -402,11 +411,14 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             if names.is_empty() {
                 names = app.thread_names_here();
             }
+            if let Some(m) = arg(args, "message").filter(|m| !m.trim().is_empty()) {
+                app.tell_user(key, m);
+            }
             if let Some(m) = app.unanswered(key) {
                 return Ok(format!(
                     "Not waiting yet: {m}\n\n\
-The user can't see tool calls or their results, only text you write. Write to them as text now, \
-then call wait_for_threads again."
+The user can't see your thinking, tool calls or their results. Call tell_user with your reply now \
+(or pass it as message to wait_for_threads), then wait."
                 ));
             }
             if app.take_owed_lesson(key) {
@@ -416,8 +428,8 @@ with what went wrong and the rule that prevents it (merged into your existing le
             if let Some(gap) = app.silent_for(key, 20.0 * 60.0) {
                 return Ok(format!(
                     "Not waiting yet: you haven't written anything the user can see in {} minutes. They can't see \
-tool calls or their results. Write them a one- or two-line status (what's done, what's running, anything \
-they need to do or that you said you'd tell them), then call wait_for_threads again.",
+your thinking, tool calls or their results. Call wait_for_threads again with message set to a one- or \
+two-line status (what's done, what's running, anything they need to do or that you said you'd tell them).",
                     (gap / 60.0).round()
                 ));
             }
@@ -575,6 +587,11 @@ tell them now as text before your next tool call.)".into());
             let n = arg(args, "name").ok_or("name is required")?;
             app.rate_thread(n, arg(args, "verdict").unwrap_or(""), arg(args, "note").unwrap_or(""))?;
             Ok("recorded".into())
+        }
+        "tell_user" => {
+            let t = arg(args, "text").filter(|t| !t.trim().is_empty()).ok_or("text is required")?;
+            app.tell_user(key, t);
+            Ok("shown to the user".into())
         }
         "save_lessons" => {
             app.save_lessons(key, arg(args, "lessons").ok_or("lessons is required")?)?;

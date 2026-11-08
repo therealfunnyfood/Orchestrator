@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.17 (2026-11-07)
+
+- **Fixed: the orchestrator "answered" you in its head.** When you messaged it mid-run, it wrote
+  its reply in its private thinking, which you never see, and went back to waiting. It now has a
+  tell_user tool that puts a message straight into your chat, and wait_for_threads takes a
+  message to show you before it waits. Its instructions and the app's reminders point it there.
+
 ## 0.4.16 (2026-11-07)
 
 - **Fixed: the app froze when you messaged the orchestrator while it was waiting on threads.**

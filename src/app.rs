@@ -152,8 +152,9 @@ that are shown to you and every thread in this workspace.
 
 The user can message you while you work; those messages arrive mid-turn, between your steps, or
 in the result of wait_for_threads as a [message from the user] block. The user can't see your tool
-calls, only what you write, so whenever one arrives, reply at once: your very next output is text
-to them, before any tool call (no reading files or checking threads first). Answer from what you
+calls or your thinking, only what you write as text or send with tell_user. A reply you compose in
+your thinking never reaches them. So whenever one arrives, reply at once with tell_user (or as the
+message of wait_for_threads), before any other tool call (no reading files or checking threads first). Answer from what you
 already know. If a proper answer needs work, say in one line what you're checking or doing and
 roughly how long it'll take, do it, then tell them the result. If you have to wait on something
 (a thread, the Pi, a review), say what you're waiting for and that you'll tell them, then wait.
@@ -981,6 +982,14 @@ Pick up where it left off. Check the current state before relying on anything ab
         }
     }
 
+    /// The orchestrator's tell_user: show `text` in its chat as its own words.
+    pub fn tell_user(&self, key: &str, text: &str) {
+        self.hub.emit(key, json!({"kind": "text", "text": text.trim(), "sub": false}));
+        self.owes_reply.lock().unwrap().remove(key);
+        self.last_text.lock().unwrap().insert(key.to_string(), now());
+        self.touch();
+    }
+
     /// Seconds since the orchestrator last wrote the user any text in this turn, the
     /// first time that passes `limit`; then the clock restarts.
     pub fn silent_for(&self, key: &str, limit: f64) -> Option<f64> {
@@ -1121,8 +1130,9 @@ Tell them in a line or two what changed, and anything they're waiting on or now 
         let body = if notes.is_empty() { body } else { format!("{body}\n\n{}", notes.join("\n")) };
         Some(format!(
             "[message from the user, sent while you were waiting]\n{body}\n\n\
-The user can't see tool calls. Reply right now as text, before any tool call: answer from what \
-you know, or say in one line what you'll check or wait for. Then act on it."
+The user can't see your thinking or tool calls. Reply right now with tell_user (or as the message \
+of your next wait_for_threads): answer from what you know, or say in one line what you'll check or \
+wait for. Then act on it."
         ))
     }
 
