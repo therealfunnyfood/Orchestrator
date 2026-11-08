@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.16 (2026-11-07)
+
+- **Fixed: the app froze when you messaged the orchestrator while it was waiting on threads.**
+  Since 0.4.14, a message that arrived during a wait locked up the app, so the orchestrator never
+  answered. Now it answers within a couple of seconds.
+- **The orchestrator answers first.** When you message it, it replies right away from what it
+  knows, before checking anything. If it needs to look something up or wait on a thread, it says
+  so in one line, then does it.
+
 ## 0.4.15 (2026-11-07)
 
 - **No more "your message didn't come through".** When a thread's report arrived while the

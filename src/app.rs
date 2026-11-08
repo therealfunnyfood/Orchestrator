@@ -152,9 +152,13 @@ that are shown to you and every thread in this workspace.
 
 The user can message you while you work; those messages arrive mid-turn, between your steps, or
 in the result of wait_for_threads as a [message from the user] block. The user can't see your tool
-calls, only what you write, so whenever one arrives, first write a short reply to them as text (answer
-the question, or say what you'll change), then act on it and carry on. Never go straight back to
-waiting without replying.
+calls, only what you write, so whenever one arrives, reply at once: your very next output is text
+to them, before any tool call (no reading files or checking threads first). Answer from what you
+already know. If a proper answer needs work, say in one line what you're checking or doing and
+roughly how long it'll take, do it, then tell them the result. If you have to wait on something
+(a thread, the Pi, a review), say what you're waiting for and that you'll tell them, then wait.
+For "status", reply with a few lines from what you know now: what's done, what's running, what's
+next, anything they need to do. Never go straight back to waiting without replying.
 
 Tool results (including everything wait_for_threads returns) are invisible to the user. When a thread
 reports something the user has to act on, or something you promised to tell them ("wait for my next
@@ -1117,8 +1121,8 @@ Tell them in a line or two what changed, and anything they're waiting on or now 
         let body = if notes.is_empty() { body } else { format!("{body}\n\n{}", notes.join("\n")) };
         Some(format!(
             "[message from the user, sent while you were waiting]\n{body}\n\n\
-The user can't see tool calls. Before your next tool call, write them a short reply as text \
-(answer it, or say what you'll do), then act on it."
+The user can't see tool calls. Reply right now as text, before any tool call: answer from what \
+you know, or say in one line what you'll check or wait for. Then act on it."
         ))
     }
 

@@ -423,13 +423,17 @@ they need to do or that you said you'd tell them), then call wait_for_threads ag
             }
             let secs = args.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(900.0).clamp(1.0, 3500.0);
             app.wait_threads(&names, Duration::from_secs_f64(secs)).await;
-            let st = app.store.lock().unwrap();
-            let mut lines: Vec<String> = names.iter().filter_map(|n| st.get(n)).map(|t| summary(app, t)).collect();
-            let still: Vec<&String> = names.iter().filter(|n| app.busy(n)).collect();
-            let still_list = still.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            // Take the user's held messages first, without the store locked: formatting them
+            // locks the store (lesson notes), and std mutexes deadlock if locked twice.
             let held = app.take_held(key);
             let nudged = app.take_nudge(key);
             let inbox = app.drain_inbox(key);
+            let mut lines: Vec<String> = {
+                let st = app.store.lock().unwrap();
+                names.iter().filter_map(|n| st.get(n)).map(|t| summary(app, t)).collect()
+            };
+            let still: Vec<&String> = names.iter().filter(|n| app.busy(n)).collect();
+            let still_list = still.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
             let early = held.is_some() || nudged.is_some() || inbox.is_some();
             if let Some(inbox) = inbox {
                 lines.push(format!("\n[messages from threads]\n{inbox}"));
