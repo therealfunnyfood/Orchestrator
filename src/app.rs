@@ -228,7 +228,7 @@ pub struct App {
     /// When each running orchestrator turn last wrote the user text (or started).
     last_text: Mutex<HashMap<String, f64>>,
     /// Finished-turn notices handed to the orchestrator on its next turn.
-    notices: Mutex<Vec<String>>,
+    notices: Mutex<HashMap<String, Vec<String>>>,
     /// Mid-turn messages from threads to their orchestrator, by orchestrator key.
     inbox: Mutex<HashMap<String, Vec<(String, String)>>>,
     /// ask_user questions waiting for an answer, by question id.
@@ -256,6 +256,17 @@ impl App {
         }
         let ws = store.workspace.clone();
         store.remember_workspace(&ws);
+        store.open_workspace(&ws);
+        store.open_workspaces.retain(|p| Path::new(p).is_dir());
+        let mut known: Vec<String> = store.recent_workspaces.clone();
+        known.extend(store.open_workspaces.clone());
+        known.extend(store.threads.iter().map(|t| t.workspace.clone()));
+        for w in known.into_iter().filter(|w| !w.is_empty()) {
+            let o = store.orchestrators.entry(orch_key(&w)).or_default();
+            if o.workspace.is_empty() {
+                o.workspace = w;
+            }
+        }
         store.save();
         let hub = Hub::new(paths.data_dir.join("transcripts"), paths.data_dir.join("media"));
         hub.mark_interrupted();
@@ -277,7 +288,7 @@ impl App {
             owes_lesson: Mutex::new(HashSet::new()),
             resumes: Mutex::new(HashMap::new()),
             last_text: Mutex::new(HashMap::new()),
-            notices: Mutex::new(Vec::new()),
+            notices: Mutex::new(HashMap::new()),
             inbox: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
             answered_ids: Mutex::new(Default::default()),
@@ -298,8 +309,21 @@ impl App {
         self.store.lock().unwrap().workspace.clone()
     }
 
+    /// The orchestrator of the workspace shown in the window.
     pub fn orch_key(&self) -> String {
         orch_key(&self.workspace())
+    }
+
+    /// The workspace a conversation belongs to: an orchestrator's folder, or a thread's
+    /// workspace. Background work uses this, never the workspace shown in the window.
+    pub fn ws_of(&self, key: &str) -> String {
+        let st = self.store.lock().unwrap();
+        let w = if key.starts_with(ORCHESTRATOR) {
+            st.orchestrators.get(key).map(|o| o.workspace.clone())
+        } else {
+            st.get(key).map(|t| t.workspace.clone())
+        };
+        w.filter(|w| !w.is_empty()).unwrap_or_else(|| st.workspace.clone())
     }
 
     pub fn busy(&self, key: &str) -> bool {
@@ -344,7 +368,7 @@ impl App {
             None => Value::Null,
         };
         let thread_perm = self.store.lock().unwrap().get(key).map(|t| t.permission.clone()).unwrap_or_default();
-        v["permission_effective"] = json!(if thread_perm.is_empty() { self.project_permission() } else { thread_perm });
+        v["permission_effective"] = json!(if thread_perm.is_empty() { self.permission_in(&self.ws_of(key)) } else { thread_perm });
         let queue: Vec<Value> = self.queues.lock().unwrap().get(key).map(|q| {
             q.iter().map(|m| json!({"id": m.id, "text": m.text, "attachments": m.attach, "sender": m.sender, "edit": m.fork.is_some()})).collect()
         }).unwrap_or_default();
@@ -383,7 +407,7 @@ impl App {
             })
         };
         json!({
-            "workspace": ws, "recent_workspaces": recent, "orchestrator": self.orch_json(),
+            "workspace": ws, "recent_workspaces": recent, "open_workspaces": self.open_workspaces_json(), "orchestrator": self.orch_json(),
             "threads": threads, "running": running, "waiting": waiting,
             "project": project,
             "defaults": {
@@ -400,6 +424,26 @@ impl App {
         })
     }
 
+    /// The workspace tabs, with what's happening in each.
+    fn open_workspaces_json(&self) -> Value {
+        let (open, current, threads) = {
+            let st = self.store.lock().unwrap();
+            (st.open_workspaces.clone(), st.workspace.clone(), st.threads.clone())
+        };
+        let questions: Vec<String> = self.questions.lock().unwrap().values().map(|q| q.key.clone()).collect();
+        let rows: Vec<Value> = open.iter().map(|w| {
+            let key = orch_key(w);
+            let mine: Vec<&ThreadRow> = threads.iter().filter(|t| same_path(&t.workspace, w)).collect();
+            let running = mine.iter().filter(|t| self.busy(&t.name)).count();
+            let needs_input = questions.iter().any(|q| *q == key || mine.iter().any(|t| t.name == *q));
+            json!({
+                "path": w, "key": key, "current": same_path(w, &current),
+                "busy": self.busy(&key), "running_threads": running, "needs_input": needs_input,
+            })
+        }).collect();
+        json!(rows)
+    }
+
     pub fn all_threads_json(&self) -> Value {
         let rows = self.store.lock().unwrap().threads.clone();
         json!({"threads": rows.iter().map(|t| self.thread_json(t)).collect::<Vec<_>>(), "workspace": self.workspace()})
@@ -408,7 +452,7 @@ impl App {
     // ---- threads ------------------------------------------------------
 
     pub fn create_thread(
-        &self, name: &str, cwd: Option<&str>, backend: Option<&str>, model: Option<&str>, effort: Option<&str>,
+        &self, workspace: &str, name: &str, cwd: Option<&str>, backend: Option<&str>, model: Option<&str>, effort: Option<&str>,
     ) -> Result<ThreadRow, String> {
         if !valid_name(name) {
             return Err("thread name: letters, digits, - and _ (max 48), not starting with 'orchestrator'".into());
@@ -424,7 +468,7 @@ impl App {
         if st.get(name).is_some() {
             return Err(format!("thread '{name}' already exists"));
         }
-        let ws = PathBuf::from(&st.workspace);
+        let ws = PathBuf::from(workspace);
         let dir = match cwd.map(str::trim).filter(|c| !c.is_empty()) {
             Some(c) if Path::new(c).is_absolute() => PathBuf::from(c),
             Some(c) => ws.join(c),
@@ -435,7 +479,7 @@ impl App {
         let row = ThreadRow {
             name: name.into(),
             cwd: dir.to_string_lossy().into_owned(),
-            workspace: st.workspace.clone(),
+            workspace: workspace.to_string(),
             backend,
             model,
             effort,
@@ -742,8 +786,15 @@ Pick up where it left off. Check the current state before relying on anything ab
         self.enqueue(key, msg, true);
     }
 
-    pub fn submit_orchestrator(self: &Arc<Self>, text: &str, attach: Vec<String>, now: bool) -> &'static str {
-        let key = self.orch_key();
+    /// A message from the user to an orchestrator (`key`, or the shown workspace's).
+    pub fn submit_orchestrator(self: &Arc<Self>, key: &str, text: &str, attach: Vec<String>, now: bool) -> &'static str {
+        let key = if key.starts_with(ORCHESTRATOR) && self.store.lock().unwrap().orchestrators.get(key).is_some_and(|o| !o.workspace.is_empty()) {
+            key.to_string()
+        } else {
+            let ws = self.workspace();
+            self.claim_orchestrator(&ws);
+            orch_key(&ws)
+        };
         let msg = Queued { id: String::new(), text: text.into(), sender: "you".into(), attach, fork: None };
         self.deliver(&key, msg, now)
     }
@@ -844,8 +895,8 @@ Pick up where it left off. Check the current state before relying on anything ab
             resume_at,
             model: row.model.clone(),
             effort: row.effort.clone(),
-            backend: self.resolve_backend(),
-            append_system: self.worker_prompt(),
+            backend: self.resolve_backend(&row.workspace),
+            append_system: self.worker_prompt(&row.workspace),
             tools: (msg.sender == HANDOFF).then(|| "Read,Glob,Grep".into()),
             mcp_config: Some(self.mcp_config(name)),
             long_tool_calls: true,
@@ -894,9 +945,9 @@ Pick up where it left off. Check the current state before relying on anything ab
             }
             let est = self.estimates.lock().unwrap().remove(name);
             if let Ok(r) = &result {
-                st.record_turn_usage(r);
+                st.record_turn_usage(&row.workspace, r);
                 let est_ref = est.as_ref();
-                st.record_efficiency(EffRecord {
+                st.record_efficiency(&row.workspace, EffRecord {
                     wall_s: now() - est_ref.map_or(t0, |e| e.set_at.min(t0)),
                     est_low_s: est_ref.map_or(0.0, |e| e.low_s),
                     est_high_s: est_ref.map_or(0.0, |e| e.high_s),
@@ -965,7 +1016,7 @@ Pick up where it left off. Check the current state before relying on anything ab
             let more = if result.chars().count() > 1500 { "\n(cut short; read_thread for the rest)" } else { "" };
             let _ = self.post_to_orchestrator(name, &format!("{n}. Its final report:\n{report}{more}"));
         } else {
-            self.notices.lock().unwrap().push(n);
+            self.notices.lock().unwrap().entry(orch_key(&row.workspace)).or_default().push(n);
         }
     }
 
@@ -1010,9 +1061,6 @@ Pick up where it left off. Check the current state before relying on anything ab
         let key = orch_key(&ws);
         self.inbox.lock().unwrap().entry(key.clone()).or_default().push((from.to_string(), text.to_string()));
         self.touch();
-        if !same_path(&ws, &self.workspace()) {
-            return Ok(()); // another project: it reads them when the user switches back
-        }
         if self.waiting.lock().unwrap().contains(&key) {
             // touch() above ends the wait; the messages are its result.
         } else if self.running(&key) {
@@ -1144,9 +1192,9 @@ wait for. Then act on it."
 
     /// Block until the named threads are idle, a thread messages the orchestrator,
     /// or the timeout passes.
-    pub async fn wait_threads(&self, names: &[String], timeout: Duration) {
+    pub async fn wait_threads(&self, key: &str, names: &[String], timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
-        let key = self.orch_key();
+        let key = key.to_string();
         self.waiting.lock().unwrap().insert(key.clone());
         loop {
             let notified = self.changed.notified();
@@ -1204,10 +1252,11 @@ wait for. Then act on it."
         let (tx, mut rx) = watch::channel(false);
         self.cancels.lock().unwrap().insert(key.into(), tx);
         self.started.lock().unwrap().insert(key.into(), now());
-        let (ws, session, last) = {
+        let ws = self.ws_of(key);
+        let (session, last) = {
             let st = self.store.lock().unwrap();
             let o = st.orchestrators.get(key);
-            (st.workspace.clone(), o.and_then(|o| o.session_id.clone()), o.and_then(|o| o.last_uuid.clone()))
+            (o.and_then(|o| o.session_id.clone()), o.and_then(|o| o.last_uuid.clone()))
         };
         let (resume, resume_at, start_point) = branch_point(session, last, msg);
         if let Some(f) = &msg.fork {
@@ -1223,7 +1272,7 @@ wait for. Then act on it."
         }
         let text = text.as_str();
 
-        let notices: Vec<String> = std::mem::take(&mut *self.notices.lock().unwrap());
+        let notices: Vec<String> = self.notices.lock().unwrap().remove(key).unwrap_or_default();
         let text = match self.drain_inbox(key) {
             Some(inbox) => format!("[messages from threads]\n{inbox}\n\n{text}"),
             None => text.to_string(),
@@ -1243,14 +1292,14 @@ wait for. Then act on it."
             resume_at,
             model: s.orch_model.clone(),
             effort: s.orch_effort.clone(),
-            backend: self.resolve_backend(),
-            append_system: self.orchestrator_prompt(),
+            backend: self.resolve_backend(&ws),
+            append_system: self.orchestrator_prompt(&ws),
             tools: Some(if msg.sender == HANDOFF { "Read,Glob,Grep" } else { "Read,Glob,Grep,WebSearch,WebFetch" }.into()),
             mcp_config: Some(self.mcp_config(key)),
             long_tool_calls: true,
             images,
             fork_session: false,
-            permission_mode: self.project_permission(),
+            permission_mode: self.permission_in(&ws),
             inject: Some(self.open_injector(key)),
             prior_cost,
         };
@@ -1312,7 +1361,7 @@ wait for. Then act on it."
         match result {
             Ok(r) => {
                 let mut st = self.store.lock().unwrap();
-                st.record_turn_usage(&r);
+                st.record_turn_usage(&ws, &r);
                 let o = st.orchestrators.entry(key.into()).or_default();
                 o.cost_usd += r.cost_usd;
                 o.turns += 1;
@@ -1346,9 +1395,6 @@ wait for. Then act on it."
             }
             std::fs::create_dir_all(&p).map_err(|e| e.to_string())?;
         }
-        if self.busy(&self.orch_key()) {
-            return Err("the orchestrator is mid-turn; stop it or wait before switching".into());
-        }
         let p = std::fs::canonicalize(&p).unwrap_or(p);
         let mut s = p.to_string_lossy().into_owned();
         if let Some(stripped) = s.strip_prefix(r"\\?\") {
@@ -1357,10 +1403,49 @@ wait for. Then act on it."
         let mut st = self.store.lock().unwrap();
         st.workspace = s.clone();
         st.remember_workspace(&s);
+        st.open_workspace(&s);
+        st.orchestrators.entry(orch_key(&s)).or_default().workspace = s.clone();
         st.save();
         drop(st);
         self.touch();
         Ok(s)
+    }
+
+    /// Make sure `ws`'s orchestrator knows its folder.
+    fn claim_orchestrator(&self, ws: &str) {
+        let mut st = self.store.lock().unwrap();
+        let o = st.orchestrators.entry(orch_key(ws)).or_default();
+        if o.workspace.is_empty() {
+            o.workspace = ws.to_string();
+            st.save();
+        }
+    }
+
+    /// Close a workspace tab. Its orchestrator and threads must be idle first; its
+    /// conversations stay saved and come back when it's opened again.
+    pub fn close_workspace(&self, path: &str) -> Result<String, String> {
+        let (target, threads) = {
+            let st = self.store.lock().unwrap();
+            let t = st.open_workspaces.iter().find(|p| same_path(p, path)).cloned().ok_or("that workspace isn't open")?;
+            (t.clone(), st.in_workspace(&t))
+        };
+        if self.busy(&orch_key(&target)) || threads.iter().any(|t| self.busy(&t.name)) {
+            return Err("its orchestrator or threads are still working; stop them or wait before closing it".into());
+        }
+        let mut st = self.store.lock().unwrap();
+        if st.open_workspaces.len() <= 1 {
+            return Err("it's the only open workspace".into());
+        }
+        let i = st.open_workspaces.iter().position(|p| same_path(p, &target)).unwrap();
+        st.open_workspaces.remove(i);
+        if same_path(&st.workspace, &target) {
+            st.workspace = st.open_workspaces[i.min(st.open_workspaces.len() - 1)].clone();
+        }
+        let shown = st.workspace.clone();
+        st.save();
+        drop(st);
+        self.touch();
+        Ok(shown)
     }
 
     pub fn update_settings(&self, patch: &Value) -> Result<(), String> {
@@ -1602,20 +1687,26 @@ wait for. Then act on it."
         self.store.lock().unwrap().plan_usage.clone().ok_or("Claude Code didn't report plan usage (is the CLI logged in with a Claude plan?)".into())
     }
 
-    /// This project's permission level.
+    /// The shown project's permission level.
     pub fn project_permission(&self) -> String {
+        self.permission_in(&self.workspace())
+    }
+
+    /// Workspace `ws`'s permission level.
+    pub fn permission_in(&self, ws: &str) -> String {
         let default = self.settings().permission_default;
-        self.store.lock().unwrap().permission(&default)
+        self.store.lock().unwrap().permission(ws, &default)
     }
 
     fn permission_for(&self, row: &ThreadRow) -> String {
-        if row.permission.is_empty() { self.project_permission() } else { row.permission.clone() }
+        if row.permission.is_empty() { self.permission_in(&row.workspace) } else { row.permission.clone() }
     }
 
     pub fn set_project_permission(&self, level: &str) -> Result<(), String> {
         check_permission(level)?;
         let mut st = self.store.lock().unwrap();
-        st.set_permission(level);
+        let ws = st.workspace.clone();
+        st.set_permission(&ws, level);
         st.save();
         drop(st);
         self.touch();
@@ -1681,15 +1772,20 @@ wait for. Then act on it."
         json!({"behavior": "deny", "message": message})
     }
 
-    /// This project's plan/API mix (0 = all plan, 10 = all API).
+    /// The shown project's plan/API mix (0 = all plan, 10 = all API).
     pub fn mix(&self) -> u8 {
+        self.mix_in(&self.workspace())
+    }
+
+    pub fn mix_in(&self, ws: &str) -> u8 {
         let default = self.settings().api_mix;
-        self.store.lock().unwrap().mix(default)
+        self.store.lock().unwrap().mix(ws, default)
     }
 
     pub fn set_mix(&self, value: u8) {
         let mut st = self.store.lock().unwrap();
-        st.set_mix(value);
+        let ws = st.workspace.clone();
+        st.set_mix(&ws, value);
         st.save();
         drop(st);
         self.touch();
@@ -1699,9 +1795,9 @@ wait for. Then act on it."
     /// (threads and orchestrator) goes to whichever side is behind the target
     /// share, by API-rate cost over the last day. Returns plan, api, or auto
     /// (= plan, switching to api if the plan hits a usage limit).
-    fn resolve_backend(&self) -> String {
+    fn resolve_backend(&self, ws: &str) -> String {
         let s = self.settings();
-        let mix = self.mix();
+        let mix = self.mix_in(ws);
         if s.api_key.trim().is_empty() || mix == 0 {
             return "plan".into();
         }
@@ -1709,37 +1805,40 @@ wait for. Then act on it."
             return "api".into();
         }
         let target = mix as f64 / 10.0;
-        let (plan, api) = self.store.lock().unwrap().usage_split();
+        let (plan, api) = self.store.lock().unwrap().usage_split(ws);
         let share = if plan + api > 0.0 { api / (plan + api) } else { 0.0 };
         if share < target { "api".into() } else { "auto".into() }
     }
 
     fn usage_json(&self) -> Value {
-        let (plan, api) = self.store.lock().unwrap().usage_split();
+        let ws = self.workspace();
+        let (plan, api) = self.store.lock().unwrap().usage_split(&ws);
         let share = if plan + api > 0.0 { api / (plan + api) } else { 0.0 };
         json!({"plan_cost": plan, "api_cost": api, "api_share": share, "window_hours": 24, "mix": self.mix()})
     }
 
-    fn orchestrator_prompt(&self) -> String {
+    fn orchestrator_prompt(&self, ws: &str) -> String {
         let mix = {
             let s = self.settings();
-            let (plan, api) = self.store.lock().unwrap().usage_split();
+            let (plan, api) = self.store.lock().unwrap().usage_split(ws);
             let share = if plan + api > 0.0 { api / (plan + api) * 100.0 } else { 0.0 };
             format!(
                 "\n# Plan/API mix\nThe user has set this project to about {}/10 of the work on API credits (0 = all on \
 their Claude plan, 10 = all API). Over the last 24h, {share:.0}% has run on API (${api:.2} API vs ${plan:.2} plan, at \
 API rates). The app routes every turn (yours and every thread's) to meet this target, so you don't choose backends. \
 Mention it only if the user asks about cost or usage.{}\n",
-                self.mix(),
+                self.mix_in(ws),
                 if s.api_key.trim().is_empty() { " (No API key is saved, so everything runs on the plan.)" } else { "" }
             )
         };
         let cap = format!("\n# Effort cap\nAbove effort {} needs the user's approval (asked automatically when you request it).\n",
             { let c = self.settings().max_effort; if c.is_empty() { "high".to_string() } else { c } });
-        let timing = self.timing_summary();
+        let timing = self.timing_summary(ws);
+        let others = self.other_workspaces_note(ws);
         let st = self.store.lock().unwrap();
-        let mut p = ORCH_APPEND.to_string() + &mix + &cap + &timing;
-        if let Some(n) = st.notes(&st.workspace) {
+        let mut p = ORCH_APPEND.to_string() + &mix + &cap + &timing + &others;
+        p += &format!("\n# Your workspace\nYou are the orchestrator for {ws}. Your threads work there unless you give them another folder.\n");
+        if let Some(n) = st.notes(ws) {
             if !n.brief.trim().is_empty() {
                 p += &format!("\n# Project brief (saved with save_project_notes)\n{}\n", n.brief.trim());
             }
@@ -1756,10 +1855,21 @@ Mention it only if the user asks about cost or usage.{}\n",
         p
     }
 
-    fn worker_prompt(&self) -> String {
+    /// Other workspaces open at the same time, each with its own orchestrator.
+    fn other_workspaces_note(&self, ws: &str) -> String {
+        let others: Vec<String> = self.store.lock().unwrap().open_workspaces.iter().filter(|p| !same_path(p, ws)).cloned().collect();
+        if others.is_empty() {
+            return String::new();
+        }
+        format!("\n# Other workspaces\nThe user also has these workspaces open, each with its own orchestrator and \
+threads: {}. They're not yours: don't work in those folders or message their threads unless the user asks. \
+The user may be looking at another workspace while you work; carry on regardless.\n", others.join(", "))
+    }
+
+    fn worker_prompt(&self, ws: &str) -> String {
         let st = self.store.lock().unwrap();
         let mut p = WORKER_APPEND.to_string();
-        if let Some(n) = st.notes(&st.workspace).filter(|n| !n.rules.trim().is_empty()) {
+        if let Some(n) = st.notes(ws).filter(|n| !n.rules.trim().is_empty()) {
             p += &format!("\n\nRules for this project (never break these without asking the user via ask_user):\n{}", n.rules.trim());
         }
         p
@@ -1806,10 +1916,9 @@ update save_lessons with anything you've learned about how they talk, what they 
         self.owes_lesson.lock().unwrap().remove(key)
     }
 
-    pub fn save_tuning(&self, tuning: &str) {
+    pub fn save_tuning(&self, ws: &str, tuning: &str) {
         let mut st = self.store.lock().unwrap();
-        let ws = st.workspace.clone();
-        let n = st.notes_mut(&ws);
+        let n = st.notes_mut(ws);
         n.tuning = tuning.trim().to_string();
         n.updated_at = now();
         st.save();
@@ -1850,8 +1959,8 @@ update save_lessons with anything you've learned about how they talk, what they 
 
     /// The orchestrator's estimate for the user's whole request. The clock runs until it
     /// and all of this project's threads are idle.
-    pub fn set_job_estimate(&self, mut est: Estimate) {
-        let key = self.orch_key();
+    pub fn set_job_estimate(&self, key: &str, mut est: Estimate) {
+        let key = key.to_string();
         if let Some(prev) = self.estimates.lock().unwrap().get(&key) {
             est.set_at = prev.set_at; // a revised estimate for the same request
         } else if let Some(t) = self.started.lock().unwrap().get(&key) {
@@ -1877,8 +1986,9 @@ update save_lessons with anything you've learned about how they talk, what they 
             }
             let Some(e) = self.estimates.lock().unwrap().remove(&key) else { continue };
             let wall = now() - e.set_at;
+            let ws = self.ws_of(&key);
             let mut st = self.store.lock().unwrap();
-            st.record_efficiency(EffRecord {
+            st.record_efficiency(&ws, EffRecord {
                 thread: "orchestrator".into(),
                 task: e.task.clone(),
                 wall_s: wall,
@@ -1899,13 +2009,13 @@ update save_lessons with anything you've learned about how they talk, what they 
 
     /// How long work has really taken in this project, and how good the orchestrator's
     /// estimates have been, so it can give realistic timelines.
-    pub fn timing_json(&self, days: f64) -> Value {
+    pub fn timing_json(&self, ws: &str, days: f64) -> Value {
         let st = self.store.lock().unwrap();
         let since = now() - days * 86400.0;
         let recs: Vec<&EffRecord> = st
             .efficiency
             .iter()
-            .filter(|r| r.ts >= since && same_path(&r.workspace, &st.workspace) && r.ok && r.wall_s > 0.0)
+            .filter(|r| r.ts >= since && same_path(&r.workspace, ws) && r.ok && r.wall_s > 0.0)
             .collect();
         let stats = |rs: &[&EffRecord]| {
             let mut secs: Vec<f64> = rs.iter().map(|r| r.wall_s).collect();
@@ -1950,8 +2060,8 @@ update save_lessons with anything you've learned about how they talk, what they 
     }
 
     /// A few lines on timing history for the orchestrator's instructions.
-    fn timing_summary(&self) -> String {
-        let t = self.timing_json(60.0);
+    fn timing_summary(&self, ws: &str) -> String {
+        let t = self.timing_json(ws, 60.0);
         let line = |label: &str, v: &Value| -> Option<String> {
             let n = v["count"].as_u64().unwrap_or(0);
             if n == 0 { return None }
@@ -1980,10 +2090,10 @@ your estimates have been too short, so scale them up by about that much; if belo
     }
 
     /// Efficiency stats for this project: per model+effort, plus recent turns.
-    pub fn efficiency_json(&self, days: f64) -> Value {
+    pub fn efficiency_json(&self, ws: &str, days: f64) -> Value {
         let st = self.store.lock().unwrap();
         let since = now() - days * 86400.0;
-        let recs: Vec<&EffRecord> = st.efficiency.iter().filter(|r| r.ts >= since && !r.job && same_path(&r.workspace, &st.workspace)).collect();
+        let recs: Vec<&EffRecord> = st.efficiency.iter().filter(|r| r.ts >= since && !r.job && same_path(&r.workspace, ws)).collect();
         let mut groups: std::collections::BTreeMap<(String, String), Vec<&EffRecord>> = Default::default();
         for r in &recs {
             groups.entry((r.model.clone(), r.effort.clone())).or_default().push(r);
@@ -2009,10 +2119,9 @@ your estimates have been too short, so scale them up by about that much; if belo
         json!({"days": days, "groups": rows, "recent": recent, "total_cost": recs.iter().map(|r| r.cost).sum::<f64>(), "turns": recs.len()})
     }
 
-    pub fn save_notes(&self, brief: Option<&str>, rules: Option<&str>) {
+    pub fn save_notes(&self, ws: &str, brief: Option<&str>, rules: Option<&str>) {
         let mut st = self.store.lock().unwrap();
-        let ws = st.workspace.clone();
-        let n = st.notes_mut(&ws);
+        let n = st.notes_mut(ws);
         if let Some(b) = brief {
             n.brief = b.trim().to_string();
         }
@@ -2026,23 +2135,23 @@ your estimates have been too short, so scale them up by about that much; if belo
     }
 
     /// Claude Code conversations for the current workspace that didn't come from Orchestrator itself.
-    pub fn past_sessions(&self) -> Vec<SessionInfo> {
-        let (ws, known) = {
+    pub fn past_sessions(&self, ws: &str) -> Vec<SessionInfo> {
+        let known = {
             let st = self.store.lock().unwrap();
             let mut known: HashSet<String> = st.threads.iter().filter_map(|t| t.session_id.clone()).collect();
             known.extend(st.orchestrators.values().filter_map(|o| o.session_id.clone()));
-            (st.workspace.clone(), known)
+            known
         };
-        self.sessions_index.sessions_for(&ws).into_iter().filter(|s| !known.contains(&s.id)).collect()
+        self.sessions_index.sessions_for(ws).into_iter().filter(|s| !known.contains(&s.id)).collect()
     }
 
     /// Continue a past Claude Code conversation as a thread (a forked copy).
     pub fn resume_past_session(
-        self: &Arc<Self>, name: &str, session_id: &str, message: &str, backend: Option<&str>, model: Option<&str>, effort: Option<&str>,
+        self: &Arc<Self>, ws: &str, name: &str, session_id: &str, message: &str, backend: Option<&str>, model: Option<&str>, effort: Option<&str>,
     ) -> Result<ThreadRow, String> {
-        let info = self.past_sessions().into_iter().find(|s| s.id == session_id).ok_or(format!("no past session {session_id}"))?;
+        let info = self.past_sessions(ws).into_iter().find(|s| s.id == session_id).ok_or(format!("no past session {session_id}"))?;
         let cwd = if info.cwd.is_empty() { None } else { Some(info.cwd.as_str()) };
-        let row = self.create_thread(name, cwd, backend, model, effort)?;
+        let row = self.create_thread(ws, name, cwd, backend, model, effort)?;
         let last = claude_projects::last_uuid(&info.path);
         {
             let mut st = self.store.lock().unwrap();
@@ -2067,13 +2176,13 @@ your estimates have been too short, so scale them up by about that much; if belo
     /// Switch to a Claude Code project and have the orchestrator set it up.
     pub fn import_project(self: &Arc<Self>, path: &str) -> Result<String, String> {
         let ws = self.set_workspace(path, false)?;
-        let count = self.past_sessions().len();
+        let count = self.past_sessions(&ws).len();
         {
             let mut st = self.store.lock().unwrap();
             st.notes_mut(&ws).imported_at = Some(now());
             st.save();
         }
-        let key = self.orch_key();
+        let key = orch_key(&ws);
         let memory = claude_projects::memory_dir(&ws);
         let memory_note = if memory.is_dir() {
             format!("Its Claude Code memory folder is {} (MEMORY.md is the index); it loads automatically for you and \
@@ -2116,10 +2225,10 @@ Don't change project files yourself; threads do the work, following the rules."
         Ok(ws)
     }
 
-    /// This workspace's threads that aren't resolved.
-    pub fn thread_names_here(&self) -> Vec<String> {
+    /// Workspace `ws`'s threads that aren't resolved.
+    pub fn thread_names_here(&self, ws: &str) -> Vec<String> {
         let st = self.store.lock().unwrap();
-        st.threads.iter().filter(|t| same_path(&t.workspace, &st.workspace) && !t.resolved).map(|t| t.name.clone()).collect()
+        st.threads.iter().filter(|t| same_path(&t.workspace, ws) && !t.resolved).map(|t| t.name.clone()).collect()
     }
 
     /// Mark a thread resolved (done with) or reopen it. `by` is "you" or "orchestrator".

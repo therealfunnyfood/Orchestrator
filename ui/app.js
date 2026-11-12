@@ -267,9 +267,8 @@ function changed(part, data) {
 }
 
 function renderTree() {
-  if (!changed("tree", [S.state.workspace, S.state.orchestrator, S.state.threads.map((t) => [t.name, stClass(t), t.model, t.effort, t.updated_at, t.needs_input, t.plan, t.estimate, t.resolved]), curKey(), [...S.unread]])) return;
-  $("#ws-name").textContent = baseName(S.state.workspace);
-  $("#ws-row").title = S.state.workspace + " — click to switch";
+  if (!changed("tree", [S.state.workspace, S.state.open_workspaces, S.state.orchestrator, S.state.threads.map((t) => [t.name, stClass(t), t.model, t.effort, t.updated_at, t.needs_input, t.plan, t.estimate, t.resolved]), curKey(), [...S.unread]])) return;
+  renderWorkspaces();
   const tree = $("#tree");
   tree.textContent = "";
   const o = S.state.orchestrator;
@@ -315,6 +314,71 @@ async function setResolved(name, resolved) {
 function planProgress(plan) {
   if (!plan?.length) return "";
   return `${plan.filter((p) => p.status === "completed").length}/${plan.length}`;
+}
+
+// Open workspaces: each runs its own orchestrator and threads, all at once. The
+// selected one is shown below; the others keep working in the background.
+function renderWorkspaces() {
+  const list = $("#ws-list");
+  list.textContent = "";
+  const open = S.state.open_workspaces?.length ? S.state.open_workspaces : [{ path: S.state.workspace, current: true }];
+  list.append(h("div", "group", `workspaces · ${open.length}`));
+  for (const w of open) {
+    const working = w.busy || w.running_threads > 0;
+    const r = h("div", "node ws-tab" + (w.current ? " on" : ""));
+    r.append(h("span", "st " + (working ? "running" : "idle")), h("span", "nm", baseName(w.path)));
+    if (w.needs_input) { const q = h("span", "q-badge", "?"); q.title = "Waiting for your answer"; r.append(q); }
+    if (w.running_threads) r.append(h("span", "meta", `${w.running_threads} running`));
+    if (open.length > 1) {
+      const x = h("button", "ib ws-close", "×");
+      x.title = "Close this workspace (its conversations stay saved)";
+      x.onmousedown = (e) => e.stopPropagation();
+      x.onclick = (e) => { e.stopPropagation(); closeWorkspace(w.path); };
+      r.append(x);
+    }
+    r.title = `${w.path}\n${w.busy ? "orchestrator working" : "orchestrator idle"}` + (w.running_threads ? ` · ${w.running_threads} threads running` : "") + (w.current ? "" : "\nclick to show it");
+    r.onmousedown = (e) => { if (e.button === 0 && !w.current) switchWorkspace(w.path); };
+    list.append(r);
+  }
+  const add = h("div", "node ws-add");
+  add.append(h("span", "st"), h("span", "nm", "+ open another workspace…"));
+  add.title = "Open a folder as another workspace, with its own orchestrator (the others keep running)";
+  add.onmousedown = (e) => { if (e.button === 0) pickWorkspace(); };
+  list.append(add);
+}
+
+// Editor tabs are remembered per workspace while the app is open.
+const tabsByWs = {};
+async function switchWorkspace(path, create = false) {
+  try {
+    if (S.state?.workspace) tabsByWs[S.state.workspace.toLowerCase()] = { tabs: S.tabs, active: S.active };
+    const r = await api("/api/workspace", { body: { path, create } });
+    restoreTabs(r.workspace);
+    await loadState();
+    await activate(S.active);
+    lastSig.tree = null;
+    renderTree();
+  } catch (e) { fail(e); }
+}
+
+function restoreTabs(ws) {
+  const saved = tabsByWs[(ws || "").toLowerCase()];
+  S.tabs = saved ? saved.tabs : [];
+  S.active = saved ? saved.active ?? 0 : 0;
+}
+
+async function closeWorkspace(path) {
+  try {
+    const wasShown = S.state.workspace.toLowerCase() === path.toLowerCase();
+    const r = await api("/api/workspace/close", { body: { path } });
+    delete tabsByWs[path.toLowerCase()];
+    if (wasShown) restoreTabs(r.workspace);
+    await loadState();
+    if (wasShown) await activate(S.active);
+    lastSig.tree = null;
+    renderTree();
+    toast("closed " + baseName(path));
+  } catch (e) { fail(e); }
 }
 
 function node({ key, name, cls, status, meta, row }) {
@@ -1925,7 +1989,7 @@ async function pickWorkspace() {
     { label: "Import a Claude Code project…", desc: "bring over its history, rules and unfinished work", value: "__import" },
     ...S.state.recent_workspaces.map((p, i) => ({ label: baseName(p), desc: p, value: p, current: p === S.state.workspace, sep: i === 0 })),
   ];
-  const it = await quickPick(items, "Switch workspace (each has its own orchestrator and threads) — or paste a path", { allowText: true });
+  const it = await quickPick(items, "Open a workspace (each has its own orchestrator and threads, and they all run at once) — or paste a path", { allowText: true });
   if (!it) return;
   let path = it.text ?? it.value, create = false;
   if (path === "__import") return importProject();
@@ -1935,13 +1999,8 @@ async function pickWorkspace() {
     path = t?.text; create = true;
   }
   if (!path) return;
-  try {
-    await api("/api/workspace", { body: { path, create } });
-    S.tabs = [];
-    await loadState();
-    await activate(0);
-    toast("workspace: " + baseName(S.state.workspace));
-  } catch (e) { fail(e); }
+  await switchWorkspace(path, create);
+  toast("workspace: " + baseName(S.state.workspace));
 }
 
 async function threadMenu(name) {
@@ -2060,10 +2119,7 @@ async function resetOrch() {
 }
 
 async function switchTo(path) {
-  await api("/api/workspace", { body: { path, create: false } });
-  S.tabs = [];
-  await loadState();
-  await activate(0);
+  await switchWorkspace(path, false);
 }
 
 async function deleteThread(name) {
@@ -2600,7 +2656,6 @@ function wire() {
   wireSplit();
   $("#side-new").onclick = () => newThread("");
   $("#side-collapse").onclick = toggleSide;
-  $("#ws-row").onclick = pickWorkspace;
   for (const a of $$(".act")) a.onclick = () => {
     const act = a.dataset.act;
     if (act === "orch") openChat(orchKey());

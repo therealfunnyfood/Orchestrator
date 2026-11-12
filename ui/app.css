@@ -95,6 +95,13 @@ button { cursor: pointer; }
 .ws-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-switch { font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--dim); font-size: 11px; opacity: 0; }
 .ws-row:hover .ws-switch { opacity: 1; }
+#ws-list { flex: none; max-height: 40%; overflow-y: auto; border-bottom: 1px solid var(--border); padding-bottom: 4px; margin-bottom: 2px; }
+.ws-tab .nm { font-weight: 600; }
+.ws-tab.on .nm { color: var(--strong); }
+.ws-close { opacity: 0; width: 18px; height: 18px; padding: 0; margin-left: 2px; }
+.ws-tab:hover .ws-close { opacity: 1; }
+.ws-add .nm { color: var(--dim); }
+.ws-add:hover .nm { color: var(--fg, inherit); }
 #tree { flex: 1; overflow-y: auto; padding-bottom: 8px; }
 .node { display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px 0 20px; cursor: pointer; white-space: nowrap; border: 1px solid transparent; }
 .node:hover { background: var(--hover); }

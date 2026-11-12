@@ -78,13 +78,18 @@ pub struct OrchRow {
     pub cost_usd: f64,
     pub turns: u32,
     pub last_uuid: Option<String>,
+    /// The workspace folder this orchestrator works in.
+    pub workspace: String,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Store {
+    /// The workspace shown in the window (its tab is selected).
     pub workspace: String,
     pub recent_workspaces: Vec<String>,
+    /// Workspaces open as tabs; each one's orchestrator and threads run on their own.
+    pub open_workspaces: Vec<String>,
     pub threads: Vec<ThreadRow>,
     /// Keyed by orchestrator key (one per workspace).
     pub orchestrators: BTreeMap<String, OrchRow>,
@@ -167,6 +172,12 @@ impl Store {
         self.threads.iter().filter(|t| same_path(&t.workspace, ws)).cloned().collect()
     }
 
+    pub fn open_workspace(&mut self, ws: &str) {
+        if !self.open_workspaces.iter().any(|p| same_path(p, ws)) {
+            self.open_workspaces.push(ws.to_string());
+        }
+    }
+
     pub fn remember_workspace(&mut self, ws: &str) {
         self.recent_workspaces.retain(|p| !same_path(p, ws) && Path::new(p).is_dir());
         self.recent_workspaces.insert(0, ws.to_string());
@@ -216,49 +227,46 @@ impl Store {
 
     /// Record a finished turn's cost; the part that ran on the plan before an auto
     /// fallback counts as plan.
-    pub fn record_turn_usage(&mut self, r: &crate::runner::TurnResult) {
+    pub fn record_turn_usage(&mut self, ws: &str, r: &crate::runner::TurnResult) {
         if r.plan_cost > 0.0 {
-            self.record_usage("plan", r.plan_cost);
+            self.record_usage(ws, "plan", r.plan_cost);
         }
-        self.record_usage(&r.backend_used, r.cost_usd - r.plan_cost);
+        self.record_usage(ws, &r.backend_used, r.cost_usd - r.plan_cost);
         self.note_session_cost(r.session_id.as_deref(), r.session_total);
     }
 
-    pub fn record_usage(&mut self, backend: &str, cost: f64) {
+    pub fn record_usage(&mut self, ws: &str, backend: &str, cost: f64) {
         let t = now();
-        let ws = self.workspace.clone();
         self.usage.retain(|(ts, ..)| t - ts < 7.0 * 86400.0);
-        self.usage.push((t, backend.to_string(), cost.max(0.0), ws));
+        self.usage.push((t, backend.to_string(), cost.max(0.0), ws.to_string()));
     }
 
-    /// (plan cost, api cost) for the current workspace over the mix window.
-    pub fn usage_split(&self) -> (f64, f64) {
+    /// (plan cost, api cost) for workspace `w` over the mix window.
+    pub fn usage_split(&self, w: &str) -> (f64, f64) {
         let t = now();
         self.usage
             .iter()
-            .filter(|(ts, _, _, ws)| t - ts < MIX_WINDOW_SECS && same_path(ws, &self.workspace))
+            .filter(|(ts, _, _, ws)| t - ts < MIX_WINDOW_SECS && same_path(ws, w))
             .fold((0.0, 0.0), |(p, a), (_, b, c, _)| if b == "api" { (p, a + c) } else { (p + c, a) })
     }
 
     /// This project's plan/API mix, or `default` if it hasn't been set.
-    pub fn mix(&self, default: u8) -> u8 {
-        self.mixes.iter().find(|(k, _)| same_path(k, &self.workspace)).map(|(_, v)| *v).unwrap_or(default)
+    pub fn mix(&self, ws: &str, default: u8) -> u8 {
+        self.mixes.iter().find(|(k, _)| same_path(k, ws)).map(|(_, v)| *v).unwrap_or(default)
     }
 
-    pub fn permission(&self, default: &str) -> String {
-        self.permissions.iter().find(|(k, _)| same_path(k, &self.workspace)).map(|(_, v)| v.clone()).unwrap_or_else(|| default.to_string())
+    pub fn permission(&self, ws: &str, default: &str) -> String {
+        self.permissions.iter().find(|(k, _)| same_path(k, ws)).map(|(_, v)| v.clone()).unwrap_or_else(|| default.to_string())
     }
 
-    pub fn set_permission(&mut self, value: &str) {
-        let ws = self.workspace.clone();
-        self.permissions.retain(|k, _| !same_path(k, &ws));
-        self.permissions.insert(ws, value.to_string());
+    pub fn set_permission(&mut self, ws: &str, value: &str) {
+        self.permissions.retain(|k, _| !same_path(k, ws));
+        self.permissions.insert(ws.to_string(), value.to_string());
     }
 
-    pub fn set_mix(&mut self, value: u8) {
-        let ws = self.workspace.clone();
-        self.mixes.retain(|k, _| !same_path(k, &ws));
-        self.mixes.insert(ws, value.min(10));
+    pub fn set_mix(&mut self, ws: &str, value: u8) {
+        self.mixes.retain(|k, _| !same_path(k, ws));
+        self.mixes.insert(ws.to_string(), value.min(10));
     }
 }
 
@@ -290,9 +298,9 @@ pub struct EffRecord {
 }
 
 impl Store {
-    pub fn record_efficiency(&mut self, mut r: EffRecord) {
+    pub fn record_efficiency(&mut self, ws: &str, mut r: EffRecord) {
         r.ts = now();
-        r.workspace = self.workspace.clone();
+        r.workspace = ws.to_string();
         self.efficiency.push(r);
         let len = self.efficiency.len();
         if len > 3000 {

@@ -91,8 +91,10 @@ To uninstall, use Settings → Apps → Installed apps → Orchestrator.
   (or type `/handoff`). The agent writes a handoff and the chat continues in a fresh
   session that starts from it.
 - **Workspace**: the project folder it works in. Each workspace has its own
-  orchestrator conversation, threads, brief and rules. `/import` brings in a Claude
-  Code project, including its history, your rules and its unfinished work.
+  orchestrator conversation, threads, brief and rules. You can have several open at
+  once: they're listed at the top of the sidebar, each one keeps working while you
+  look at another, and **+ open another workspace…** adds one. `/import` brings in a
+  Claude Code project, including its history, your rules and its unfinished work.
 - **Tray**: closing the window keeps everything running in the system tray.
   Right-click the tray icon → Quit to stop.
 

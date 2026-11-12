@@ -283,9 +283,9 @@ pub const MEDIA_EXTS: [&str; 15] =
 /// Working directory of a session (thread folder, or the workspace for the orchestrator).
 fn session_cwd(app: &App, key: &str) -> String {
     if key.starts_with(ORCHESTRATOR) {
-        return app.workspace();
+        return app.ws_of(key);
     }
-    app.store.lock().unwrap().get(key).map(|t| t.cwd.clone()).unwrap_or_else(|| app.workspace())
+    app.store.lock().unwrap().get(key).map(|t| t.cwd.clone()).unwrap_or_else(|| app.ws_of(key))
 }
 
 fn answer_text(questions: &Value, answers: &Value) -> String {
@@ -380,7 +380,7 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             let n = arg(args, "name").ok_or("name is required")?;
             let task = arg(args, "task").ok_or("task is required")?;
             let effort = approved_effort(app, key, n, arg(args, "effort"), arg(args, "effort_reason").unwrap_or("")).await?;
-            let row = app.create_thread(n, arg(args, "cwd"), None, arg(args, "model"), effort.as_deref())?;
+            let row = app.create_thread(&app.ws_of(key), n, arg(args, "cwd"), None, arg(args, "model"), effort.as_deref())?;
             app.note_thread_estimate(n, task_estimate(args, task));
             app.send_to_thread(n, task, "orchestrator", vec![], false)?;
             Ok(format!(
@@ -409,7 +409,7 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
                 .unwrap_or_default();
             if names.is_empty() {
-                names = app.thread_names_here();
+                names = app.thread_names_here(&app.ws_of(key));
             }
             if let Some(m) = arg(args, "message").filter(|m| !m.trim().is_empty()) {
                 app.tell_user(key, m);
@@ -434,7 +434,7 @@ two-line status (what's done, what's running, anything they need to do or that y
                 ));
             }
             let secs = args.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(900.0).clamp(1.0, 3500.0);
-            app.wait_threads(&names, Duration::from_secs_f64(secs)).await;
+            app.wait_threads(key, &names, Duration::from_secs_f64(secs)).await;
             // Take the user's held messages first, without the store locked: formatting them
             // locks the store (lesson notes), and std mutexes deadlock if locked twice.
             let held = app.take_held(key);
@@ -467,8 +467,9 @@ tell them now as text before your next tool call.)".into());
             Ok(if lines.is_empty() { "no threads".into() } else { lines.join("\n") })
         }
         "list_threads" => {
+            let ws = app.ws_of(key);
             let st = app.store.lock().unwrap();
-            let rows = st.in_workspace(&st.workspace);
+            let rows = st.in_workspace(&ws);
             let (done, open): (Vec<_>, Vec<_>) = rows.iter().partition(|t| t.resolved);
             let mut out = if open.is_empty() { "no open threads".to_string() } else { open.iter().map(|t| summary(app, t)).collect::<Vec<_>>().join("\n") };
             if !done.is_empty() {
@@ -500,7 +501,8 @@ tell them now as text before your next tool call.)".into());
             let q = arg(args, "query").unwrap_or("").to_lowercase();
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(30).clamp(1, 200) as usize;
             let a = app.clone();
-            let all = tokio::task::spawn_blocking(move || a.past_sessions()).await.map_err(|e| e.to_string())?;
+            let ws = app.ws_of(key);
+            let all = tokio::task::spawn_blocking(move || a.past_sessions(&ws)).await.map_err(|e| e.to_string())?;
             let total = all.len();
             let words: Vec<&str> = q.split_whitespace().collect();
             let hits: Vec<_> = all
@@ -534,8 +536,9 @@ tell them now as text before your next tool call.)".into());
             let id = arg(args, "id").ok_or("id is required")?.to_string();
             let max = args.get("max_chars").and_then(Value::as_u64).unwrap_or(24000).clamp(2000, 120000) as usize;
             let a = app.clone();
+            let ws = app.ws_of(key);
             tokio::task::spawn_blocking(move || {
-                let s = a.past_sessions().into_iter().find(|s| s.id == id).ok_or(format!("no past session {id}"))?;
+                let s = a.past_sessions(&ws).into_iter().find(|s| s.id == id).ok_or(format!("no past session {id}"))?;
                 Ok::<String, String>(format!("# {}\n(last active {:.0} days ago, {} prompts)\n{}",
                     s.title, (crate::store::now() - s.last_active) / 86400.0, s.prompts, crate::claude_projects::condense(&s.path, max)))
             })
@@ -545,7 +548,8 @@ tell them now as text before your next tool call.)".into());
         "past_user_messages" => {
             let max = args.get("max_chars").and_then(Value::as_u64).unwrap_or(60000).clamp(5000, 200000) as usize;
             let a = app.clone();
-            tokio::task::spawn_blocking(move || crate::claude_projects::all_user_messages(&a.past_sessions(), max))
+            let ws = app.ws_of(key);
+            tokio::task::spawn_blocking(move || crate::claude_projects::all_user_messages(&a.past_sessions(&ws), max))
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -559,8 +563,9 @@ tell them now as text before your next tool call.)".into());
                 arg(args, "effort").map(str::to_string),
             );
             let a = app.clone();
+            let ws = app.ws_of(key);
             let row = tokio::task::spawn_blocking(move || {
-                a.resume_past_session(&name, &sid, &msg, backend.as_deref(), model.as_deref(), effort.as_deref())
+                a.resume_past_session(&ws, &name, &sid, &msg, backend.as_deref(), model.as_deref(), effort.as_deref())
             })
             .await
             .map_err(|e| e.to_string())??;
@@ -572,16 +577,16 @@ tell them now as text before your next tool call.)".into());
             let est = crate::app::Estimate::from_minutes(low, high, arg(args, "kind").unwrap_or(""), arg(args, "summary").unwrap_or(""))
                 .ok_or("low_minutes must be more than 0")?;
             let range = format!("{:.1}-{:.1} min", est.low_s / 60.0, est.high_s / 60.0).replace(".0", "");
-            app.set_job_estimate(est);
+            app.set_job_estimate(key, est);
             Ok(format!("recorded {range}; the clock runs until you and all threads are idle"))
         }
         "timing_report" => {
             let days = args.get("days").and_then(Value::as_f64).unwrap_or(30.0).clamp(0.1, 365.0);
-            Ok(serde_json::to_string_pretty(&app.timing_json(days)).unwrap_or_default())
+            Ok(serde_json::to_string_pretty(&app.timing_json(&app.ws_of(key), days)).unwrap_or_default())
         }
         "efficiency_report" => {
             let days = args.get("days").and_then(Value::as_f64).unwrap_or(7.0).clamp(0.1, 90.0);
-            Ok(serde_json::to_string_pretty(&app.efficiency_json(days)).unwrap_or_default())
+            Ok(serde_json::to_string_pretty(&app.efficiency_json(&app.ws_of(key), days)).unwrap_or_default())
         }
         "rate_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
@@ -598,11 +603,11 @@ tell them now as text before your next tool call.)".into());
             Ok("saved".into())
         }
         "save_tuning_notes" => {
-            app.save_tuning(arg(args, "notes").ok_or("notes is required")?);
+            app.save_tuning(&app.ws_of(key), arg(args, "notes").ok_or("notes is required")?);
             Ok("saved".into())
         }
         "save_project_notes" => {
-            app.save_notes(arg(args, "brief"), arg(args, "rules"));
+            app.save_notes(&app.ws_of(key), arg(args, "brief"), arg(args, "rules"));
             Ok("saved".into())
         }
         "configure_thread" => {

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.18 (2026-11-11)
+
+- **Several workspaces at once.** Open workspaces are listed at the top of the sidebar.
+  Each one has its own orchestrator and threads, and they all keep working while you look
+  at another: switching no longer waits for the orchestrator to be idle. A dot shows which
+  ones are working, "?" marks one waiting for your answer, and x closes one (its
+  conversations stay saved). "+ open another workspace..." adds one.
+- Thread reports reach their own orchestrator right away, even when you're looking at a
+  different workspace. Before, they waited until you switched back.
+- Each workspace keeps its own permission level, plan/API mix, brief, rules and timing
+  history, as before; work running in the background now uses its own workspace's settings.
+
 ## 0.4.17 (2026-11-07)
 
 - **Fixed: the orchestrator "answered" you in its head.** When you messaged it mid-run, it wrote

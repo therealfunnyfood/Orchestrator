@@ -98,8 +98,8 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/setup/install-cli", post(|| async { crate::setup::install_cli().map(|_| Json(json!({"ok": true}))).map_err(ApiError) }))
         .route("/api/setup/login", post(setup_login))
         .route("/api/setup/finish", post(setup_finish))
-        .route("/api/efficiency", get(|State(a): State<Shared>| async move { Json(a.efficiency_json(7.0)) }))
-        .route("/api/timing", get(|State(a): State<Shared>| async move { Json(a.timing_json(30.0)) }))
+        .route("/api/efficiency", get(|State(a): State<Shared>| async move { Json(a.efficiency_json(&a.workspace(), 7.0)) }))
+        .route("/api/timing", get(|State(a): State<Shared>| async move { Json(a.timing_json(&a.workspace(), 30.0)) }))
         .route("/api/tuning", post(tuning))
         .route("/api/lessons", post(lessons))
         .route("/api/show", post(|| async { Json(json!({"shown": crate::show_main()})) }))
@@ -114,6 +114,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/threads/{name}", patch(patch_thread).delete(delete_thread))
         .route("/api/orchestrator", post(patch_orchestrator))
         .route("/api/workspace", post(workspace))
+        .route("/api/workspace/close", post(close_workspace))
         .route("/api/pick-folder", post(pick_folder))
         .route("/api/settings", get(|State(a): State<Shared>| async move { Json(a.settings_json()) }).post(save_settings))
         .route("/api/auth-check", post(|State(a): State<Shared>| async move { Json(a.auth_check().await) }))
@@ -176,7 +177,7 @@ async fn send(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     // Default: straight into a running turn. "queue": true waits for it to finish.
     let now = !b.get("queue").and_then(Value::as_bool).unwrap_or(false);
     let delivery = if target.starts_with(ORCHESTRATOR) {
-        app.submit_orchestrator(text, attach, now)
+        app.submit_orchestrator(target, text, attach, now)
     } else {
         app.send_to_thread(target, text, "you", attach, now)?
     };
@@ -189,7 +190,7 @@ async fn stop(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
 
 async fn create_thread(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     let name = s(&b, "name").unwrap_or("").trim().to_string();
-    let row = app.create_thread(&name, s(&b, "cwd"), s(&b, "backend"), s(&b, "model"), s(&b, "effort"))?;
+    let row = app.create_thread(&app.workspace(), &name, s(&b, "cwd"), s(&b, "backend"), s(&b, "model"), s(&b, "effort"))?;
     if let Some(task) = s(&b, "task").map(str::trim).filter(|t| !t.is_empty()) {
         app.send_to_thread(&name, task, "you", vec![], false)?;
     }
@@ -226,6 +227,11 @@ async fn patch_orchestrator(State(app): State<Shared>, Json(b): Json<Value>) -> 
 
 async fn workspace(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     let ws = app.set_workspace(s(&b, "path").unwrap_or(""), b.get("create").and_then(Value::as_bool).unwrap_or(false))?;
+    Ok(Json(json!({"workspace": ws})))
+}
+
+async fn close_workspace(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
+    let ws = app.close_workspace(s(&b, "path").unwrap_or(""))?;
     Ok(Json(json!({"workspace": ws})))
 }
 
@@ -467,12 +473,13 @@ async fn import(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
 
 async fn past_sessions(State(app): State<Shared>) -> ApiResult {
     let a = app.clone();
-    let list = tokio::task::spawn_blocking(move || a.past_sessions()).await.map_err(|e| ApiError(e.to_string()))?;
+    let ws = app.workspace();
+    let list = tokio::task::spawn_blocking(move || a.past_sessions(&ws)).await.map_err(|e| ApiError(e.to_string()))?;
     Ok(Json(json!({"sessions": list.iter().map(|s| s.to_json()).collect::<Vec<_>>()})))
 }
 
 async fn notes(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    app.save_notes(s(&b, "brief"), s(&b, "rules"));
+    app.save_notes(&app.workspace(), s(&b, "brief"), s(&b, "rules"));
     Ok(Json(json!({"ok": true})))
 }
 
@@ -493,7 +500,7 @@ async fn lessons(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
 }
 
 async fn tuning(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    app.save_tuning(s(&b, "notes").unwrap_or(""));
+    app.save_tuning(&app.workspace(), s(&b, "notes").unwrap_or(""));
     Ok(Json(json!({"ok": true})))
 }
 
