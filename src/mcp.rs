@@ -138,7 +138,9 @@ calls are invisible to them, so a reply you only think doesn't reach them.",
         },
         {
             "name": "wait_for_threads",
-            "description": "Wait until the named threads (or all of this workspace's threads if names is empty) finish their current turn, or until timeout_seconds passes (default 900). \
+            "description": "Wait until the named threads (or all of this workspace's threads if names is empty) finish their current turn, or until timeout_seconds passes (default 120, at most 300). \
+Only for short waits before acting on a result: to wait longer, end your turn instead; thread reports and \
+user messages start your next turn. \
 message, if given, is shown to the user first (like tell_user): use it to reply or say what you're waiting for.",
             "inputSchema": {"type": "object", "properties": {
                 "names": {"type": "array", "items": {"type": "string"}},
@@ -433,7 +435,7 @@ two-line status (what's done, what's running, anything they need to do or that y
                     (gap / 60.0).round()
                 ));
             }
-            let secs = args.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(900.0).clamp(1.0, 3500.0);
+            let secs = args.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(120.0).clamp(1.0, 300.0);
             app.wait_threads(key, &names, Duration::from_secs_f64(secs)).await;
             // Take the user's held messages first, without the store locked: formatting them
             // locks the store (lesson notes), and std mutexes deadlock if locked twice.
@@ -463,6 +465,8 @@ tell them now as text before your next tool call.)".into());
                 lines.push(format!("(returned early; still running: {still_list})"));
             } else if !still.is_empty() {
                 lines.push(format!("still running after timeout: {still_list}"));
+                lines.push("Don't wait again: if you have nothing else to do, tell the user what's running and end your turn. \
+Each thread's messages and final report start your next turn.".into());
             }
             Ok(if lines.is_empty() { "no threads".into() } else { lines.join("\n") })
         }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.22 (2026-11-12)
+
+- The orchestrator no longer sits in a turn for an hour waiting on its threads. Once
+  threads are working, it tells you what's running and ends its turn; each thread's messages
+  and final report start a new turn, as do your messages. "Working..." now means it is
+  actually doing something.
+- Waiting on threads inside a turn is limited to 5 minutes, for short waits before it acts on
+  a result.
+
 ## 0.4.21 (2026-11-11)
 
 - Messages to a thread that is waiting on a background command (a long copy, a build)
