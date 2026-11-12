@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.19 (2026-11-11)
+
+- **Fixed: "+ open another workspace..." closed its picker right away.** It now stays open.
+
 ## 0.4.18 (2026-11-11)
 
 - **Several workspaces at once.** Open workspaces are listed at the top of the sidebar.

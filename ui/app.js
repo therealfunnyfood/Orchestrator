@@ -332,7 +332,7 @@ function renderWorkspaces() {
     if (open.length > 1) {
       const x = h("button", "ib ws-close", "×");
       x.title = "Close this workspace (its conversations stay saved)";
-      x.onmousedown = (e) => e.stopPropagation();
+      x.onmousedown = (e) => { e.stopPropagation(); e.preventDefault(); };
       x.onclick = (e) => { e.stopPropagation(); closeWorkspace(w.path); };
       r.append(x);
     }
@@ -343,7 +343,9 @@ function renderWorkspaces() {
   const add = h("div", "node ws-add");
   add.append(h("span", "st"), h("span", "nm", "+ open another workspace…"));
   add.title = "Open a folder as another workspace, with its own orchestrator (the others keep running)";
-  add.onmousedown = (e) => { if (e.button === 0) pickWorkspace(); };
+  // On click, not mousedown: the rest of a mousedown's click would take focus from the
+  // picker's input and close it.
+  add.onclick = () => pickWorkspace();
   list.append(add);
 }
 
