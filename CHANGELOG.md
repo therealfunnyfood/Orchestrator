@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.20 (2026-11-11)
+
+- **Fixed: pickers that open a second picker closed it right away**, e.g. "New folder..." when opening a workspace.
+
 ## 0.4.19 (2026-11-11)
 
 - **Fixed: "+ open another workspace..." closed its picker right away.** It now stays open.

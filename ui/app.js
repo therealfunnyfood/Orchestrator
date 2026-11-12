@@ -1908,7 +1908,9 @@ function finishQi(item) {
   const r = qiResolve;
   qiResolve = null;
   if (r) r(item);
-  if (curKey()) setTimeout(() => $("#input").focus(), 0);
+  // Back to the composer, unless the choice opened another picker (e.g. "New folder…"):
+  // taking its focus would close it.
+  if (curKey()) setTimeout(() => { if ($("#qi").classList.contains("hidden")) $("#input").focus(); }, 0);
 }
 
 function wireQi() {
