@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.21 (2026-11-11)
+
+- Messages to a thread that is waiting on a background command (a long copy, a build)
+  now reach it right away. Before, once the thread said "I'll wait", messages from you
+  or the orchestrator were queued until the command finished.
+- A thread that finishes its work now ends its turn and reports to the orchestrator.
+  Threads can no longer schedule a wake-up for later, which kept a finished thread
+  "running" with nothing to do, and a session that lingers after its last reply is
+  stopped after 30 seconds.
+
 ## 0.4.20 (2026-11-11)
 
 - **Fixed: pickers that open a second picker closed it right away**, e.g. "New folder..." when opening a workspace.

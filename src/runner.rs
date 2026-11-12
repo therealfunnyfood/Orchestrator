@@ -106,7 +106,10 @@ fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Op
     // sessions talk to each other only through the app (message_orchestrator,
     // send_to_thread): Claude Code's own cross-session tools would reach the user's other
     // Claude sessions instead.
-    cmd.args(["--disallowedTools", "AskUserQuestion,SendMessage,ListAgents"]);
+    // Scheduled wake-ups keep the process alive with nothing to do, so the app would
+    // think the turn is still running; waiting is done with background commands or
+    // the app's own tools instead.
+    cmd.args(["--disallowedTools", "AskUserQuestion,SendMessage,ListAgents,ScheduleWakeup,CronCreate,CronDelete,CronList,RemoteTrigger"]);
     if let Some(r) = resume {
         cmd.arg(format!("--resume={r}"));
         if let Some(at) = &spec.resume_at {
@@ -251,6 +254,12 @@ async fn run_once(
 
     let mut out = TurnResult { session_id: resume.map(str::to_string), backend_used: backend.into(), ..Default::default() };
     let mut got_result = false;
+    // Background commands still running. Claude Code takes another turn when each one
+    // finishes, so the turn isn't over until they are done.
+    let mut background = 0usize;
+    // After the last result Claude Code should exit; if it lingers with nothing running,
+    // it is stuck on something the app can't see, so stop it.
+    let mut linger: Option<tokio::time::Instant> = None;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     loop {
         tokio::select! {
@@ -264,6 +273,9 @@ async fn run_once(
                     Some("system") if v.get("subtype").and_then(Value::as_str) == Some("init") => {
                         let src = v.get("apiKeySource").and_then(Value::as_str).unwrap_or("");
                         out.key_source = if src.is_empty() || src == "none" { "Claude subscription".into() } else { src.into() };
+                    }
+                    Some("system") if v.get("subtype").and_then(Value::as_str) == Some("background_tasks_changed") => {
+                        background = v.get("tasks").and_then(Value::as_array).map_or(0, Vec::len);
                     }
                     Some("rate_limit_event") => {
                         if v.pointer("/rate_limit_info/status").and_then(Value::as_str) == Some("rejected") {
@@ -295,9 +307,11 @@ async fn run_once(
                     }
                     _ => {}
                 }
-                if v.get("type").and_then(Value::as_str) == Some("result") {
+                linger = None;
+                if v.get("type").and_then(Value::as_str) == Some("result") && background == 0 {
                     // Stop taking messages (senders fall back to the queue), but pass on
                     // any that already arrived; Claude Code answers them before exiting.
+                    // While background commands run, keep taking them: the turn goes on.
                     let mut more = false;
                     if let Some(rx) = inject.as_mut() {
                         rx.close();
@@ -307,6 +321,7 @@ async fn run_once(
                     }
                     if !more {
                         writer = None;
+                        linger = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
                     }
                 }
                 on_line(&v);
@@ -317,6 +332,11 @@ async fn run_once(
                     (None, _) => inject = None,
                     _ => {}
                 }
+            }
+            _ = async { tokio::time::sleep_until(linger.unwrap()).await }, if linger.is_some() => {
+                kill_tree(pid);
+                let _ = child.kill().await;
+                break;
             }
             _ = cancel.changed() => {
                 if *cancel.borrow() {
