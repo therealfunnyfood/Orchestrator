@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.23 (2026-11-12)
+
+- Saving lessons no longer shows the same line every time. The orchestrator saves its whole
+  list of lessons each time, and the chat used to preview the list's first line, which never
+  changes. Now the row shows how many lessons there are, and its result lists the lines that
+  were added or removed.
+
 ## 0.4.22 (2026-11-12)
 
 - The orchestrator no longer sits in a turn for an hour waiting on its threads. Once

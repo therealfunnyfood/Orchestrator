@@ -600,6 +600,10 @@ function toolArg(name, input) {
   if (!o || typeof o !== "object") return String(o);
   if (name.endsWith("spawn_thread")) return `${o.name}${o.effort ? ", " + o.effort : ""}`;
   if (name.endsWith("send_to_thread")) return o.name;
+  // These save a whole list; its first line is the same every time, so show its size
+  // (the result lists what changed).
+  if (name.endsWith("save_lessons") && typeof o.lessons === "string") return `${o.lessons.split("\n").filter((l) => l.trim()).length} lessons`;
+  if (name.endsWith("save_tuning_notes") || name.endsWith("save_project_notes")) return "";
   for (const k of ["command", "file_path", "path", "pattern", "url", "query", "name", "description", "prompt"]) {
     if (typeof o[k] === "string") return o[k].split("\n")[0].slice(0, 140);
   }

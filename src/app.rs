@@ -1882,12 +1882,23 @@ The user may be looking at another workspace while you work; carry on regardless
     }
 
     /// Replace the orchestrator's lessons about working with the user.
-    pub fn save_lessons(&self, key: &str, lessons: &str) -> Result<(), String> {
+    /// Saves the whole list and returns what changed, line by line, so the chat shows the
+    /// new lesson instead of the (unchanged) first line of the list.
+    pub fn save_lessons(&self, key: &str, lessons: &str) -> Result<String, String> {
         let lessons = lessons.trim();
         if lessons.chars().count() > 8000 {
             return Err("too long: keep lessons under about 40 short lines (merge and trim, then save again)".into());
         }
         let mut st = self.store.lock().unwrap();
+        let lines = |s: &str| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>();
+        let (old, new) = (lines(&st.lessons), lines(lessons));
+        let added: Vec<String> = new.iter().filter(|l| !old.contains(l)).map(|l| format!("+ {l}")).collect();
+        let removed: Vec<String> = old.iter().filter(|l| !new.contains(l)).map(|l| format!("- {l}")).collect();
+        let changes = if added.is_empty() && removed.is_empty() {
+            format!("saved, no changes ({} lessons)", new.len())
+        } else {
+            format!("saved ({} lessons)\n{}", new.len(), added.into_iter().chain(removed).collect::<Vec<_>>().join("\n"))
+        };
         st.lessons = lessons.to_string();
         st.lessons_updated_at = now();
         st.since_lessons = 0;
@@ -1895,7 +1906,7 @@ The user may be looking at another workspace while you work; carry on regardless
         drop(st);
         self.owes_lesson.lock().unwrap().remove(key);
         self.touch();
-        Ok(())
+        Ok(changes)
     }
 
     /// Notes the app adds to a user message for the orchestrator: a correction should

@@ -603,8 +603,7 @@ Each thread's messages and final report start your next turn.".into());
             Ok("shown to the user".into())
         }
         "save_lessons" => {
-            app.save_lessons(key, arg(args, "lessons").ok_or("lessons is required")?)?;
-            Ok("saved".into())
+            app.save_lessons(key, arg(args, "lessons").ok_or("lessons is required")?)
         }
         "save_tuning_notes" => {
             app.save_tuning(&app.ws_of(key), arg(args, "notes").ok_or("notes is required")?);
