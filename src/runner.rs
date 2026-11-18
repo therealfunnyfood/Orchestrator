@@ -325,6 +325,14 @@ async fn run_once(
                     }
                 }
                 on_line(&v);
+                if v.get("type").and_then(Value::as_str) == Some("result") && looks_limited(&v) {
+                    // Out of usage: end the turn now, even with background commands still
+                    // running (each would only start another turn that hits the limit).
+                    // The app then continues the conversation once the limit resets.
+                    kill_tree(pid);
+                    let _ = child.kill().await;
+                    break;
+                }
             }
             line = async { inject.as_mut().unwrap().recv().await }, if inject.is_some() => {
                 match (line, &writer) {

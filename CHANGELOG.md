@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.24 (2026-11-18)
+
+- A thread that hits the plan's usage limit while a background command is running now
+  stops and continues by itself after the limit resets. Since 0.4.21 it stayed "working"
+  instead, waiting for the background command, so it never came back.
+
 ## 0.4.23 (2026-11-12)
 
 - Saving lessons no longer shows the same line every time. The orchestrator saves its whole
