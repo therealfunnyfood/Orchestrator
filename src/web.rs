@@ -610,6 +610,9 @@ async fn install_update(State(app): State<Shared>) -> ApiResult {
     tokio::task::spawn_blocking(move || crate::updates::download_and_launch(&update))
         .await
         .map_err(|e| ApiError(e.to_string()))??;
+    // Threads waiting out a usage limit continue after the update's restart (but not after
+    // the user closes and reopens the app).
+    app.save_resumes_for_update();
     // Give the response time to reach the page, then quit (stopping threads cleanly).
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;

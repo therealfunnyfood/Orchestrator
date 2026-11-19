@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.25 (2026-11-18)
+
+- Threads waiting out a usage limit still continue when it resets if you install an update
+  in the meantime. Before, the update's restart forgot them. Closing and reopening the app
+  yourself still cancels them.
+- The orchestrator now knows the current time: every message it gets starts with it. Before,
+  it guessed from old messages, and once told you the limit would reset "in about 4 hours"
+  after it already had.
+- Usage-limit notes give the clock time ("continues by itself at 8:31 PM") instead of
+  "in about 4h", which went stale.
+
 ## 0.4.24 (2026-11-18)
 
 - A thread that hits the plan's usage limit while a background command is running now

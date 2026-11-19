@@ -104,6 +104,7 @@ async fn start(desktop: bool, port: u16) -> (Arc<app::App>, String) {
     // Data stranded in a packaged app's redirected AppData (see migrate.rs).
     let rescued = migrate::rescue_packaged_data(&paths);
     let app = app::App::new(paths, token());
+    app.restore_resumes_after_update();
     if let Some(note) = rescued {
         let key = app.orch_key();
         app.hub.emit(&key, serde_json::json!({"kind": "notice", "text": note}));

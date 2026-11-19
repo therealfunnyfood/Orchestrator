@@ -549,6 +549,42 @@ impl App {
         }
         // A minute after the reset; if Claude Code didn't say when, try again in 30 minutes.
         let at = r.resets_at.map_or(now() + 1800.0, |t| t + 60.0).max(now() + 60.0);
+        self.schedule_resume(key, at);
+        // A clock time, not "in 4h": this note is read again long after it was written.
+        Some(format!("usage limit: continues by itself at {}, when it resets", clock_time(at)))
+    }
+
+    fn resumes_file(&self) -> std::path::PathBuf {
+        self.paths.data_dir.join("resumes-after-update.json")
+    }
+
+    /// Before restarting into an update: remember which conversations were waiting out a
+    /// usage limit, so the new version continues them. A normal quit forgets them.
+    pub fn save_resumes_for_update(&self) {
+        let m: HashMap<String, f64> = self.resumes.lock().unwrap().clone();
+        if !m.is_empty() {
+            let _ = std::fs::write(self.resumes_file(), serde_json::to_string(&m).unwrap_or_default());
+        }
+    }
+
+    pub fn restore_resumes_after_update(self: &Arc<Self>) {
+        let f = self.resumes_file();
+        // Only right after an update: a file left from an update that failed long ago is ignored.
+        let fresh = std::fs::metadata(&f)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|e| e.as_secs() < 600));
+        let Ok(s) = std::fs::read_to_string(&f) else { return };
+        let _ = std::fs::remove_file(&f);
+        if !fresh {
+            return;
+        }
+        let m: HashMap<String, f64> = serde_json::from_str(&s).unwrap_or_default();
+        for (key, at) in m {
+            self.schedule_resume(&key, at.max(now() + 15.0));
+        }
+    }
+
+    fn schedule_resume(self: &Arc<Self>, key: &str, at: f64) {
         self.resumes.lock().unwrap().insert(key.to_string(), at);
         let (app, key) = (self.clone(), key.to_string());
         tokio::spawn(async move {
@@ -573,9 +609,6 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
             };
             app.enqueue(&key, Queued { id: String::new(), text: text.into(), sender: "app".into(), attach: vec![], fork: None }, false);
         });
-        let mins = ((at - now()) / 60.0).round() as i64;
-        let when = if mins >= 60 { format!("{}h {}m", mins / 60, mins % 60) } else { format!("{mins}m") };
-        Some(format!("usage limit: continues by itself in about {when}, when it resets"))
     }
 
     pub fn stop(&self, key: &str) -> bool {
@@ -709,6 +742,9 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
             if let Some(n) = self.lesson_note(key, &msg.text) {
                 prompt = format!("{prompt}\n\n{n}");
             }
+        }
+        if key.starts_with(ORCHESTRATOR) {
+            prompt = format!("{}\n{prompt}", now_note());
         }
         if tx.send(user_line(&prompt, &images)).is_err() {
             return false;
@@ -1289,6 +1325,9 @@ wait for. Then act on it."
         } else {
             format!("[thread updates]\n{}\n\n{text}", notices.join("\n"))
         };
+        // The model has no clock; without this it guesses the time from old messages
+        // (e.g. "resets in about 4h" written hours earlier).
+        let prompt = format!("{}\n{prompt}", now_note());
         let s = self.settings();
         let prior_cost = self.store.lock().unwrap().session_cost(resume.as_deref());
         let spec = TurnSpec {
@@ -2351,6 +2390,22 @@ fn percentile(v: &mut [f64], p: f64) -> f64 {
 fn short_minutes(s: f64) -> String {
     let m = s / 60.0;
     if m < 10.0 { format!("{:.1}", m).trim_end_matches(".0").to_string() } else { format!("{:.0}", m) }
+}
+
+/// A Unix time as a local clock time, e.g. "8:31 PM" (with the day if it isn't today).
+pub fn clock_time(t: f64) -> String {
+    use chrono::TimeZone;
+    let Some(dt) = chrono::Local.timestamp_opt(t as i64, 0).single() else { return String::new() };
+    if dt.date_naive() == chrono::Local::now().date_naive() {
+        dt.format("%-I:%M %p").to_string()
+    } else {
+        dt.format("%a %b %-d, %-I:%M %p").to_string()
+    }
+}
+
+/// The current local time, put in front of every message the orchestrator gets.
+pub fn now_note() -> String {
+    format!("[now: {}]", chrono::Local::now().format("%a %b %-d, %-I:%M %p"))
 }
 
 pub fn fmt_minutes(s: f64) -> String {
