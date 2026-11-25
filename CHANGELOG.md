@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.26 (2026-11-24)
+
+- Fixed "could not start Claude Code ... The filename or extension is too long (os error 206)".
+  An orchestrator's instructions (project brief, rules, lessons, timing history) were passed
+  on the command line, which Windows limits to about 32,000 characters; a project with a lot
+  of history went over it. They're now passed in a temporary file, deleted after each turn.
+
 ## 0.4.25 (2026-11-18)
 
 - Threads waiting out a usage limit still continue when it resets if you install an update

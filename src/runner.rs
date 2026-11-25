@@ -92,7 +92,30 @@ fn launched_inside_claude() -> bool {
     std::env::var_os("CLAUDECODE").is_some() || std::env::var_os("CLAUDE_CODE_HOST_SESSION_ID").is_some()
 }
 
-fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Option<&str>) -> Result<Command, String> {
+/// Deletes the file holding a turn's system prompt when the turn is over.
+struct TempFile(Option<PathBuf>);
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if let Some(p) = &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// The appended system prompt goes through a file: it carries the project brief, notes,
+/// lessons and history, and Windows refuses command lines over 32K characters
+/// ("The filename or extension is too long").
+fn system_prompt_file(text: &str) -> Result<PathBuf, String> {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join("orchestrator-prompts");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not write the system prompt file: {e}"))?;
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let p = dir.join(format!("{}-{n}.md", std::process::id()));
+    std::fs::write(&p, text).map_err(|e| format!("could not write the system prompt file: {e}"))?;
+    Ok(p)
+}
+
+fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Option<&str>, prompt_file: &mut TempFile) -> Result<Command, String> {
     let mut cmd = Command::new(settings.claude_exe());
     cmd.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]);
     let mode = if spec.permission_mode.is_empty() { "bypassPermissions" } else { spec.permission_mode.as_str() };
@@ -126,7 +149,9 @@ fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Op
         cmd.args(["--effort", &spec.effort]);
     }
     if !spec.append_system.is_empty() {
-        cmd.args(["--append-system-prompt", &spec.append_system]);
+        let p = system_prompt_file(&spec.append_system)?;
+        cmd.arg("--append-system-prompt-file").arg(&p);
+        prompt_file.0 = Some(p);
     }
     if let Some(tools) = &spec.tools {
         cmd.args(["--tools", tools]);
@@ -218,7 +243,9 @@ async fn run_once(
     cancel: &mut watch::Receiver<bool>,
     on_line: &mut (dyn FnMut(&Value) + Send),
 ) -> Result<TurnResult, TurnError> {
-    let mut cmd = build_command(settings, spec, backend, resume).map_err(TurnError::Failed)?;
+    // Lives until the turn ends (the CLI may read it after starting).
+    let mut prompt_file = TempFile(None);
+    let mut cmd = build_command(settings, spec, backend, resume, &mut prompt_file).map_err(TurnError::Failed)?;
     let mut child = cmd.spawn().map_err(|e| {
         TurnError::Failed(format!("could not start Claude Code ({}): {e}", settings.claude_exe().display()))
     })?;
