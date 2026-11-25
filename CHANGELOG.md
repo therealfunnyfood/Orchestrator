@@ -8,7 +8,7 @@
 - **Size limits.** The brief and rules (5,000 characters each), tuning notes (3,000) and lessons
   (5,000, or 4,000 per project) are read on every turn, so the orchestrator now keeps them under
   those limits; anything already over gets tidied on its next message. A copy of all notes and
-  lessons is saved first, as `notes-backup-<date>.json` in `%APPDATA%\Orchestrator`.
+  lessons is saved first, as `notes-backup-<date>.json` in `%LOCALAPPDATA%\Orchestrator`.
 - **Shorter built-in instructions.** The app's own instructions to the orchestrator are about a
   third shorter, with the same rules, grouped by topic.
 - **Fixed: notes and lessons not reaching a running conversation.** Newer Claude Code versions
