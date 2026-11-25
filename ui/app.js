@@ -602,7 +602,13 @@ function toolArg(name, input) {
   if (name.endsWith("send_to_thread")) return o.name;
   // These save a whole list; its first line is the same every time, so show its size
   // (the result lists what changed).
-  if (name.endsWith("save_lessons") && typeof o.lessons === "string") return `${o.lessons.split("\n").filter((l) => l.trim()).length} lessons`;
+  if (name.endsWith("save_lessons")) {
+    const n = (s) => (typeof s === "string" ? s.split("\n").filter((l) => l.trim()).length : null);
+    const parts = [];
+    if (n(o.lessons) !== null) parts.push(`${n(o.lessons)} lessons`);
+    if (n(o.project_lessons) !== null) parts.push(`${n(o.project_lessons)} project lessons${o.project ? " for " + o.project.split(/[\\/]/).pop() : ""}`);
+    return parts.join(", ");
+  }
   if (name.endsWith("save_tuning_notes") || name.endsWith("save_project_notes")) return "";
   for (const k of ["command", "file_path", "path", "pattern", "url", "query", "name", "description", "prompt"]) {
     if (typeof o[k] === "string") return o[k].split("\n")[0].slice(0, 140);
@@ -1198,7 +1204,7 @@ function renderBrief() {
     edit.onclick = () => { view.classList.toggle("hidden"); ta.classList.toggle("hidden"); saveB.classList.toggle("hidden"); edit.textContent = ta.classList.contains("hidden") ? "Edit" : "Cancel"; };
     saveB.onclick = async () => {
       if (field === "tuning") await api("/api/tuning", { body: { notes: ta.value } }).catch(fail);
-      else if (field === "lessons") await api("/api/lessons", { body: { lessons: ta.value } }).catch(fail);
+      else if (field === "lessons" || field === "project_lessons") await api("/api/lessons", { body: { [field]: ta.value } }).catch(fail);
       else await api("/api/notes", { body: { [field]: ta.value } }).catch(fail);
       await loadState();
       renderBrief();
@@ -1207,7 +1213,8 @@ function renderBrief() {
     row.append(edit, saveB);
     page.append(view, ta, row);
   };
-  section("Lessons", "lessons", "What the orchestrator has learned about working with you: mistakes it shouldn't repeat and how you talk. Shared across all your projects. It updates these itself; you can edit them too.");
+  section("Lessons about you", "lessons", "What the orchestrator has learned about working with you: how you talk and work, and mistakes it shouldn't repeat. Shared across all your projects. It updates these itself; you can edit them too.");
+  section("Lessons for this project", "project_lessons", "Lessons that only matter in this workspace.");
   section("Rules", "rules", "Added to every thread's instructions in this workspace.");
   section("Tuning notes", "tuning", "The orchestrator's own lessons about which model and effort fit which work in this project. It updates these from the efficiency stats; you can edit them too.");
   section("Brief", "brief", "Shown to the orchestrator in every conversation in this workspace.");

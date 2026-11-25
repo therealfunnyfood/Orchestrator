@@ -115,6 +115,9 @@ pub struct Store {
     /// it made and how the user talks. Written with save_lessons.
     pub lessons: String,
     pub lessons_updated_at: f64,
+    /// Lessons used to be one shared list; set once an orchestrator has moved the
+    /// project-specific ones into their projects.
+    pub lessons_split: bool,
     /// User messages to the orchestrator since it last reviewed its lessons.
     pub since_lessons: u32,
     #[serde(skip)]
@@ -196,6 +199,9 @@ pub struct ProjectNotes {
     pub rules: String,
     /// The orchestrator's own lessons about which model/effort fits which work.
     pub tuning: String,
+    /// The orchestrator's lessons that only apply to this project (save_lessons
+    /// project_lessons); lessons about the user in general are in Store::lessons.
+    pub lessons: String,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }

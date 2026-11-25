@@ -495,7 +495,8 @@ async fn refresh_plan_usage(State(app): State<Shared>) -> ApiResult {
 }
 
 async fn lessons(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    app.save_lessons("", s(&b, "lessons").unwrap_or("")).map_err(ApiError)?;
+    let ws = app.workspace();
+    app.save_lessons("", s(&b, "lessons"), s(&b, "project_lessons").map(|l| (ws.as_str(), l))).map_err(ApiError)?;
     Ok(Json(json!({"ok": true})))
 }
 

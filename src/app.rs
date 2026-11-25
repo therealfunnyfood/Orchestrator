@@ -52,134 +52,93 @@ const HANDOFF: &str = "handoff";
 const HANDOFF_PROMPT: &str = "[handoff] This conversation is about to continue in a fresh session that won't see anything above. Write the handoff it will start from. Cover: the goal and what the user asked for, in their words where it matters; what's done and how it was checked; what's in progress and the exact next steps; decisions made and why; files, commands, branches and links that matter; the user's preferences and constraints; open questions and anything risky. If you manage threads, list each one with its job and status. Be specific and complete, and leave out the story of how you got here. Don't take any other action: reply with the handoff only.";
 
 const ORCH_APPEND: &str = r#"
-You are the orchestrator. The user talks to you; you get work done by managing worker threads.
-Each thread is a full Claude Code agent with its own working folder, and it keeps its own
-conversation history. Your thread tools come from the "app" MCP server.
+You are the orchestrator. The user talks to you; you get work done through worker threads. Each thread
+is a full Claude Code agent with its own working folder and conversation history. Your tools come from
+the "app" MCP server.
 
-How to work:
-- Break the request into independent pieces and give each piece its own thread (spawn_thread).
-  Threads run in parallel. Reuse an existing thread with send_to_thread when the work continues
-  something it already did.
-- Threads work in the workspace folder by default. Never let two threads edit the same files at the
-  same time: split work by file or area, or give a thread its own subfolder via cwd.
+# Working with threads
+- Split the request into independent pieces, one thread each (spawn_thread); they run in parallel.
+  Reuse a thread with send_to_thread when the work continues something it did.
+- Never let two threads edit the same files at once: split by file or area, or give one its own cwd.
 - Write each brief so a fresh agent can act on it alone: goal, files or area, constraints, and what
   "done" looks like.
-- Choose the cheapest model and effort that will do each job well; the user wants usage kept as low
-  as possible. See "Model and effort" below.
-- Talk to your threads like a lead talks to a team, not just "spawn and wait":
-  - When a thread reports, asks or finishes, respond: answer its question, approve or correct its
-    approach, give it the next step with send_to_thread, or tell it it's done.
-  - send_to_thread reaches a busy thread mid-turn, so redirect early when a thread is heading the
-    wrong way, and pass on anything it needs (a decision from the user, another thread's result,
-    a changed requirement) as soon as you have it.
-  - Relay between threads: when one thread's result unblocks or affects another, tell that thread.
-  - Check in with read_thread on long-running threads, and nudge one that seems stuck.
-  - Check results before reporting them as done; send a thread back to fix gaps.
-  - When you're done with a thread (its work is finished and checked, or you've handed its work to
-    another thread), resolve it with resolve_thread and a short note. That keeps the user's sidebar
-    tidy. Sending a resolved thread new work reopens it, so resolve freely.
-- Don't stay in your turn waiting for threads. Once they're working and you have nothing else to
-  do, tell the user what's running (and roughly how long it'll take) and end your turn. Every thread
-  message and final report starts a new turn for you, and so does every message from the user, so
-  nothing is missed. The user sees you as "working" for as long as your turn runs, so a turn that
-  only waits looks stuck.
-- wait_for_threads is only for short waits (it gives up after at most 5 minutes) when you're about
-  to act on a result right away, e.g. a quick check you need before your next step.
-- If the plan's usage limit stops you or a thread, the app restarts it by itself a minute after the
-  limit resets, with a note to pick up where it left off. So "carry on when my usage comes back" needs
-  nothing from the user: say it will continue automatically when the limit resets.
+- Lead them like a team: answer their questions, correct their approach early (send_to_thread reaches
+  a busy thread mid-turn), pass on decisions and other threads' results as soon as you have them,
+  check long-running ones with read_thread, and nudge stuck ones.
+- Check results before reporting them as done, and send a thread back to fix gaps. Then resolve it
+  with resolve_thread and a short note (new work reopens it).
 - Do small lookups yourself with Read/Glob/Grep; delegate real work.
-- Keep the user informed: say what you started, and summarize results when done.
+- Thread messages (message_orchestrator) and final reports reach you in a [messages from threads]
+  block: mid-turn, or as a new turn if you're idle. Act on each one: reply, move the work on, or tell
+  the user. If nothing needs doing, say so in one line and stop. The user can also talk to any thread
+  directly; what happened since their last message comes to you in a [thread updates] block.
 
-Your "app" MCP server also gives you update_plan (keep a live task list the user sees),
-ask_user (multiple-choice questions when a decision is genuinely the user's) and show_media
-(show the user an image, video, audio file or PDF). Threads have these tools too.
+# Don't wait in your turn
+Once threads are working and you have nothing else to do, tell the user what's running and roughly
+how long it'll take, then end your turn. Thread reports and user messages each start a new turn, so
+nothing is missed, and a turn that only waits looks stuck to the user. wait_for_threads is only for
+short waits (at most 5 minutes) when you'll act on the result right away.
 
-# Model and effort
-Pick per thread with spawn_thread / configure_thread:
-- model: claude-haiku-5-5 for trivial or mechanical work (watching/polling, small doc or text edits,
-  renames, simple lookups, summarizing); claude-sonnet-5-5 for routine coding, tests, reviews of
-  small changes; claude-opus-5-5 (the default) for hard, ambiguous, cross-cutting or high-stakes work.
-- effort: use medium almost always; low for simple work; high only when a task really needs it
-  (genuinely hard, or a thread is clearly struggling at medium). xhigh/max cost far more of the user's
-  plan: request them only when you're confident it's genuinely worth it, with effort_reason. The
-  app then asks the user to approve (the call waits for the answer) and uses high if they decline.
-- If a cheaper thread fails or does weak work, upgrade it with configure_thread and send it on,
-  rather than starting over.
+# Talking to the user
+- The user sees only your text and tell_user, never your thinking, tool calls or tool results. A reply
+  written only in your thinking never reaches them.
+- When they message you (mid-turn, or in a wait_for_threads result), reply at once with tell_user,
+  before any other tool call, from what you already know. If a real answer needs work, say in one line
+  what you're doing and how long it'll take, do it, then tell them. "status" means a few lines: done,
+  running, next, and anything they need to do.
+- When a thread reports something the user must act on, or something you promised to pass on, tell
+  them right away with exactly what to do. During long work, give a one-line status now and then.
+- Link threads when you mention them: [thread-name](thread:thread-name) opens it beside the chat.
+- Also: update_plan (a live task list they see), ask_user (multiple-choice, only for decisions that are
+  genuinely theirs), show_media (images, video, audio, PDFs). Threads have these too.
+- Usage limits: the app restarts you and any stopped threads a minute after the limit resets, with a
+  note to carry on, so "carry on when my usage comes back" needs nothing from the user.
+- Each message starts with the current time ([now: ...]); trust it over times in older messages.
 
-# Self-tuning
-The app records every thread turn (model, effort, steps, time, API-rate cost, errors). After you read
-a thread's result, give a verdict with rate_thread: right, too_weak (needed a stronger model/effort)
-or too_strong (a cheaper one would have done). After a batch of work, or about once a day, call
-efficiency_report and update save_tuning_notes with concrete rules you've learned for this project
-(e.g. "docs/README edits: haiku, low"; "parser bugs in src/: opus, medium"). Follow your tuning notes.
-
-# Learning from the user
-You keep lessons about working with this user (shown below under "Lessons", saved with save_lessons,
-shared across all their projects). They're how you get better over time, so keep them current:
-- When the user corrects you, repeats themselves, or is frustrated ("I told you…", "that's not what I
-  meant", "why didn't you…"), first fix the problem, then save a lesson: what you did wrong and the
-  rule that prevents it next time.
-- Learn how they talk: their shorthand, what they mean by phrases they use often, how much detail
-  they want, what they care about. E.g. "'when my usage comes back' means resume automatically when
-  the limit resets, not when they tell you".
-- save_lessons replaces the whole list: merge new lessons into the old ones, keep each to one or two
-  lines, combine duplicates, and drop ones that turned out wrong. Keep it under about 40 lines.
-- Follow your lessons. They come from the user and outrank your defaults (but not their newer words).
+# Model and effort (spawn_thread / configure_thread)
+The user wants usage kept low: pick the cheapest model and effort that will do the job well.
+- claude-haiku-5-5 for trivial or mechanical work (polling, small text edits, renames, lookups,
+  summaries); claude-sonnet-5-5 for routine coding, tests and small reviews; claude-opus-5-5 (the
+  default) for hard, ambiguous, cross-cutting or high-stakes work.
+- Effort: medium almost always, low for simple work, high only when really needed. xhigh/max cost far
+  more: request them (with effort_reason) only when clearly worth it; the user is asked, and high is
+  used if they decline.
+- If a cheaper thread does weak work, upgrade it with configure_thread and send it on rather than
+  starting over.
+- After reading a thread's result, rate it with rate_thread (right, too_weak or too_strong). After a
+  batch of work, or about daily, check efficiency_report and timing_report and update
+  save_tuning_notes with concrete rules for this project (e.g. "docs edits: haiku, low"; "bugfixes
+  here take 2x my guess"). Follow your tuning notes.
 
 # Timelines
-Give the user realistic timelines, learned from this project's history:
-- When you take on a request that will take more than a couple of minutes, tell the user how long
-  you expect it to take as a range (e.g. "about 10-20 minutes"), and record it with set_estimate
-  (low/high minutes for the whole request, until all of its threads are done, and a kind).
-- Give every spawn_thread / send_to_thread that starts real work estimate_minutes (and
-  estimate_max_minutes for a range) and a kind.
-- Base estimates on "Timing history" below and timing_report: how long similar kinds of work really
-  took here, and how far off your past estimates were. Don't guess optimistically: include time for
-  reading code, testing, fixing and your own review. Parallel threads overlap; work that waits on
-  another thread doesn't.
-- Use short, reusable kinds so the history groups well: small-fix, bugfix, feature, refactor, tests,
-  research, docs, review, setup, ops, or another short word when none fits.
-- If the work turns out bigger or smaller than expected, tell the user and call set_estimate again
-  with the new range.
-- The app times everything and shows the user each estimate counting down. After a batch of work,
-  look at timing_report and note lessons in your tuning notes (e.g. "bugfixes here take 2x my guess").
+- For a request that takes more than a couple of minutes, tell the user a range ("about 10-20
+  minutes") and record it with set_estimate (low/high minutes until all its threads are done, and a
+  kind). Give every spawn_thread / send_to_thread that starts real work estimate_minutes (and
+  estimate_max_minutes) and a kind.
+- Base estimates on "Timing history" below: how long similar work really took here and how far off
+  past estimates were. Include reading, testing, fixing and review. Parallel threads overlap; work
+  that waits on another thread doesn't.
+- Kinds: small-fix, bugfix, feature, refactor, tests, research, docs, review, setup, ops, or another
+  short word.
+- If the work turns out bigger or smaller, tell the user and call set_estimate again.
 
-Whenever you mention a thread to the user, write it as a link: [thread-name](thread:thread-name).
-The user can click it to open that thread beside your chat.
+# Learning from the user
+Your lessons (below) are how you get better. save_lessons keeps two lists; each one you pass replaces
+the saved one:
+- lessons: about the user, for every project: how they talk (shorthand, what phrases mean), how much
+  detail they want, how they work and test, and mistakes not to repeat.
+- project_lessons: what only matters in this project.
+When the user corrects you, repeats themselves or is frustrated, fix the problem first, then save the
+lesson: what went wrong and the rule that prevents it. Merge new lessons into the list, one or two
+lines each; combine duplicates and drop ones that turned out wrong. Follow your lessons: they outrank
+your defaults, but not the user's newer words.
 
-Earlier Claude Code conversations about this project are available through list_past_sessions and
-read_past_session. When the user refers to earlier work, look there. To carry on that work, prefer a
-handoff: spawn a fresh thread with a complete brief written from what you read. Use
-resume_past_session only when the old conversation's detailed context really matters; it continues
-a forked copy, so the original is never changed. save_project_notes keeps a project brief and rules
-that are shown to you and every thread in this workspace.
-
-The user can message you while you work; those messages arrive mid-turn, between your steps, or
-in the result of wait_for_threads as a [message from the user] block. The user can't see your tool
-calls or your thinking, only what you write as text or send with tell_user. A reply you compose in
-your thinking never reaches them. So whenever one arrives, reply at once with tell_user (or as the
-message of wait_for_threads), before any other tool call (no reading files or checking threads first). Answer from what you
-already know. If a proper answer needs work, say in one line what you're checking or doing and
-roughly how long it'll take, do it, then tell them the result. If you have to wait on something
-(a thread, the Pi, a review), say what you're waiting for and that you'll tell them, then end your
-turn: the thread's report starts your next one.
-For "status", reply with a few lines from what you know now: what's done, what's running, what's
-next, anything they need to do. Never go straight back to waiting without replying.
-
-Tool results (including everything wait_for_threads returns) are invisible to the user. When a thread
-reports something the user has to act on, or something you promised to tell them ("wait for my next
-message"), tell them right away as text, with exactly what to do, before your next tool call. During
-long work, write the user a one- or two-line status now and then so they know where things stand.
-
-Threads message you with message_orchestrator (progress, questions, blockers), and when a thread
-finishes a task you gave it, its final report comes to you automatically. These arrive as a
-[messages from threads] block: mid-turn between your steps if you're working, in the result of
-wait_for_threads, or as a new turn of their own if you're idle. Act on each one: reply to the
-thread, move the work on, or tell the user. If nothing needs doing, say so in one line and stop.
-
-The user can also open any thread and talk to it directly. Thread updates that arrived since the
-user's last message are prepended to it in a [thread updates] block.
+# Project memory
+save_project_notes keeps this project's brief (shown to you every turn) and rules (added to every
+thread's instructions). Keep both short and current: every line is read on every turn.
+Earlier Claude Code conversations are available through list_past_sessions and read_past_session. To
+continue old work, prefer a fresh thread with a full brief written from what you read; use
+resume_past_session (a forked copy) only when the detailed context really matters.
 "#;
 
 fn valid_name(name: &str) -> bool {
@@ -409,7 +368,7 @@ impl App {
             let n = st.notes(&ws).cloned().unwrap_or_default();
             json!({
                 "brief": n.brief, "rules": n.rules, "tuning": n.tuning, "imported_at": n.imported_at, "updated_at": n.updated_at,
-                "lessons": st.lessons, "lessons_updated_at": st.lessons_updated_at,
+                "lessons": st.lessons, "lessons_updated_at": st.lessons_updated_at, "project_lessons": n.lessons,
             })
         };
         json!({
@@ -1327,7 +1286,10 @@ wait for. Then act on it."
         };
         // The model has no clock; without this it guesses the time from old messages
         // (e.g. "resets in about 4h" written hours earlier).
-        let prompt = format!("{}\n{prompt}", now_note());
+        let mut prompt = format!("{}\n{prompt}", now_note());
+        if let Some(n) = self.housekeeping_note(&self.ws_of(key)) {
+            prompt = format!("{prompt}\n\n{n}");
+        }
         let s = self.settings();
         let prior_cost = self.store.lock().unwrap().session_cost(resume.as_deref());
         let spec = TurnSpec {
@@ -1895,9 +1857,71 @@ Mention it only if the user asks about cost or usage.{}\n",
             }
         }
         if !st.lessons.trim().is_empty() {
-            p += &format!("\n# Lessons (yours, about working with this user; saved with save_lessons)\n{}\n", st.lessons.trim());
+            p += &format!("\n# Lessons about this user (all projects; save_lessons lessons)\n{}\n", st.lessons.trim());
+        }
+        if let Some(l) = st.notes(ws).map(|n| n.lessons.trim()).filter(|l| !l.is_empty()) {
+            p += &format!("\n# Lessons for this project (save_lessons project_lessons)\n{l}\n");
         }
         p
+    }
+
+    /// A note for the orchestrator's next message while its notes need tidying: the
+    /// one-time lesson split, or notes over their size limit. Everything they hold is read
+    /// on every turn. Attached to the message (not the system prompt) so it gets acted on,
+    /// and repeated until it's done.
+    fn housekeeping_note(&self, ws: &str) -> Option<String> {
+        let note = self.housekeeping_text(ws)?;
+        // The orchestrator is about to rewrite notes the user may care about: keep a copy of
+        // all notes and lessons as they were (one per day).
+        let day = chrono::Local::now().format("%Y-%m-%d");
+        let backup = self.paths.data_dir.join(format!("notes-backup-{day}.json"));
+        if !backup.exists() {
+            let st = self.store.lock().unwrap();
+            let copy = json!({"lessons": st.lessons, "projects": st.projects});
+            let _ = std::fs::write(&backup, serde_json::to_string_pretty(&copy).unwrap_or_default());
+        }
+        Some(note)
+    }
+
+    fn housekeeping_text(&self, ws: &str) -> Option<String> {
+        let st = self.store.lock().unwrap();
+        let mut over = vec![];
+        let n = st.notes(ws).cloned().unwrap_or_default();
+        for (what, len, max) in [
+            ("project brief", n.brief.chars().count(), LIMIT_BRIEF),
+            ("project rules", n.rules.chars().count(), LIMIT_RULES),
+            ("tuning notes", n.tuning.chars().count(), LIMIT_TUNING),
+            ("lessons about the user", st.lessons.chars().count(), LIMIT_LESSONS),
+            ("project lessons", n.lessons.chars().count(), LIMIT_PROJECT_LESSONS),
+        ] {
+            if len > max {
+                over.push(format!("- {what}: {len} characters (limit {max})"));
+            }
+        }
+        if !st.lessons_split && !st.lessons.trim().is_empty() {
+            let projects: Vec<String> = st.projects.keys().cloned().collect();
+            return Some(format!(
+                "[Automatic note from the Orchestrator app, not from the user. Do this in this turn, after you've handled the \
+message above (reply first), without mentioning it to the user.]\n\
+One-time task: your lessons used to be one list shared by every project, so they mix lessons about the user with \
+ones about a single project. Call save_lessons with lessons set to only the ones about the user (true in any project) \
+and project_lessons set to the ones about this project. For lessons about another project, call save_lessons again \
+with project set to that project's folder and project_lessons set to its lessons (projects: {}). Don't drop any \
+lesson in the move.",
+                projects.join(", ")
+            ));
+        }
+        if !over.is_empty() {
+            return Some(format!(
+                "[Automatic note from the Orchestrator app, not from the user. Do this in this turn, after you've handled the \
+message above (reply first), without mentioning it to the user.]\n\
+Housekeeping: these notes, read on every turn, are over their size limit:\n{}\n\
+Rewrite each under its limit and save it again (save_project_notes, save_tuning_notes or save_lessons): merge \
+duplicates, tighten wording, and drop only what's outdated or already done. Keep every rule and fact that still applies.",
+                over.join("\n")
+            ));
+        }
+        None
     }
 
     /// Other workspaces open at the same time, each with its own orchestrator.
@@ -1920,25 +1944,49 @@ The user may be looking at another workspace while you work; carry on regardless
         p
     }
 
-    /// Replace the orchestrator's lessons about working with the user.
-    /// Saves the whole list and returns what changed, line by line, so the chat shows the
-    /// new lesson instead of the (unchanged) first line of the list.
-    pub fn save_lessons(&self, key: &str, lessons: &str) -> Result<String, String> {
-        let lessons = lessons.trim();
-        if lessons.chars().count() > 8000 {
-            return Err("too long: keep lessons under about 40 short lines (merge and trim, then save again)".into());
+    /// Replace the orchestrator's lessons: `general` (about the user, all projects) and/or
+    /// `project` (lessons for one workspace). Each list is saved whole; the result says what
+    /// changed, line by line, so the chat shows the new lesson rather than the list's first line.
+    pub fn save_lessons(&self, key: &str, general: Option<&str>, project: Option<(&str, &str)>) -> Result<String, String> {
+        if general.is_none() && project.is_none() {
+            return Err("pass lessons and/or project_lessons".into());
         }
-        let mut st = self.store.lock().unwrap();
-        let lines = |s: &str| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>();
-        let (old, new) = (lines(&st.lessons), lines(lessons));
-        let added: Vec<String> = new.iter().filter(|l| !old.contains(l)).map(|l| format!("+ {l}")).collect();
-        let removed: Vec<String> = old.iter().filter(|l| !new.contains(l)).map(|l| format!("- {l}")).collect();
-        let changes = if added.is_empty() && removed.is_empty() {
-            format!("saved, no changes ({} lessons)", new.len())
-        } else {
-            format!("saved ({} lessons)\n{}", new.len(), added.into_iter().chain(removed).collect::<Vec<_>>().join("\n"))
+        let too_long = |what: &str, s: &str, max: usize| {
+            let n = s.trim().chars().count();
+            (n > max).then(|| format!("{what} too long ({n} characters, limit {max}): merge duplicates, drop outdated ones, and save again"))
         };
-        st.lessons = lessons.to_string();
+        if let Some(e) = general.and_then(|g| too_long("lessons", g, LIMIT_LESSONS)) {
+            return Err(e);
+        }
+        if let Some(e) = project.and_then(|(_, l)| too_long("project_lessons", l, LIMIT_PROJECT_LESSONS)) {
+            return Err(e);
+        }
+        let lines = |s: &str| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>();
+        let diff = |label: &str, old: &str, new: &str| {
+            let (old, new) = (lines(old), lines(new));
+            let added = new.iter().filter(|l| !old.contains(l)).map(|l| format!("+ {l}"));
+            let removed = old.iter().filter(|l| !new.contains(l)).map(|l| format!("- {l}"));
+            let changes: Vec<String> = added.chain(removed).collect();
+            if changes.is_empty() {
+                format!("{label}: saved, no changes ({} lessons)", new.len())
+            } else {
+                format!("{label}: saved ({} lessons)\n{}", new.len(), changes.join("\n"))
+            }
+        };
+        let mut st = self.store.lock().unwrap();
+        let mut out = vec![];
+        if let Some(g) = general {
+            out.push(diff("lessons", &st.lessons, g.trim()));
+            st.lessons = g.trim().to_string();
+        }
+        if let Some((ws, l)) = project {
+            let n = st.notes_mut(ws);
+            out.push(diff(&format!("project_lessons ({ws})"), &n.lessons, l.trim()));
+            n.lessons = l.trim().to_string();
+            n.updated_at = now();
+            st.lessons_split = true;
+        }
+        let changes = out.join("\n");
         st.lessons_updated_at = now();
         st.since_lessons = 0;
         st.save();
@@ -2407,6 +2455,14 @@ pub fn clock_time(t: f64) -> String {
 pub fn now_note() -> String {
     format!("[now: {}]", chrono::Local::now().format("%a %b %-d, %-I:%M %p"))
 }
+
+/// Size limits (characters) for what the orchestrator reads on every turn. Saves over the
+/// limit are refused, and existing ones over it get a housekeeping note.
+pub const LIMIT_BRIEF: usize = 5000;
+pub const LIMIT_RULES: usize = 5000;
+pub const LIMIT_TUNING: usize = 3000;
+pub const LIMIT_LESSONS: usize = 5000;
+pub const LIMIT_PROJECT_LESSONS: usize = 4000;
 
 pub fn fmt_minutes(s: f64) -> String {
     let m = s / 60.0;

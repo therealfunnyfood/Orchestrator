@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.27 (2026-11-24)
+
+- **Lessons are split in two.** "Lessons about you" are shared by every project; "lessons for
+  this project" only reach that project's orchestrator. On its next message, the orchestrator
+  sorts your existing lessons into the right places (once). Both lists are on the 📋 brief page.
+- **Size limits.** The brief and rules (5,000 characters each), tuning notes (3,000) and lessons
+  (5,000, or 4,000 per project) are read on every turn, so the orchestrator now keeps them under
+  those limits; anything already over gets tidied on its next message. A copy of all notes and
+  lessons is saved first, as `notes-backup-<date>.json` in `%APPDATA%\Orchestrator`.
+- **Shorter built-in instructions.** The app's own instructions to the orchestrator are about a
+  third shorter, with the same rules, grouped by topic.
+- **Fixed: notes and lessons not reaching a running conversation.** Newer Claude Code versions
+  keep a conversation's system prompt from its first message, so changes to the brief, rules,
+  lessons and timing history weren't seen until the conversation was compacted. The app now
+  turns that off where Claude Code supports it.
+
 ## 0.4.26 (2026-11-24)
 
 - Fixed "could not start Claude Code ... The filename or extension is too long (os error 206)".

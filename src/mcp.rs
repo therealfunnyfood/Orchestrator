@@ -184,17 +184,21 @@ stronger model/effort) or too_strong (a cheaper one would have done). note: a fe
         },
         {
             "name": "save_lessons",
-            "description": "Replace your lessons about working with this user (all their projects): mistakes you made \
-and the rules that prevent them, and how they talk (shorthand, what phrases mean, what they want). Merge new \
-lessons into the existing ones, one or two lines each, under about 40 lines. Shown to you in every future \
+            "description": "Save your lessons. lessons: about the user, for all their projects (how they talk, what \
+they want, how they work, mistakes not to repeat). project_lessons: ones that only matter in this project (or in \
+the project folder given as project). Each list you pass replaces the saved one, so merge new lessons into it, one \
+or two lines each. Limits: lessons 5000 characters, project_lessons 4000. Shown to you in every future \
 conversation; the user can read and edit them.",
-            "inputSchema": {"type": "object", "properties": {"lessons": {"type": "string"}}, "required": ["lessons"]},
+            "inputSchema": {"type": "object", "properties": {
+                "lessons": {"type": "string"}, "project_lessons": {"type": "string"},
+                "project": {"type": "string", "description": "project folder for project_lessons; default: yours"},
+            }},
         },
         {
             "name": "save_tuning_notes",
             "description": "Replace your tuning notes for this project: concrete rules about which model and effort \
 fit which kinds of work, learned from efficiency_report and your verdicts. They're shown to you in every \
-future conversation in this workspace.",
+future conversation in this workspace. Limit: 3000 characters.",
             "inputSchema": {"type": "object", "properties": {"notes": {"type": "string"}}, "required": ["notes"]},
         },
         {
@@ -238,7 +242,7 @@ right away.",
             "name": "save_project_notes",
             "description": "Save this project's brief and rules. The brief is shown to you in every future \
 conversation in this workspace; the rules are added to every thread's instructions. Each field you pass \
-replaces the saved one.",
+replaces the saved one. Limits: 5000 characters each; keep them short and current.",
             "inputSchema": {"type": "object", "properties": {
                 "brief": {"type": "string"}, "rules": {"type": "string"},
             }},
@@ -277,6 +281,15 @@ fn summary(app: &App, t: &ThreadRow) -> String {
 
 fn arg<'a>(args: &'a Value, k: &str) -> Option<&'a str> {
     args.get(k).and_then(Value::as_str)
+}
+
+/// Notes the orchestrator reads on every turn have a size limit.
+fn check_len(what: &str, text: &str, max: usize) -> Result<(), String> {
+    let n = text.trim().chars().count();
+    if n > max {
+        return Err(format!("{what} too long ({n} characters, limit {max}): merge duplicates, drop what's outdated or done, and save again"));
+    }
+    Ok(())
 }
 
 pub const MEDIA_EXTS: [&str; 15] =
@@ -603,13 +616,27 @@ Each thread's messages and final report start your next turn.".into());
             Ok("shown to the user".into())
         }
         "save_lessons" => {
-            app.save_lessons(key, arg(args, "lessons").ok_or("lessons is required")?)
+            let own = app.ws_of(key);
+            let ws = match arg(args, "project").map(str::trim).filter(|p| !p.is_empty()) {
+                Some(p) if std::path::Path::new(p).is_dir() => p.to_string(),
+                Some(p) => return Err(format!("no such project folder: {p}")),
+                None => own,
+            };
+            app.save_lessons(key, arg(args, "lessons"), arg(args, "project_lessons").map(|l| (ws.as_str(), l)))
         }
         "save_tuning_notes" => {
-            app.save_tuning(&app.ws_of(key), arg(args, "notes").ok_or("notes is required")?);
+            let notes = arg(args, "notes").ok_or("notes is required")?;
+            check_len("notes", notes, crate::app::LIMIT_TUNING)?;
+            app.save_tuning(&app.ws_of(key), notes);
             Ok("saved".into())
         }
         "save_project_notes" => {
+            if let Some(b) = arg(args, "brief") {
+                check_len("brief", b, crate::app::LIMIT_BRIEF)?;
+            }
+            if let Some(r) = arg(args, "rules") {
+                check_len("rules", r, crate::app::LIMIT_RULES)?;
+            }
             app.save_notes(&app.ws_of(key), arg(args, "brief"), arg(args, "rules"));
             Ok("saved".into())
         }

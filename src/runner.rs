@@ -92,6 +92,26 @@ fn launched_inside_claude() -> bool {
     std::env::var_os("CLAUDECODE").is_some() || std::env::var_os("CLAUDE_CODE_HOST_SESSION_ID").is_some()
 }
 
+/// Whether this Claude Code accepts `flag` (older versions refuse unknown flags). Checked
+/// once per executable with `claude --help`.
+fn supports_flag(exe: &std::path::Path, flag: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static HELP: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    let mut cache = HELP.get_or_init(Default::default).lock().unwrap();
+    let help = cache.entry(exe.to_path_buf()).or_insert_with(|| {
+        let mut c = std::process::Command::new(exe);
+        c.arg("--help").stdin(Stdio::null()).stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
+        c.output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+    });
+    help.contains(flag)
+}
+
 /// Deletes the file holding a turn's system prompt when the turn is over.
 struct TempFile(Option<PathBuf>);
 impl Drop for TempFile {
@@ -152,6 +172,12 @@ fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Op
         let p = system_prompt_file(&spec.append_system)?;
         cmd.arg("--append-system-prompt-file").arg(&p);
         prompt_file.0 = Some(p);
+        // By default Claude Code records the system prompt on a conversation's first
+        // request and reuses it on every resume, ignoring new text; the app's prompt
+        // (notes, lessons, timing, open workspaces) changes between turns.
+        if supports_flag(&settings.claude_exe(), "--system-prompt-snapshot") {
+            cmd.args(["--system-prompt-snapshot", "off"]);
+        }
     }
     if let Some(tools) = &spec.tools {
         cmd.args(["--tools", tools]);
