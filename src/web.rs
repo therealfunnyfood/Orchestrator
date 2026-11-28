@@ -158,6 +158,10 @@ async fn mcp(State(app): State<Shared>, Path(key): Path<String>, headers: axum::
     if !app.mcp_secret_ok(&key, secret) {
         return (StatusCode::FORBIDDEN, "bad session secret").into_response();
     }
+    if body.get("method").and_then(Value::as_str) == Some("initialize") {
+        // The CLI has read its config: the file holding the secret goes now.
+        crate::runner::mcp_config_consumed(&key);
+    }
     let streams = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/event-stream"));
     let token = body.pointer("/params/_meta/progressToken").cloned();
     if body.get("method").and_then(Value::as_str) == Some("tools/call") && streams && token.is_some() {
@@ -689,8 +693,8 @@ mod tests {
         let h = crate::app::MCP_SECRET_HEADER;
         // Nothing issued yet: refused even with the token.
         assert_eq!(post(port, &path, "", body).await.0, 403);
-        let good = app.mcp_secret(&key);
         let other = app.mcp_secret("worker-b");
+        let good = app.mcp_secret(&key);
         assert_ne!(good, other);
         assert_eq!(post(port, &path, "", body).await.0, 403, "missing secret");
         assert_eq!(post(port, &path, &format!("{h}: {}\r\n", "x".repeat(40)), body).await.0, 403, "wrong secret");
@@ -698,8 +702,37 @@ mod tests {
         let (code, out) = post(port, &path, &format!("{h}: {good}\r\n"), body).await;
         assert_eq!(code, 200, "{out}");
         assert!(out.contains("update_plan"), "{out}");
-        // The config a turn gets carries it.
-        let cfg: Value = serde_json::from_str(&app.mcp_config_for_test(&key)).unwrap();
-        assert_eq!(cfg["mcpServers"]["app"]["headers"][h], good);
+    }
+
+    /// A turn's config file is deleted on the session's first initialize, and each turn has
+    /// its own secret: an old turn's secret, or one after the turn ended, is refused.
+    #[tokio::test]
+    async fn the_config_file_goes_at_initialize_and_old_secrets_die() {
+        let (app, port, key) = serve("initdel").await;
+        let h = crate::app::MCP_SECRET_HEADER;
+        let path = format!("/mcp/{key}");
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        let cfg = app.mcp_config_for_test(&key);
+        let secret = serde_json::from_str::<Value>(&cfg).unwrap()["mcpServers"]["app"]["headers"][h].as_str().unwrap().to_string();
+        let file = crate::runner::write_mcp_config(&cfg).unwrap();
+        assert!(file.is_file());
+        let sec = |s: &str| format!("{h}: {s}\r\n");
+        // A wrong secret doesn't delete it (nor does anything else but the session).
+        assert_eq!(post(port, &path, &sec(&"x".repeat(40)), init).await.0, 403);
+        assert!(file.is_file());
+        assert_eq!(post(port, &path, &sec(&secret), init).await.0, 200);
+        assert!(!file.exists(), "deleted at initialize");
+        assert_eq!(post(port, &path, &sec(&secret), list).await.0, 200, "the turn goes on");
+        // Next turn: a new secret; the old one is refused.
+        let next = serde_json::from_str::<Value>(&app.mcp_config_for_test(&key)).unwrap()["mcpServers"]["app"]["headers"][h].as_str().unwrap().to_string();
+        assert_ne!(next, secret);
+        assert_eq!(post(port, &path, &sec(&secret), list).await.0, 403, "old turn's secret");
+        assert_eq!(post(port, &path, &sec(&next), list).await.0, 200);
+        // Turn over: refused too, and an unread file is cleaned up.
+        let left = crate::runner::write_mcp_config(&app.mcp_config_for_test(&key)).unwrap();
+        app.mcp_turn_end(&key);
+        assert_eq!(post(port, &path, &sec(&next), list).await.0, 403, "after the turn");
+        assert!(!left.exists());
     }
 }

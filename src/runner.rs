@@ -121,6 +121,41 @@ impl Drop for TempFile {
         for p in &self.0 {
             let _ = std::fs::remove_file(p);
         }
+        let mut m = mcp_files().lock().unwrap();
+        for v in m.values_mut() {
+            v.retain(|p| !self.0.contains(p));
+        }
+        m.retain(|_, v| !v.is_empty());
+    }
+}
+
+/// MCP config files not yet read by their CLI, by session key. Each holds the session's
+/// secret, so it goes as soon as the CLI has read it (its first MCP `initialize`): Claude
+/// Code reads --mcp-config once at startup and keeps the servers in memory (reconnects
+/// don't read the file again; it only keeps the path on its list of protected config files).
+fn mcp_files() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<PathBuf>>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Vec<PathBuf>>>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// Write a session's MCP config file (the session key is the last part of its URL).
+pub(crate) fn write_mcp_config(json: &str) -> Result<PathBuf, String> {
+    let key = serde_json::from_str::<Value>(json).ok()
+        .and_then(|v| v.pointer("/mcpServers/app/url").and_then(Value::as_str).and_then(|u| u.rsplit('/').next().map(str::to_string)))
+        .unwrap_or_default();
+    let p = turn_file(json, "json", "MCP config")?;
+    if !key.is_empty() {
+        mcp_files().lock().unwrap().entry(key).or_default().push(p.clone());
+    }
+    Ok(p)
+}
+
+/// The session's CLI has connected (or its turn is over): delete its config files now.
+pub(crate) fn mcp_config_consumed(key: &str) {
+    if let Some(files) = mcp_files().lock().unwrap().remove(key) {
+        for p in files {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 
@@ -192,7 +227,7 @@ fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Op
     if let Some(mcp) = &spec.mcp_config {
         // A file, not the command line: the config holds the session's own MCP secret, and
         // any process can list command lines.
-        let p = turn_file(mcp, "json", "MCP config")?;
+        let p = write_mcp_config(mcp)?;
         cmd.arg("--mcp-config").arg(&p);
         prompt_file.0.push(p);
     }

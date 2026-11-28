@@ -486,12 +486,13 @@ fn summary(app: &App, t: &ThreadRow) -> String {
 }
 
 /// A thread the caller may touch: it must exist and be in the caller's own workspace.
-/// Thread names are global, so every tool that takes one goes through this.
+/// Thread names are global, so every tool that takes one goes through this. A thread with
+/// no workspace recorded belongs to nobody's: refused.
 pub(crate) fn own_thread(app: &App, key: &str, name: &str) -> Result<ThreadRow, String> {
     let ws = app.ws_of(key);
     let st = app.store.lock().unwrap();
     match st.get(name) {
-        Some(t) if crate::store::same_path(if t.workspace.is_empty() { &st.workspace } else { &t.workspace }, &ws) => Ok(t.clone()),
+        Some(t) if !t.workspace.trim().is_empty() && crate::store::same_path(&t.workspace, &ws) => Ok(t.clone()),
         _ => Err(format!("no thread named '{name}' in this workspace")),
     }
 }

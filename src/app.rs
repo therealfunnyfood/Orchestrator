@@ -258,8 +258,8 @@ pub struct App {
     questions: Mutex<HashMap<String, PendingQuestion>>,
     /// Cross-workspace message requests waiting for the user, by request id.
     xws_pending: Mutex<HashMap<String, xws_app::XwsPending>>,
-    /// Each session's own MCP secret (key -> secret), made when its MCP config is written.
-    /// Memory only: after a restart every turn gets a fresh config, so new secrets.
+    /// Each session's MCP secret for its current turn (key -> secret): a new one every turn,
+    /// removed when the turn ends or the thread is deleted. Memory only.
     mcp_secrets: Mutex<HashMap<String, String>>,
     answered_ids: Mutex<std::collections::HashSet<String>>,
     /// When the running turn on each key started (for the UI's timer).
@@ -619,6 +619,7 @@ impl App {
         st.plans.remove(name);
         st.save();
         drop(st);
+        self.mcp_turn_end(name);
         self.hub.remove(name);
         self.touch();
         Ok(())
@@ -1079,6 +1080,7 @@ Pick up where it left off. Check the current state before relying on anything ab
             }
         };
         let result = run_turn(&settings, &spec, &mut rx, &mut on_line).await;
+        self.mcp_turn_end(name);
         self.injectors.lock().unwrap().remove(name);
         self.cancels.lock().unwrap().remove(name);
         self.started.lock().unwrap().remove(name);
@@ -1509,6 +1511,7 @@ wait for. Then act on it."
         };
         self.last_text.lock().unwrap().insert(key.to_string(), now());
         let result = run_turn(&s, &spec, &mut rx, &mut on_line).await;
+        self.mcp_turn_end(key);
         self.injectors.lock().unwrap().remove(key);
         self.nudged.lock().unwrap().remove(key);
         self.owes_reply.lock().unwrap().remove(key);
@@ -1767,19 +1770,26 @@ wait for. Then act on it."
         .to_string()
     }
 
+    /// The turn on `key` is over (or the thread is gone): its secret stops working, and any
+    /// config file the CLI hasn't consumed is deleted.
+    pub(crate) fn mcp_turn_end(&self, key: &str) {
+        self.mcp_secrets.lock().unwrap().remove(key);
+        crate::runner::mcp_config_consumed(key);
+    }
+
     #[cfg(test)]
     pub(crate) fn mcp_config_for_test(&self, key: &str) -> String {
         self.mcp_config(key)
     }
 
-    /// The session's MCP secret, made on first use.
+    /// A new MCP secret for the session's next turn (replaces the last one).
     pub(crate) fn mcp_secret(&self, key: &str) -> String {
         use rand::Rng;
         const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-        self.mcp_secrets.lock().unwrap().entry(key.to_string()).or_insert_with(|| {
-            let mut rng = rand::rng();
-            (0..40).map(|_| CHARS[rng.random_range(0..CHARS.len())] as char).collect()
-        }).clone()
+        let mut rng = rand::rng();
+        let s: String = (0..40).map(|_| CHARS[rng.random_range(0..CHARS.len())] as char).collect();
+        self.mcp_secrets.lock().unwrap().insert(key.to_string(), s.clone());
+        s
     }
 
     /// Whether `given` is session `key`'s MCP secret (constant time). No secret yet: refused.

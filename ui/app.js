@@ -71,11 +71,11 @@ async function api(path, opts = {}) {
 // read the HTTP token. The app replies with {"kind":"ipc_reply","req",...} on the websocket.
 const IPC_WAIT = new Map();
 let ipcSeq = 0;
-function ipcCall(op, body = {}) {
+function ipcCall(op, body = {}, waitMs = 30000) {
   return new Promise((resolve, reject) => {
     if (!window.ipc?.postMessage) return reject(new Error("This only works in the Orchestrator window, not in a browser"));
     const req = `r${Date.now()}-${++ipcSeq}`;
-    const t = setTimeout(() => { IPC_WAIT.delete(req); reject(new Error("the app didn't answer")); }, 30000);
+    const t = setTimeout(() => { IPC_WAIT.delete(req); reject(new Error("the app didn't answer")); }, waitMs);
     IPC_WAIT.set(req, { resolve, reject, t });
     window.ipc.postMessage(JSON.stringify({ ...body, op, req }));
   });
@@ -1303,7 +1303,9 @@ async function importProject() {
   const it = await quickPick(items, "Import which Claude Code project? Orchestrator sets it up and continues the work");
   if (!it) return;
   try {
-    await ipcCall("import", { path: it.value });
+    // Importing reads the project's whole Claude Code history: it can take minutes.
+    toast(`importing ${baseName(it.value)}…`);
+    await ipcCall("import", { path: it.value }, 10 * 60 * 1000);
     S.tabs = [];
     await loadState();
     await activate(0);

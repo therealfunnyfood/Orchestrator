@@ -594,8 +594,14 @@ mod tests {
             mine.name = "worker-d".into();
             mine.workspace = dev.clone();
             mine.cwd = dev.clone();
+            st.threads.push(mine.clone());
+            mine.name = "worker-none".into();
+            mine.workspace = String::new();
             st.threads.push(mine);
         }
+        let (err, text) = tool(&app, &key, "send_to_thread", json!({"name": "worker-none", "message": "X"})).await;
+        assert!(err && text.contains("in this workspace"), "no workspace recorded: {text}");
+        assert!(queued(&app, "worker-none").is_empty());
         for (name, args) in [
             ("send_to_thread", json!({"name": "worker-a", "message": "SNEAK"})),
             ("read_thread", json!({"name": "worker-a"})),
