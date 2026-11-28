@@ -42,6 +42,9 @@ pub struct QueueItem {
     pub secrets: Vec<String>,
     /// When run_approved ran it (each item runs once).
     pub ran_at: f64,
+    /// Offers and orders: the order it commits to, and the app's capacity check.
+    pub order_id: String,
+    pub capacity: Option<crate::capacity::Check>,
     pub created_by: String,
     pub created_at: f64,
     pub status: String,

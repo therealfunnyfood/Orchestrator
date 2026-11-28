@@ -94,6 +94,9 @@ fn queue_tools() -> Value {
                 "attachments": {"type": "array", "items": {"type": "string"}, "description": "files the user should see (images, PDFs...); part of what's approved"},
                 "command": {"type": "string", "description": "optional PowerShell command that run_approved will run after approval (e.g. python tools/pinterest.py post ...); part of what's approved"},
                 "secrets": {"type": "array", "items": {"type": "string"}, "description": "names of vault secrets the command needs; they're set as environment variables ($env:NAME) only for that run. Never put a secret's value anywhere."},
+                "order_id": {"type": "string", "description": "send_offer, accept_order and publish_gig: the order it commits to"},
+                "est_units": {"type": "number", "description": "send_offer, accept_order and publish_gig: weekly plan points the order will use (see usage_status)"},
+                "deadline": {"type": "string", "description": "send_offer, accept_order and publish_gig: delivery deadline, YYYY-MM-DD HH:MM local time"},
             }, "required": ["type", "summary", "payload", "risk"]},
         },
         {
@@ -121,6 +124,29 @@ then record the result with complete_item.",
 /// Orchestrator tools only business workspaces get.
 fn business_orch_tools() -> Value {
     json!([
+        {
+            "name": "usage_status",
+            "description": "Plan usage right now (this workspace runs on the user's Claude plan): 5-hour and weekly utilization and \
+reset times, usage burned in the last hour, capacity reserved for open orders, the gates, and the learned usage per kind of work \
+(in weekly points: percentage points of the weekly limit). Give before (\"YYYY-MM-DD HH:MM\") to project what's left by then. \
+Check it before quoting or accepting work. If usage is unknown it says so: never guess.",
+            "inputSchema": {"type": "object", "properties": {"before": {"type": "string"}}},
+        },
+        {
+            "name": "reserve_capacity",
+            "description": "Reserve weekly plan points for an accepted paid order, so later offers can't overbook. Call it again with \
+remaining_units as the work progresses; release_capacity when it's delivered.",
+            "inputSchema": {"type": "object", "properties": {
+                "order_id": {"type": "string"}, "est_units": {"type": "number", "description": "weekly points for the whole order"},
+                "remaining_units": {"type": "number", "description": "weekly points still to do (default: est_units)"},
+                "deadline": {"type": "string", "description": "YYYY-MM-DD HH:MM, local time"},
+            }, "required": ["order_id", "est_units", "deadline"]},
+        },
+        {
+            "name": "release_capacity",
+            "description": "Release an order's reservation once it's delivered or cancelled.",
+            "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"]},
+        },
         {
             "name": "propose_schedule",
             "description": "Business workspaces: propose a routine that sends you a message on a schedule (e.g. time \"08:00\", \
@@ -463,6 +489,7 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             let n = arg(args, "name").ok_or("name is required")?;
             let priority = arg(args, "priority").unwrap_or("");
             app.budget_gate(&app.ws_of(key), priority)?;
+            app.usage_gate(&app.ws_of(key), priority)?;
             let task = arg(args, "task").ok_or("task is required")?;
             let effort = approved_effort(app, key, n, arg(args, "effort"), arg(args, "effort_reason").unwrap_or("")).await?;
             let row = app.create_thread(&app.ws_of(key), n, arg(args, "cwd"), None, arg(args, "model"), effort.as_deref())?;
@@ -697,6 +724,15 @@ Each thread's messages and final report start your next turn.".into());
             };
             app.save_lessons(key, arg(args, "lessons"), arg(args, "project_lessons").map(|l| (ws.as_str(), l)))
         }
+        "usage_status" => app.usage_status(key, args.get("before").and_then(crate::app::parse_when)).await,
+        "reserve_capacity" => app.reserve_capacity(
+            key,
+            arg(args, "order_id").ok_or("order_id is required")?,
+            args.get("est_units").and_then(Value::as_f64).ok_or("est_units is required")?,
+            args.get("remaining_units").and_then(Value::as_f64),
+            args.get("deadline").and_then(crate::app::parse_when).ok_or("deadline is required (YYYY-MM-DD HH:MM)")?,
+        ),
+        "release_capacity" => app.release_capacity(key, arg(args, "order_id").ok_or("order_id is required")?),
         "propose_schedule" => app.schedule_propose(
             key,
             arg(args, "time").ok_or("time is required")?,
@@ -855,7 +891,7 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

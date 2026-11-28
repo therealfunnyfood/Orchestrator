@@ -388,6 +388,7 @@ impl App {
                 "outbound_paused": n.outbound_paused || st.outbound_paused_all, "outbound_paused_all": st.outbound_paused_all,
                 "paused": n.kind == "business" && n.paused,
                 "budget_day": n.budget_day, "budget_week": n.budget_week,
+                "gates": n.gates, "paid_api_fallback": n.paid_api_fallback, "paid_api_cap_usd": n.paid_api_cap_usd,
             })
         };
         let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
@@ -663,6 +664,7 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
                         app.thread_turn(&key, &msg).await;
                     }
                     app.check_budget(&app.ws_of(&key));
+                    app.usage_tick(&app.ws_of(&key));
                     app.touch();
                 }
                 app.finish_jobs();
@@ -942,7 +944,7 @@ Pick up where it left off. Check the current state before relying on anything ab
             resume_at,
             model: row.model.clone(),
             effort: row.effort.clone(),
-            backend: self.resolve_backend(&row.workspace),
+            backend: self.thread_backend_for(&row),
             append_system: self.worker_prompt(&row.workspace),
             tools: (msg.sender == HANDOFF).then(|| "Read,Glob,Grep".into()),
             mcp_config: Some(self.mcp_config(name)),
@@ -1021,6 +1023,9 @@ Pick up where it left off. Check the current state before relying on anything ab
                     row.last_result = r.text.clone();
                     row.turns += 1;
                     row.cost_usd += r.cost_usd;
+                    if r.backend_used == "api" {
+                        row.api_cost += (r.cost_usd - r.plan_cost).max(0.0);
+                    }
                     row.updated_at = now();
                     let mut notes = r.notes.clone();
                     notes.extend(self.resume_after_limit(name, r));
@@ -1358,7 +1363,8 @@ wait for. Then act on it."
             resume_at,
             model: s.orch_model.clone(),
             effort: s.orch_effort.clone(),
-            backend: self.resolve_backend(&ws),
+            // Business workspaces run on the plan; only paid-order threads may fall back.
+            backend: if self.is_business(&ws) { "plan".into() } else { self.resolve_backend(&ws) },
             append_system: self.orchestrator_prompt(&ws),
             tools: Some(if msg.sender == HANDOFF { "Read,Glob,Grep" } else { "Read,Glob,Grep,WebSearch,WebFetch" }.into()),
             mcp_config: Some(self.mcp_config(key)),
@@ -1721,6 +1727,13 @@ wait for. Then act on it."
         let mut info = info.clone();
         info["seen_at"] = json!(now());
         let mut st = self.store.lock().unwrap();
+        if let Some(s) = sample_of(&info) {
+            if st.usage_samples.last().is_none_or(|l| s.ts - l.ts >= 60.0) {
+                st.usage_samples.push(s);
+                let cutoff = now() - 8.0 * 86400.0;
+                st.usage_samples.retain(|x| x.ts >= cutoff);
+            }
+        }
         st.plan_usage = Some(info);
         st.save();
         drop(st);
@@ -2573,6 +2586,11 @@ Secrets (API keys, tokens) live in the app's vault. Never ask for, print, store 
 an action needs one, give the item a command (PowerShell) that reads it as $env:NAME and list NAME in secrets; once \
 approved, run_approved runs exactly that command with the secret set. Some harmless keys are set as environment \
 variables in every session; the user decides which.
+Capacity: this workspace runs on the user's Claude plan (5-hour window and weekly limit), so never take paid work \
+it can't finish. Check usage_status before quoting. send_offer, accept_order and publish_gig items need order_id, \
+est_units (weekly plan points) and deadline; the app checks capacity and shows the user. After an order is accepted, \
+reserve_capacity it (update remaining as work goes) and release_capacity on delivery. Spawn paid-order work with \
+priority \"paid-order\": it always runs; other threads are refused when usage is high.
 Routines: the orchestrator can propose a recurring message to itself (e.g. 08:00 daily \"morning run\") with \
 propose_schedule; it runs once the user confirms it. Messages that start with [Scheduled run ...] come from one.
 ";
@@ -2903,6 +2921,293 @@ impl App {
         }).collect::<Vec<_>>()).unwrap_or_default())
     }
 
+    // ---- usage-aware admission control (capacity.rs) ----
+
+    /// Backend for a thread's turn. Business workspaces stay on the plan; only paid-order
+    /// threads may fall back to the API (the user's setting, an API key, the order's cap).
+    fn thread_backend_for(&self, row: &ThreadRow) -> String {
+        if !self.is_business(&row.workspace) {
+            return self.resolve_backend(&row.workspace);
+        }
+        let (on, cap) = {
+            let st = self.store.lock().unwrap();
+            st.notes(&row.workspace).map_or((false, 0.0), |n| (n.paid_api_fallback, n.paid_api_cap_usd))
+        };
+        let key_set = !self.settings().api_key.trim().is_empty();
+        crate::capacity::thread_backend(&row.priority, on, key_set, row.api_cost, cap).to_string()
+    }
+
+    /// The latest plan usage reading, if it's at most `max_age_s` old.
+    pub fn usage_sample(&self, max_age_s: f64) -> Option<crate::capacity::Sample> {
+        let st = self.store.lock().unwrap();
+        let s = st.plan_usage.as_ref().and_then(sample_of);
+        crate::capacity::fresh(s, now(), max_age_s)
+    }
+
+    fn gates(&self, ws: &str) -> crate::capacity::Gates {
+        self.store.lock().unwrap().notes(ws).map(|n| n.gates).unwrap_or_default()
+    }
+
+    /// Usage gate for spawn_thread in business workspaces (paid orders always pass).
+    pub fn usage_gate(&self, ws: &str, priority: &str) -> Result<(), String> {
+        if !self.is_business(ws) {
+            return Ok(());
+        }
+        crate::capacity::spawn_allowed(self.usage_sample(3600.0), self.gates(ws), priority)
+    }
+
+    fn reservations_in(&self, ws: &str) -> Vec<crate::capacity::Reservation> {
+        self.store.lock().unwrap().reservations.iter().filter(|r| same_path(&r.workspace, ws)).cloned().collect()
+    }
+
+    /// Weekly points per dollar of API-rate cost, learned from usage samples and the plan
+    /// turns recorded between them (all workspaces: the plan is shared).
+    fn points_per_dollar(&self) -> Option<f64> {
+        let st = self.store.lock().unwrap();
+        let usage = st.usage.clone();
+        crate::capacity::points_per_dollar(&st.usage_samples, |a, b| {
+            usage.iter().filter(|u| u.1 == "plan" && u.0 > a && u.0 <= b).map(|u| u.2).sum()
+        })
+    }
+
+    /// The usage_status tool.
+    pub async fn usage_status(self: &Arc<Self>, key: &str, before: Option<f64>) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        let mut sample = self.usage_sample(15.0 * 60.0);
+        let mut note = String::new();
+        if sample.is_none() {
+            match self.refresh_plan_usage().await {
+                Ok(_) => sample = self.usage_sample(15.0 * 60.0),
+                Err(e) => note = format!(" (refreshing failed: {e})"),
+            }
+        }
+        let t = now();
+        let mut out = vec![];
+        match sample {
+            None => out.push(format!("Plan usage: UNKNOWN right now{note}. Don't guess: treat capacity as unavailable until it's known.")),
+            Some(s) => {
+                let at = |r: f64| if r > 0.0 { clock_time(r) } else { "unknown".into() };
+                let five_reset = self.store.lock().unwrap().plan_usage.as_ref().and_then(|p| p.pointer("/unifiedWindows/five_hour/resetsAt")).and_then(Value::as_f64).unwrap_or(0.0);
+                out.push(format!("5-hour window: {:.0}% used, resets {}", s.five * 100.0, at(five_reset)));
+                out.push(format!("Week: {:.0}% used, resets {} (reading from {} ago)", s.week * 100.0, at(s.week_resets_at), fmt_minutes(t - s.ts)));
+                let samples = self.store.lock().unwrap().usage_samples.clone();
+                match crate::capacity::burn_last_hour(&samples, t) {
+                    Some(b) => out.push(format!("Burned in the last hour: {b:.1} weekly points")),
+                    None => out.push("Burned in the last hour: not enough readings yet".into()),
+                }
+                if let Some(b) = before {
+                    if let Some(a) = crate::capacity::available_before(Some(s), t, b) {
+                        out.push(format!("Projected left before {}: {a:.1} weekly points (this week's remainder plus any reset before then; other work keeps using some)", clock_time(b)));
+                    }
+                }
+            }
+        }
+        let res = self.reservations_in(&ws);
+        let reserved: f64 = res.iter().map(|r| r.remaining_units).sum::<f64>() + 0.0;
+        out.push(format!(
+            "Reserved for open orders: {reserved:.1} weekly points across {} order(s){}",
+            res.len(),
+            res.iter().map(|r| format!("\n  - {}: {:.1} left of {:.1}, due {}", r.order_id, r.remaining_units, r.est_units, clock_time(r.deadline))).collect::<String>()
+        ));
+        let g = self.gates(&ws);
+        out.push(format!(
+            "Gates: non-paid threads stop starting at 5-hour {:.0}% or week {:.0}%; at week {:.0}% they checkpoint and stop. Offers may use {:.0}% of what's projected to be left.",
+            g.five_hour * 100.0, g.week * 100.0, g.week_stop * 100.0, g.share * 100.0
+        ));
+        match self.points_per_dollar() {
+            None => out.push("Usage per kind of work: not learned yet (needs more usage readings while work runs on the plan).".into()),
+            Some(ppd) => {
+                out.push(format!("Learned: about {ppd:.2} weekly points per $1 of API-rate cost."));
+                // Typical cost of one thread task, by kind and model, over the last 30 days.
+                let st = self.store.lock().unwrap();
+                let since = t - 30.0 * 86400.0;
+                let mut groups: std::collections::BTreeMap<(String, String), Vec<f64>> = Default::default();
+                for e in st.efficiency.iter().filter(|e| e.ts >= since && !e.job && same_path(&e.workspace, &ws)) {
+                    let kind = if e.kind.is_empty() { "other".to_string() } else { e.kind.clone() };
+                    groups.entry((kind, e.model.clone())).or_default().push(e.cost);
+                }
+                if !groups.is_empty() {
+                    out.push("Typical usage per thread turn (median, last 30 days):".into());
+                    for ((kind, model), mut costs) in groups {
+                        costs.sort_by(f64::total_cmp);
+                        let med = costs[costs.len() / 2];
+                        out.push(format!("  - {kind} on {model}: {:.2} weekly points (${med:.2}, {} turns)", med * ppd, costs.len()));
+                    }
+                }
+            }
+        }
+        Ok(out.join("\n"))
+    }
+
+    /// reserve_capacity: hold weekly points for an accepted order (call again to update
+    /// what's left).
+    pub fn reserve_capacity(&self, key: &str, order_id: &str, est_units: f64, remaining: Option<f64>, deadline: f64) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        if !self.is_business(&ws) {
+            return Err("capacity reservations are for business workspaces".into());
+        }
+        if order_id.trim().is_empty() || !(est_units > 0.0) || !(deadline > now()) {
+            return Err("order_id, a positive est_units (weekly points) and a future deadline are required".into());
+        }
+        let mut st = self.store.lock().unwrap();
+        let r = match st.reservations.iter_mut().find(|r| r.order_id == order_id && same_path(&r.workspace, &ws)) {
+            Some(r) => r,
+            None => {
+                st.reservations.push(crate::capacity::Reservation { order_id: order_id.into(), workspace: ws.clone(), created_at: now(), ..Default::default() });
+                st.reservations.last_mut().unwrap()
+            }
+        };
+        r.est_units = est_units;
+        r.remaining_units = remaining.unwrap_or(est_units).max(0.0);
+        r.deadline = deadline;
+        let line = format!("RESERVED {order_id} {:.1}/{:.1} weekly points, due {}", r.remaining_units, r.est_units, clock_time(deadline));
+        st.save();
+        drop(st);
+        self.audit(&ws, &line);
+        self.touch();
+        Ok(format!("{line}. Update remaining with reserve_capacity as work progresses; release_capacity when delivered."))
+    }
+
+    pub fn release_capacity(&self, key: &str, order_id: &str) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        let removed = {
+            let mut st = self.store.lock().unwrap();
+            let before = st.reservations.len();
+            st.reservations.retain(|r| !(r.order_id == order_id && same_path(&r.workspace, &ws)));
+            st.save();
+            before != st.reservations.len()
+        };
+        if !removed {
+            return Err(format!("no reservation for {order_id}"));
+        }
+        self.audit(&ws, &format!("RELEASED {order_id}"));
+        self.touch();
+        Ok(format!("released {order_id}"))
+    }
+
+    /// The app's capacity check for an offer or order in the queue.
+    fn capacity_check(&self, ws: &str, order_id: &str, est_units: f64, deadline: f64) -> crate::capacity::Check {
+        let others: Vec<_> = self.reservations_in(ws).into_iter().filter(|r| r.order_id != order_id).collect();
+        crate::capacity::check_offer(self.usage_sample(3600.0), &others, est_units, deadline, now(), self.gates(ws))
+    }
+
+    /// After each turn: at weekly usage >= the stop gate, ask running non-paid threads in
+    /// business workspaces to checkpoint and stop (once per week each).
+    pub fn usage_tick(self: &Arc<Self>, ws: &str) {
+        if !self.is_business(ws) {
+            return;
+        }
+        let Some(s) = self.usage_sample(3600.0) else { return };
+        let g = self.gates(ws);
+        if s.week < g.week_stop {
+            return;
+        }
+        let week_key = format!("{:.0}", s.week_resets_at);
+        let targets: Vec<String> = {
+            let mut st = self.store.lock().unwrap();
+            let names: Vec<String> = st.threads.iter()
+                .filter(|t| same_path(&t.workspace, ws) && t.priority != crate::budget::PAID_ORDER && t.stop_asked != week_key)
+                .map(|t| t.name.clone()).filter(|n| self.busy(n)).collect();
+            for n in &names {
+                if let Some(t) = st.get_mut(n) {
+                    t.stop_asked = week_key.clone();
+                }
+            }
+            st.save();
+            names
+        };
+        if targets.is_empty() {
+            return;
+        }
+        let msg = format!(
+            "[Automatic message from the Orchestrator app, not from the user or the orchestrator.]\nWeekly plan usage is at {:.0}% (stop gate {:.0}%): paid orders need what's left. Finish your current step, write a checkpoint (progress.md: what's done, what's next, how to resume), then stop and report.",
+            s.week * 100.0, g.week_stop * 100.0
+        );
+        for n in &targets {
+            let _ = self.send_to_thread(n, &msg, "app", vec![], true);
+        }
+        self.audit(ws, &format!("USAGE GATE week {:.0}%: asked {} to checkpoint and stop", s.week * 100.0, targets.join(", ")));
+        self.post_news(&orch_key(ws), "@usage gate", &format!(
+            "Weekly plan usage is at {:.0}%. The app asked these non-paid threads to checkpoint and stop: {}. Only paid-order threads may start now.",
+            s.week * 100.0, targets.join(", ")
+        ));
+    }
+
+    /// Every 30 minutes: warn about orders whose remaining work may not fit before 75% of
+    /// their deadline (once a day per order).
+    pub fn capacity_watchdog(self: &Arc<Self>) {
+        let wss: Vec<String> = {
+            let st = self.store.lock().unwrap();
+            let mut v: Vec<String> = st.reservations.iter().map(|r| r.workspace.clone()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        for ws in wss {
+            if !self.is_business(&ws) {
+                continue;
+            }
+            let res = self.reservations_in(&ws);
+            let samples = self.store.lock().unwrap().usage_samples.clone();
+            let burn = crate::capacity::burn_last_hour(&samples, now()).unwrap_or(0.0);
+            let risky = crate::capacity::at_risk(self.usage_sample(3600.0), burn, &res, now());
+            let fresh: Vec<(String, String)> = {
+                let mut st = self.store.lock().unwrap();
+                let mut out = vec![];
+                for (id, why) in risky {
+                    if let Some(r) = st.reservations.iter_mut().find(|r| r.order_id == id && same_path(&r.workspace, &ws)) {
+                        if r.alerted != day {
+                            r.alerted = day.clone();
+                            out.push((id, why));
+                        }
+                    }
+                }
+                st.save();
+                out
+            };
+            if fresh.is_empty() {
+                continue;
+            }
+            for (id, why) in &fresh {
+                self.audit(&ws, &format!("DEADLINE AT RISK {id} :: {why}"));
+                self.hub.broadcast(json!({"kind": "toast", "text": format!("⚠ Order {id} may miss its deadline: {why}")}));
+            }
+            crate::attention();
+            self.post_news(&orch_key(&ws), "@deadline watchdog", &format!(
+                "URGENT: {} at risk of missing its deadline:\n{}\nTell the user now, with the options in pipelines/capacity.md (they step in, an honest early extension request, or other help).",
+                if fresh.len() == 1 { "an order is" } else { "orders are" },
+                fresh.iter().map(|(id, w)| format!("- {id}: {w}")).collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+
+    /// Usage gates and API fallback for the shown workspace (from the window only).
+    pub fn set_capacity_settings(&self, gates: crate::capacity::Gates, fallback: bool, cap: f64) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("usage gates are for business workspaces".into());
+        }
+        let ok = |x: f64| x > 0.0 && x <= 1.0;
+        if !(ok(gates.five_hour) && ok(gates.week) && ok(gates.week_stop) && ok(gates.share) && cap >= 0.0) {
+            return Err("gates are percentages between 1 and 100, and the cap 0 or more".into());
+        }
+        {
+            let mut st = self.store.lock().unwrap();
+            let n = st.notes_mut(&ws);
+            n.gates = gates;
+            n.paid_api_fallback = fallback;
+            n.paid_api_cap_usd = cap;
+            st.save();
+        }
+        self.audit(&ws, &format!(
+            "USAGE GATES SET 5h={:.0}% week={:.0}% stop={:.0}% share={:.0}% paid-order API fallback={} cap=${cap:.2} by=user",
+            gates.five_hour * 100.0, gates.week * 100.0, gates.week_stop * 100.0, gates.share * 100.0, if fallback { "on" } else { "off" }
+        ));
+        self.touch();
+        Ok(())
+    }
+
     pub fn is_paused(&self, ws: &str) -> bool {
         self.store.lock().unwrap().notes(ws).is_some_and(|n| n.kind == "business" && n.paused)
     }
@@ -3030,6 +3335,20 @@ impl App {
         if let Some(missing) = secrets.iter().find(|n| !known.contains(n)) {
             return Err(format!("no secret named {missing} in this workspace; the user adds secrets in Settings → Secrets"));
         }
+        // Offers and orders commit usage: the app checks capacity itself.
+        let (order_id, capacity) = if crate::capacity::COMMITTING.contains(&kind.as_str()) {
+            let order_id = s("order_id");
+            let est = args.get("est_units").and_then(Value::as_f64).unwrap_or(0.0);
+            let deadline = args.get("deadline").and_then(parse_when).unwrap_or(0.0);
+            if order_id.is_empty() || est <= 0.0 || deadline <= 0.0 {
+                return Err(format!(
+                    "a {kind} item needs order_id, est_units (weekly plan points the order will use; see usage_status) and deadline (\"YYYY-MM-DD HH:MM\" local time), so the app can check capacity"
+                ));
+            }
+            (order_id.clone(), Some(self.capacity_check(&ws, &order_id, est, deadline)))
+        } else {
+            (s("order_id"), None)
+        };
         for text in [&summary, &payload, &command] {
             if let Some(name) = crate::vault::contains_secret(text) {
                 return Err(format!("the item contains the value of secret {name}: never put secret values in an item; name the secret in secrets and use $env:{name} in command"));
@@ -3061,6 +3380,8 @@ impl App {
             attachments,
             command,
             secrets,
+            order_id,
+            capacity: capacity.clone(),
             created_by: if key.starts_with(ORCHESTRATOR) { "orchestrator".into() } else { key.to_string() },
             created_at: now_t,
             status: "pending".into(),
@@ -3078,7 +3399,12 @@ impl App {
         if urgent {
             crate::attention();
         }
-        Ok(format!("queued {id} for the user's approval. It can't be executed until they approve it in the app; list_approved shows approved items."))
+        let cap_note = match &capacity {
+            Some(c) if c.ok => format!(" Capacity check passed: {}.", c.note),
+            Some(c) => format!(" Capacity check FAILED: {}. The user sees this in red; the default is a polite decline or a later delivery date.", c.note),
+            None => String::new(),
+        };
+        Ok(format!("queued {id} for the user's approval. It can't be executed until they approve it in the app; list_approved shows approved items.{cap_note}"))
     }
 
     /// list_approved: items the user approved that still match what they approved.
@@ -3153,7 +3479,7 @@ impl App {
 
     /// The user's decision from the Queue tab. Only called from the desktop window's IPC
     /// channel (see main.rs), never from HTTP or an agent tool.
-    pub fn queue_decide(self: &Arc<Self>, id: &str, action: &str, reason: &str, payload: Option<&str>) -> Result<(), String> {
+    pub fn queue_decide(self: &Arc<Self>, id: &str, action: &str, reason: &str, payload: Option<&str>, force: bool) -> Result<(), String> {
         let decision = match action {
             "approve" => crate::queue::Decision::Approve,
             "edit_approve" => crate::queue::Decision::EditApprove(payload.unwrap_or("").to_string()),
@@ -3162,6 +3488,10 @@ impl App {
         };
         let mut st = self.store.lock().unwrap();
         let item = st.queue.iter_mut().find(|i| i.id == id).ok_or(format!("no queue item {id}"))?;
+        let over_capacity = item.capacity.as_ref().is_some_and(|c| !c.ok);
+        if over_capacity && action != "reject" && !force {
+            return Err(format!("{id} failed the capacity check: approving it anyway needs a second click"));
+        }
         crate::queue::decide(item, decision, reason, now())?;
         crate::queue::mirror(item);
         let item = item.clone();
@@ -3169,6 +3499,7 @@ impl App {
         drop(st);
         let what = match item.status.as_str() {
             "rejected" => "REJECTED",
+            _ if over_capacity => "APPROVED DESPITE FAILED CAPACITY CHECK",
             _ if item.edited => "APPROVED after editing",
             _ => "APPROVED",
         };
@@ -3184,7 +3515,7 @@ impl App {
         let ws = self.workspace();
         let mut st = self.store.lock().unwrap();
         let mut done = vec![];
-        for item in st.queue.iter_mut().filter(|i| same_path(&i.workspace, &ws) && i.status == "pending" && i.risk == "low") {
+        for item in st.queue.iter_mut().filter(|i| same_path(&i.workspace, &ws) && i.status == "pending" && i.risk == "low" && !i.capacity.as_ref().is_some_and(|c| !c.ok)) {
             crate::queue::decide(item, crate::queue::Decision::Approve, "", now())?;
             crate::queue::mirror(item);
             done.push(item.clone());
@@ -3257,6 +3588,32 @@ impl App {
         crate::set_badge(total);
         self.touch();
     }
+}
+
+/// A time given as Unix seconds, "YYYY-MM-DD HH:MM" or "YYYY-MM-DD" (local, end of day).
+pub fn parse_when(v: &Value) -> Option<f64> {
+    use chrono::TimeZone;
+    if let Some(n) = v.as_f64() {
+        return Some(n);
+    }
+    let s = v.as_str()?.trim();
+    let dt = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M"))
+        .or_else(|_| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.and_hms_opt(23, 59, 0).unwrap()))
+        .ok()?;
+    chrono::Local.from_local_datetime(&dt).earliest().map(|d| d.timestamp() as f64)
+}
+
+/// A usage reading from Claude Code's rate-limit info.
+fn sample_of(info: &Value) -> Option<crate::capacity::Sample> {
+    let w = info.get("unifiedWindows")?;
+    let util = |k: &str| w.pointer(&format!("/{k}/utilization")).and_then(Value::as_f64);
+    Some(crate::capacity::Sample {
+        ts: info.get("seen_at").and_then(Value::as_f64).unwrap_or_else(now),
+        five: util("five_hour").unwrap_or(0.0),
+        week: util("seven_day")?,
+        week_resets_at: w.pointer("/seven_day/resetsAt").and_then(Value::as_f64).unwrap_or(0.0),
+    })
 }
 
 /// Size limits (characters) for what the orchestrator reads on every turn. Saves over the

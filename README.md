@@ -153,6 +153,24 @@ workspaces are unaffected.
   the orchestrator doesn't resolve them. Schedules run while the app is in the tray. To keep them
   going after a restart, tick **Settings → About → Start at sign-in**, which starts the app
   minimized when you sign in to Windows.
+- **Usage-aware admission control.** For a workspace that runs on your Claude plan, the app
+  makes sure paid work can be finished. All amounts are in **weekly points**, meaning
+  percentage points of the plan's weekly limit.
+  - `usage_status` reports the 5-hour and weekly usage, reset times, the last hour's burn,
+    and what's projected to be left before a time. It also shows the usage per kind of work,
+    learned from your own history. If usage is unknown, it says so.
+  - `send_offer`, `accept_order` and `publish_gig` items must give an estimate and a
+    deadline. The app checks that the reserved orders plus the new one fit in 50% of the
+    usage projected to be left before the deadline. If they don't, the card is red, and
+    approving it takes a second click.
+  - Accepted orders are held with `reserve_capacity` and `release_capacity`.
+  - At 70% of the 5-hour window or 60% of the week, only `paid-order` threads start. At 80%
+    of the week, running non-paid threads are asked to checkpoint and stop.
+  - Every 30 minutes, a watchdog warns you and the orchestrator about orders that may miss
+    their deadline.
+  - Optionally, paid-order threads (and only those) can finish on the API when the plan
+    runs out, up to a dollar cap per order.
+  - Set the thresholds in **Settings → Usage**.
 - **Audit log.** `<workspace>/queue/audit.log` records every item queued, approved,
   rejected, executed or voided, and every pause and resume. Each line ends with a hash
   that chains it to the line before. The file is read-only, and if anything edits it

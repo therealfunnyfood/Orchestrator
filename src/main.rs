@@ -9,6 +9,7 @@
 
 mod app;
 mod budget;
+mod capacity;
 mod claude_projects;
 mod config;
 mod events;
@@ -64,8 +65,9 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
         "queue_decide" => {
             let (id, action, reason) = (s("id"), s("action"), s("reason"));
             let payload = msg.get("payload").and_then(|v| v.as_str()).map(str::to_string);
+            let force = msg.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
             rt().spawn(async move {
-                if let Err(e) = app.queue_decide(&id, &action, &reason, payload.as_deref()) {
+                if let Err(e) = app.queue_decide(&id, &action, &reason, payload.as_deref(), force) {
                     app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
                 }
             });
@@ -97,6 +99,18 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
             rt().spawn(async move {
                 if let Err(e) = app.schedule_user(&op, &id, &time, &days, &message, &thread, enabled) {
                     app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
+        "set_capacity" => {
+            let pct = |k: &str, d: f64| msg.get(k).and_then(|v| v.as_f64()).map_or(d, |v| v / 100.0);
+            let gates = crate::capacity::Gates { five_hour: pct("five_hour", 0.70), week: pct("week", 0.60), week_stop: pct("week_stop", 0.80), share: pct("share", 0.50) };
+            let fallback = msg.get("fallback").and_then(|v| v.as_bool()).unwrap_or(false);
+            let cap = msg.get("cap").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            rt().spawn(async move {
+                match app.set_capacity_settings(gates, fallback, cap) {
+                    Ok(()) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": "usage gates saved"})),
+                    Err(e) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e})),
                 }
             });
         }
@@ -230,6 +244,14 @@ async fn start(desktop: bool, port: u16) -> (Arc<app::App>, String) {
     let router = web::router(app.clone(), desktop);
     tokio::spawn(async move {
         axum::serve(listener, router).await.ok();
+    });
+    // Deadline watchdog for paid orders' capacity reservations (every 30 minutes).
+    let a = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+            a.capacity_watchdog();
+        }
     });
     // Scheduled routines of business workspaces (checked every 30 s).
     let a = app.clone();

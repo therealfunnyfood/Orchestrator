@@ -1324,6 +1324,11 @@ function queueCard(i) {
   if (i.who_executes === "user") head.append(h("span", "qchip you", "you do this by hand"));
   if (i.urgent) head.append(h("span", "qchip urgent", "urgent"));
   c.append(head, h("div", "qsummary", i.summary), h("div", "qmeta", `${i.id} · from ${i.created_by} · ${relTime(i.created_at) === "now" ? "just now" : relTime(i.created_at) + " ago"}`));
+  if (i.capacity) {
+    const cap = h("div", "qcap " + (i.capacity.ok ? "ok" : "bad"));
+    cap.textContent = (i.capacity.ok ? "✓ Capacity: " : "✗ Capacity check failed: ") + i.capacity.note + (i.order_id ? ` (order ${i.order_id})` : "");
+    c.append(cap);
+  }
   const pre = h("pre", "qpayload", i.payload);
   c.append(pre);
   if (i.command) {
@@ -1353,7 +1358,12 @@ function queueCard(i) {
   const edit = h("button", "btn", "Edit, then approve");
   const reject = h("button", "btn danger", "Reject…");
   const busy = (b) => { for (const x of $$("button", acts)) x.disabled = true; b.textContent = "…"; };
-  approve.onclick = () => { if (sendIpc({ op: "queue_decide", id: i.id, action: "approve" })) busy(approve); };
+  const overCap = i.capacity && !i.capacity.ok;
+  if (overCap) { approve.textContent = "Approve anyway…"; approve.className = "btn danger"; }
+  approve.onclick = () => {
+    if (overCap && !confirm(`${i.id} failed the capacity check:\n\n${i.capacity.note}\n\nTaking it risks a late delivery. Approve anyway?`)) return;
+    if (sendIpc({ op: "queue_decide", id: i.id, action: "approve", force: overCap })) busy(approve);
+  };
   edit.onclick = () => {
     c.classList.add("editing");
     const ta = h("textarea", "qedit");
@@ -1363,7 +1373,10 @@ function queueCard(i) {
     acts.textContent = "";
     const ok = h("button", "btn primary", "Approve edited");
     const cancel = h("button", "btn", "Cancel");
-    ok.onclick = () => { if (sendIpc({ op: "queue_decide", id: i.id, action: "edit_approve", payload: ta.value })) { c.classList.remove("editing"); busy(ok); } };
+    ok.onclick = () => {
+      if (overCap && !confirm(`${i.id} failed the capacity check:\n\n${i.capacity.note}\n\nApprove the edited item anyway?`)) return;
+      if (sendIpc({ op: "queue_decide", id: i.id, action: "edit_approve", payload: ta.value, force: overCap })) { c.classList.remove("editing"); busy(ok); }
+    };
     cancel.onclick = () => { c.classList.remove("editing"); lastSig.queue = null; renderQueuePane(); };
     acts.append(ok, cancel);
     ta.focus();
@@ -2755,6 +2768,26 @@ async function renderSettings() {
       add.append(time, days, target, msg, b);
       box.append(add);
       setting("Schedules", "Scheduled routines", "Send the orchestrator a message at set times (your local time), e.g. 08:00 every day: <i>morning run</i>. The orchestrator can propose schedules; they only run once you confirm them here. A run is skipped, and the skip logged, if this workspace is paused, its budget is spent, or the previous run is still going. Runs need the app open or in the tray (see <b>Start at sign-in</b>). Missed times aren't caught up.", box);
+    }
+    {
+      const pj = S.state.project;
+      const g = pj.gates || { five_hour: 0.7, week: 0.6, week_stop: 0.8, share: 0.5 };
+      const row = h("div", "row");
+      const num = (v, title) => { const e = h("input"); e.type = "number"; e.min = "1"; e.max = "100"; e.value = Math.round(v * 100); e.title = title; e.style.width = "70px"; return e; };
+      const f5 = num(g.five_hour, "5-hour window % at which only paid-order threads start");
+      const fw = num(g.week, "weekly % at which only paid-order threads start");
+      const fs = num(g.week_stop, "weekly % at which running non-paid threads checkpoint and stop");
+      const sh = num(g.share, "share of the projected weekly usage left that open orders may take");
+      const fb = h("input"); fb.type = "checkbox"; fb.checked = !!pj.paid_api_fallback;
+      const capv = h("input"); capv.type = "number"; capv.min = "0"; capv.step = "1"; capv.value = pj.paid_api_cap_usd || ""; capv.placeholder = "$ per order"; capv.style.width = "100px";
+      const b = h("button", "btn primary", "Save");
+      b.onclick = () => { if (sendIpc({ op: "set_capacity", five_hour: +f5.value, week: +fw.value, week_stop: +fs.value, share: +sh.value, fallback: fb.checked, cap: +capv.value || 0 })) setTimeout(loadState, 500); };
+      const lab = (t, e) => { const l = h("label"); l.style.cssText = "display:flex;gap:4px;align-items:center"; l.append(document.createTextNode(t), e); return l; };
+      row.append(lab("5-hour %", f5), lab("week %", fw), lab("stop at week %", fs), lab("offers may use %", sh));
+      const row2 = h("div", "row");
+      row2.append(lab("Paid orders may finish on the API when the plan runs out", fb), lab("cap", capv), b);
+      const box = h("div"); box.append(row, row2);
+      setting("Usage", "Usage gates (this workspace runs on your plan)", `Keeps paid work deliverable. At the first two percentages only <code>priority: "paid-order"</code> threads start; at the third, running non-paid threads are asked to checkpoint and stop. Offers, accepted orders and new gigs carry an app-made capacity check: reserved orders plus the new one must fit in the share of weekly usage projected to be left before its deadline, or the card shows it in red and needs a second click. The API fallback (needs an API key) only ever applies to paid-order threads, up to the cap per order.`, box);
     }
     setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it with <code>run_approved</code>. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);
   }

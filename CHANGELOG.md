@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.6 (2026-11-28)
+
+- **Usage-aware admission control (business workspaces).** A workspace that runs on your
+  Claude plan no longer takes paid work it can't finish. Usage is measured in weekly points,
+  meaning percentage points of the plan's weekly limit.
+- **`usage_status` tool.** It shows the 5-hour and weekly usage, reset times, usage burned
+  in the last hour, and what's projected to be left before a given time. The projection
+  counts weekly resets only for the time they actually leave. It also shows the usage per
+  kind of work and model, learned from the app's own usage readings and recorded costs.
+  Readings older than 15 minutes are refreshed with a tiny probe. If usage is still
+  unknown, it says so.
+- **Capacity checks on offers.** `send_offer`, `accept_order` and `publish_gig` items must
+  give an order, an estimate and a deadline. The app checks that the reserved orders plus
+  the new one fit in 50% of the usage projected to be left before the deadline. If they
+  don't, the card shows it in red, and approving it takes a second, explicit click, which is
+  logged. Accepted orders are held with `reserve_capacity` and `release_capacity`.
+- **Usage gates.** At 70% of the 5-hour window or 60% of the week, only threads tagged
+  `paid-order` start. At 80% of the week, running non-paid threads are asked to checkpoint
+  and stop, and the orchestrator is told. Paid-order threads are never refused.
+- **Deadline watchdog.** Every 30 minutes, the app checks each reserved order against the
+  usage projected to be left before 75% of its deadline. If an order is at risk, you and the
+  orchestrator get an urgent warning.
+- **API fallback for paid orders only.** Business workspaces stay on the plan. With an API
+  key and the setting on, paid-order threads (and only those) may finish on the API when
+  the plan runs out, up to a dollar cap per order.
+- All thresholds are in **Settings → Usage**, and can only be changed in the app window.
+
 ## 0.5.5 (2026-11-28)
 
 - **Standing threads (business workspaces).** A schedule can now wake a named thread

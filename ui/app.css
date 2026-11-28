@@ -629,3 +629,6 @@ code.tlink { background: none; padding: 0; }
 .secret-row { display: flex; gap: 10px; align-items: center; margin: 4px 0; }
 .secret-row .mono { min-width: 220px; }
 .qcmd { border-color: var(--accent); }
+.qcap { font-size: 12px; padding: 4px 8px; border-radius: 4px; margin: 0 0 8px; }
+.qcap.ok { color: #16a34a; border: 1px solid color-mix(in srgb, #16a34a 40%, transparent); }
+.qcap.bad { color: #fff; background: #dc2626; }

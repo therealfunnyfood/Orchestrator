@@ -45,6 +45,10 @@ pub struct ThreadRow {
     pub priority: String,
     /// Woken by a schedule (a standing thread): never auto-resolved.
     pub standing: bool,
+    /// API-rate cost of this thread's turns that ran on the API.
+    pub api_cost: f64,
+    /// Week key of the last "checkpoint and stop" request (usage gate), so it's asked once.
+    pub stop_asked: String,
 }
 
 impl Default for ThreadRow {
@@ -73,6 +77,8 @@ impl Default for ThreadRow {
             resolved_note: String::new(),
             priority: String::new(),
             standing: false,
+            api_cost: 0.0,
+            stop_asked: String::new(),
         }
     }
 }
@@ -130,6 +136,10 @@ pub struct Store {
     pub outbound_paused_all: bool,
     /// App-side copy of the business audit logs: (time, workspace, line), newest last.
     pub audit: Vec<(f64, String, String)>,
+    /// Plan usage readings over time (last 8 days), to learn burn rates.
+    pub usage_samples: Vec<crate::capacity::Sample>,
+    /// Capacity reserved for accepted paid orders (business workspaces).
+    pub reservations: Vec<crate::capacity::Reservation>,
     /// User messages to the orchestrator since it last reviewed its lessons.
     pub since_lessons: u32,
     #[serde(skip)]
@@ -230,6 +240,12 @@ pub struct ProjectNotes {
     pub budget_alerts: Vec<String>,
     /// Scheduled routines (business workspaces).
     pub schedules: Vec<crate::schedule::Schedule>,
+    /// Usage gates for admission control (business workspaces on the plan).
+    pub gates: crate::capacity::Gates,
+    /// Paid-order threads may finish on the API when the plan runs out (with an API key).
+    pub paid_api_fallback: bool,
+    /// Dollar cap of API use per paid order (0 = none).
+    pub paid_api_cap_usd: f64,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }
