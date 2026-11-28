@@ -15,6 +15,7 @@ mod claude_projects;
 mod config;
 mod events;
 mod inbox;
+mod lines;
 mod mcp;
 mod migrate;
 mod notify;
@@ -119,6 +120,15 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
             let on = msg.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
             rt().spawn(async move {
                 if let Err(e) = app.set_phone_decide(on) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
+        "line" => {
+            let op = s("action");
+            let v = msg.get("line").cloned().unwrap_or(serde_json::Value::Null);
+            rt().spawn(async move {
+                if let Err(e) = app.line_user(&op, &v) {
                     app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
                 }
             });

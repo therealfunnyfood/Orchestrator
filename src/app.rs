@@ -678,6 +678,7 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
                     }
                     app.check_budget(&app.ws_of(&key));
                     app.usage_tick(&app.ws_of(&key));
+                    app.line_caps_tick(&app.ws_of(&key));
                     app.touch();
                 }
                 app.finish_jobs();
@@ -2454,6 +2455,21 @@ Don't change project files yourself; threads do the work, following the rules."
             row.resolved = resolved;
             row.resolved_at = if resolved { now() } else { 0.0 };
             row.resolved_note = if resolved { note.trim().chars().take(300).collect() } else { String::new() };
+            // A resolved thread tagged with a business line books its usage in the ledger
+            // (only what wasn't booked before, if it was reopened and resolved again).
+            if resolved && !row.tag.is_empty() && row.cost_usd - row.ledgered > 0.0001 {
+                let ledger = std::path::Path::new(&row.workspace).join("ledger").join("ledger.csv");
+                if ledger.is_file() {
+                    use std::io::Write;
+                    let delta = row.cost_usd - row.ledgered;
+                    let line = format!("{},{},tokens,{},{:.4},paid,\n", chrono::Local::now().format("%Y-%m-%d"), row.tag, row.name, -delta);
+                    let needs_newline = std::fs::read(&ledger).ok().is_some_and(|b| !b.is_empty() && !b.ends_with(b"\n"));
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&ledger) {
+                        let _ = f.write_all(format!("{}{line}", if needs_newline { "\n" } else { "" }).as_bytes());
+                        row.ledgered = row.cost_usd;
+                    }
+                }
+            }
             st.save();
         }
         let who = if by == "orchestrator" { "the orchestrator" } else { "you" };
@@ -3391,6 +3407,7 @@ impl App {
                 },
             },
             "budget": {"day_cap": caps.day, "week_cap": caps.week, "spent_day": spend.day, "spent_week": spend.week},
+            "lines": self.money_json(ws)["lines"],
             "ledger": crate::business::read_ledger(ws, t),
             "schedules": n.schedules.iter().map(|s| json!({
                 "id": s.id, "time": s.time, "days": crate::schedule::describe_days(&s.days), "message": s.message,
@@ -3445,6 +3462,200 @@ impl App {
                 self.business_event(&ws, hint, Some(hint), json!({"text": text, "ref": item}));
             }
         }
+    }
+
+    // ---- business lines (lines.rs) ----
+
+    pub fn lines_in(&self, ws: &str) -> Vec<crate::lines::Line> {
+        self.store.lock().unwrap().notes(ws).map(|n| n.lines.clone()).unwrap_or_default()
+    }
+
+    /// API-rate cost this week of threads tagged with `line`.
+    pub fn line_spend_week(&self, ws: &str, line: &str) -> f64 {
+        let (_, week_start) = crate::budget::period_starts(now());
+        let st = self.store.lock().unwrap();
+        let tagged: Vec<&str> = st.threads.iter().filter(|t| t.tag == line && same_path(&t.workspace, ws)).map(|t| t.name.as_str()).collect();
+        st.efficiency.iter().filter(|e| e.ts >= week_start && tagged.contains(&e.thread.as_str())).map(|e| e.cost).sum()
+    }
+
+    /// spawn_thread's tag: a registered line that may take new work.
+    pub fn line_gate(&self, ws: &str, tag: &str, priority: &str) -> Result<(), String> {
+        if tag.is_empty() {
+            return Ok(());
+        }
+        if !self.is_business(ws) {
+            return Err("tags are business lines: only for business workspaces".into());
+        }
+        let line = self.lines_in(ws).into_iter().find(|l| l.id == tag);
+        crate::lines::spawn_allowed(line.as_ref(), tag, self.line_spend_week(ws, tag), priority)
+    }
+
+    pub fn set_thread_tag(&self, name: &str, tag: &str) {
+        let mut st = self.store.lock().unwrap();
+        if let Some(r) = st.get_mut(name) {
+            r.tag = tag.to_string();
+        }
+        st.save();
+    }
+
+    /// Add or change a line (the user in the window, or an approved queue item).
+    pub fn line_save(&self, ws: &str, line: crate::lines::Line, by: &str) -> Result<(), String> {
+        let mut line = line;
+        {
+            let mut st = self.store.lock().unwrap();
+            let lines = &mut st.notes_mut(ws).lines;
+            if let Some(old) = lines.iter_mut().find(|l| l.id == line.id) {
+                line.created_by = old.created_by.clone();
+                if line.start.is_empty() {
+                    line.start = old.start.clone();
+                }
+                *old = line.clone();
+            } else {
+                line.created_by = by.into();
+                if line.start.is_empty() {
+                    line.start = chrono::Local::now().format("%Y-%m-%d").to_string();
+                }
+                lines.push(line.clone());
+            }
+            st.save();
+        }
+        self.audit(ws, &format!("LINE SAVED {} \"{}\" status={} budget=${:.2}/week by={by}", line.id, line.name, line.status, line.weekly_budget_usd));
+        self.business_event(ws, "line_changed", None, json!({"line": line}));
+        self.touch();
+        Ok(())
+    }
+
+    pub fn line_set_status(&self, ws: &str, id: &str, status: &str, by: &str, reason: &str) -> Result<(), String> {
+        if !crate::lines::STATUSES.contains(&status) {
+            return Err(format!("status must be one of {}", crate::lines::STATUSES.join(", ")));
+        }
+        let line = {
+            let mut st = self.store.lock().unwrap();
+            let l = st.notes_mut(ws).lines.iter_mut().find(|l| l.id == id).ok_or(format!("no line {id}"))?;
+            l.status = status.into();
+            l.auto_paused = by == "app";
+            let c = l.clone();
+            st.save();
+            c
+        };
+        self.audit(ws, &format!("LINE {} {status} by={by}{}", line.id, if reason.is_empty() { String::new() } else { format!(" :: {reason}") }));
+        self.business_event(ws, "line_changed", None, json!({"line": line}));
+        self.touch();
+        Ok(())
+    }
+
+    /// The user's line edits from the Money tab (window only).
+    pub fn line_user(&self, op: &str, v: &Value) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("lines are for business workspaces".into());
+        }
+        match op {
+            "save" => self.line_save(&ws, crate::lines::parse(v)?, "user"),
+            "status" => self.line_set_status(
+                &ws,
+                v.get("id").and_then(Value::as_str).unwrap_or(""),
+                v.get("status").and_then(Value::as_str).unwrap_or(""),
+                "user",
+                "",
+            ),
+            _ => Err(format!("unknown line op {op}")),
+        }
+    }
+
+    /// propose_line: queue a new venture for the user's approval; it starts once approved.
+    pub fn line_propose(&self, key: &str, args: &Value) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        let line = crate::lines::parse(args)?;
+        if self.lines_in(&ws).iter().any(|l| l.id == line.id) {
+            return Err(format!("line {} already exists; use update_line_status to change its status", line.id));
+        }
+        let payload = serde_json::to_string_pretty(&json!({"action": "add_line", "line": {
+            "id": line.id, "name": line.name, "status": line.status, "playbook": line.playbook,
+            "weekly_budget_usd": line.weekly_budget_usd, "kill_criteria": line.kill_criteria, "start": line.start, "end": line.end,
+        }})).unwrap();
+        let why = args.get("why").and_then(Value::as_str).unwrap_or("");
+        self.queue_add(key, &json!({
+            "type": "new_venture", "line": line.id, "summary": format!("Start {} \"{}\"{}", line.status, line.name, if why.is_empty() { String::new() } else { format!(": {why}") }),
+            "payload": payload, "risk": "medium", "expected_value_usd": args.get("expected_value_usd").cloned().unwrap_or(json!(0)),
+        }), vec![])
+    }
+
+    /// update_line_status: pausing, killing or reviving a line needs the user's approval.
+    pub fn line_status_propose(&self, key: &str, id: &str, status: &str, reason: &str) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        let line = self.lines_in(&ws).into_iter().find(|l| l.id == id).ok_or(format!("no line {id}"))?;
+        if !crate::lines::STATUSES.contains(&status) {
+            return Err(format!("status must be one of {}", crate::lines::STATUSES.join(", ")));
+        }
+        if reason.trim().is_empty() {
+            return Err("give a reason (the data behind it)".into());
+        }
+        let payload = serde_json::to_string_pretty(&json!({"action": "set_status", "line": id, "status": status, "reason": reason})).unwrap();
+        self.queue_add(key, &json!({
+            "type": "line_status", "line": id, "summary": format!("Set line {} \"{}\" from {} to {status}", id, line.name, line.status),
+            "payload": payload, "risk": if status == "killed" { "high" } else { "medium" },
+        }), vec![])
+    }
+
+    /// An approved new_venture or line_status item: apply exactly its payload, then mark it
+    /// done.
+    fn apply_line_item(self: &Arc<Self>, item: &crate::queue::QueueItem) {
+        let Ok(v) = serde_json::from_str::<Value>(&item.payload) else { return };
+        let ws = item.workspace.clone();
+        let result = match v.get("action").and_then(Value::as_str) {
+            Some("add_line") => v.get("line").ok_or("no line".to_string()).and_then(crate::lines::parse).and_then(|l| {
+                let id = l.id.clone();
+                self.line_save(&ws, l, "approved queue item").map(|_| format!("line {id} added"))
+            }),
+            Some("set_status") => {
+                let id = v.get("line").and_then(Value::as_str).unwrap_or("");
+                let status = v.get("status").and_then(Value::as_str).unwrap_or("");
+                let reason = v.get("reason").and_then(Value::as_str).unwrap_or("");
+                self.line_set_status(&ws, id, status, "approved queue item", reason).map(|_| format!("line {id} is now {status}"))
+            }
+            _ => return,
+        };
+        let text = result.unwrap_or_else(|e| format!("couldn't apply: {e}"));
+        let _ = self.queue_complete(&orch_key(&ws), &item.id, &text);
+    }
+
+    /// After each turn: pause any line over its weekly budget (the per-line cap).
+    pub fn line_caps_tick(self: &Arc<Self>, ws: &str) {
+        if !self.is_business(ws) {
+            return;
+        }
+        for l in self.lines_in(ws).into_iter().filter(|l| l.weekly_budget_usd > 0.0 && (l.status == "active" || l.status == "testing")) {
+            let spent = self.line_spend_week(ws, &l.id);
+            if spent >= l.weekly_budget_usd {
+                let why = format!("spent ${spent:.2} of its ${:.2} weekly budget", l.weekly_budget_usd);
+                let _ = self.line_set_status(ws, &l.id, "paused", "app", &why);
+                self.notify(ws, "budget", &format!("Line {} paused", l.id), &why);
+                self.business_event(ws, "budget", Some("budget"), json!({"text": format!("Line {} paused: {why}", l.id)}));
+                self.post_news(&orch_key(ws), "@budget", &format!(
+                    "Line {} (\"{}\") was paused automatically: it {why}. Only paid-order threads start for it now. To resume it, propose update_line_status with the data, or ask the user.",
+                    l.id, l.name
+                ));
+            }
+        }
+    }
+
+    /// list_lines and the Money tab: every line with its numbers.
+    pub fn money_json(&self, ws: &str) -> Value {
+        let t = now();
+        let ledger = crate::business::read_ledger(ws, t);
+        let today = chrono::Local::now().date_naive();
+        let lines: Vec<Value> = self.lines_in(ws).into_iter().map(|l| {
+            let spent = self.line_spend_week(ws, &l.id);
+            let all = ledger.as_ref().and_then(|g| g.per_line.get(&l.id).cloned()).unwrap_or_default();
+            json!({
+                "line": l, "spent_week": spent, "days_left": crate::lines::days_left(&l, today),
+                "this_week": ledger.as_ref().and_then(|g| g.per_line_this_week.get(&l.id).cloned()).unwrap_or_default(),
+                "last_week": ledger.as_ref().and_then(|g| g.per_line_last_week.get(&l.id).cloned()).unwrap_or_default(),
+                "all_time": all, "per_hour": all.per_hour(), "per_token_dollar": all.per_token_dollar(),
+            })
+        }).collect();
+        json!({"lines": lines, "ledger": ledger, "chart_weeks": crate::business::CHART_WEEKS})
     }
 
     // ---- signed decisions from enrolled phones (phone.rs) ----
@@ -4017,6 +4228,9 @@ impl App {
         self.audit(&item.workspace, &format!("{what} {} by=user{via_note}{}", item.id, if item.note.is_empty() { String::new() } else { format!(" :: {}", item.note) }));
         let ws = item.workspace.clone();
         self.business_event(&ws, "item_decided", None, json!({"item_id": item.id, "status": item.status, "via": via}));
+        if item.status == "approved" && (item.kind == "new_venture" || item.kind == "line_status") {
+            self.apply_line_item(&item);
+        }
         self.queue_news(&ws, &[item]);
         self.queue_changed();
         Ok(())

@@ -108,6 +108,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/inbox", post(inbox_drop))
         .route("/api/queue/drop", post(queue_drop))
         // Read-only business feed for a paired phone (off unless turned on per workspace).
+        .route("/api/money", get(|State(a): State<Shared>| async move { let ws = a.workspace(); Json(a.money_json(&ws)) }))
         .route("/api/business", get(|State(a): State<Shared>| async move { Json(json!({"v": 1, "workspaces": a.feed_list()})) }))
         .route("/api/business/{ws}/snapshot", get(feed_snapshot))
         .route("/api/business/{ws}/events", get(feed_events))

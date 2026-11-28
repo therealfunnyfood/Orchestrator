@@ -125,6 +125,34 @@ then record the result with complete_item.",
 fn business_orch_tools() -> Value {
     json!([
         {
+            "name": "list_lines",
+            "description": "The business lines (ventures) with their status, playbook, weekly budget, kill criteria, dates, \
+this week's agent spend and the ledger numbers per line (this week, last week, all time, profit per user-hour and per \
+token dollar). Tag threads with a line id (spawn_thread tag) so their usage counts against it and lands in the ledger.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "propose_line",
+            "description": "Propose a new business line or venture test. It becomes a new_venture queue item and only starts once \
+the user approves it. id: short (e.g. X-printables); status: testing (default) or active; weekly_budget_usd caps its threads' \
+agent usage per week (it's paused automatically when spent); give kill_criteria and an end date (YYYY-MM-DD) for tests.",
+            "inputSchema": {"type": "object", "properties": {
+                "id": {"type": "string"}, "name": {"type": "string"}, "status": {"type": "string", "enum": ["testing", "active"]},
+                "playbook": {"type": "string"}, "weekly_budget_usd": {"type": "number"}, "kill_criteria": {"type": "string"},
+                "start": {"type": "string"}, "end": {"type": "string"},
+                "why": {"type": "string", "description": "one line: the opportunity and the data behind it"},
+                "expected_value_usd": {"type": "number"},
+            }, "required": ["id", "name", "kill_criteria"]},
+        },
+        {
+            "name": "update_line_status",
+            "description": "Ask to change a line's status (testing, active, paused, killed). It needs the user's approval: it becomes \
+a line_status queue item, applied when approved. Give the reason with the numbers.",
+            "inputSchema": {"type": "object", "properties": {
+                "id": {"type": "string"}, "status": {"type": "string", "enum": ["testing", "active", "paused", "killed"]}, "reason": {"type": "string"},
+            }, "required": ["id", "status", "reason"]},
+        },
+        {
             "name": "usage_status",
             "description": "Plan usage right now (this workspace runs on the user's Claude plan): 5-hour and weekly utilization and \
 reset times, usage burned in the last hour, capacity reserved for open orders, the gates, and the learned usage per kind of work \
@@ -187,6 +215,7 @@ optional: low, medium, high, xhigh or max.",
                 "estimate_max_minutes": {"type": "number", "description": "high end of the range"},
                 "kind": {"type": "string", "description": "kind of work, e.g. small-fix, bugfix, feature, refactor, tests, research, docs, review, setup"},
                 "priority": {"type": "string", "description": "business workspaces: \"paid-order\" for work on a paid order (always allowed, even over budget); otherwise leave it out"},
+                "tag": {"type": "string", "description": "business workspaces: the line id this work is for (see list_lines); its usage counts against the line's weekly budget and is booked in the ledger when the thread is resolved"},
             }, "required": ["name", "task"]},
         },
         {
@@ -490,12 +519,17 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             let priority = arg(args, "priority").unwrap_or("");
             app.budget_gate(&app.ws_of(key), priority)?;
             app.usage_gate(&app.ws_of(key), priority)?;
+            let tag = arg(args, "tag").unwrap_or("").trim();
+            app.line_gate(&app.ws_of(key), tag, priority)?;
             let task = arg(args, "task").ok_or("task is required")?;
             let effort = approved_effort(app, key, n, arg(args, "effort"), arg(args, "effort_reason").unwrap_or("")).await?;
             let row = app.create_thread(&app.ws_of(key), n, arg(args, "cwd"), None, arg(args, "model"), effort.as_deref())?;
             app.note_thread_estimate(n, task_estimate(args, task));
             if !priority.is_empty() {
                 app.set_thread_priority(n, priority);
+            }
+            if !tag.is_empty() {
+                app.set_thread_tag(n, tag);
             }
             app.send_to_thread(n, task, "orchestrator", vec![], false)?;
             Ok(format!(
@@ -724,6 +758,14 @@ Each thread's messages and final report start your next turn.".into());
             };
             app.save_lessons(key, arg(args, "lessons"), arg(args, "project_lessons").map(|l| (ws.as_str(), l)))
         }
+        "list_lines" => Ok(serde_json::to_string_pretty(&app.money_json(&app.ws_of(key))).unwrap_or_default()),
+        "propose_line" => app.line_propose(key, args),
+        "update_line_status" => app.line_status_propose(
+            key,
+            arg(args, "id").ok_or("id is required")?,
+            arg(args, "status").ok_or("status is required")?,
+            arg(args, "reason").unwrap_or(""),
+        ),
         "usage_status" => app.usage_status(key, args.get("before").and_then(crate::app::parse_when)).await,
         "reserve_capacity" => app.reserve_capacity(
             key,
@@ -908,7 +950,7 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide", "line_user"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

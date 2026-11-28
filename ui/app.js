@@ -259,6 +259,7 @@ function renderChrome() {
   qb.querySelector(".badge")?.remove();
   const qn = S.state.queue?.pending?.length || 0;
   if (business && qn) qb.append(h("span", "badge warn", String(qn)));
+  $('.act[data-act="money"]').classList.toggle("hidden", !business);
 }
 
 // ================================================================ sidebar tree
@@ -427,6 +428,7 @@ function tabTitle(t) {
   if (t.type === "settings") return ["⚙", "Settings"];
   if (t.type === "brief") return ["📋", "Project brief"];
   if (t.type === "queue") return ["✓", "Queue"];
+  if (t.type === "money") return ["$", "Money"];
   if (t.type === "doc") return ["▤", t.name];
   if (isOrch(t.key)) return ["◈", "orchestrator"];
   return ["›", t.key];
@@ -482,12 +484,14 @@ async function activate(i) {
   $("#pane-settings").classList.toggle("hidden", t.type !== "settings");
   $("#pane-brief").classList.toggle("hidden", t.type !== "brief");
   $("#pane-queue").classList.toggle("hidden", t.type !== "queue");
+  $("#pane-money").classList.toggle("hidden", t.type !== "money");
   $("#pane-doc").classList.toggle("hidden", t.type !== "doc");
   if (t.type === "chat") { S.unread.delete(t.key); await loadLog(t.key); }
   if (t.type === "manage") renderManage();
   if (t.type === "settings") renderSettings();
   if (t.type === "brief") renderBrief();
   if (t.type === "queue") { lastSig.queue = null; renderQueuePane(); }
+  if (t.type === "money") renderMoney();
   if (t.type === "doc") renderDoc();
   renderChrome();
   if (t.type === "chat") $("#input").focus();
@@ -498,6 +502,7 @@ const openManage = () => { lastSig.manage = null; openTab({ type: "manage" }); }
 const openSettings = () => openTab({ type: "settings" });
 const openBrief = () => openTab({ type: "brief" });
 const openQueue = () => openTab({ type: "queue" });
+const openMoney = () => openTab({ type: "money" });
 
 // ================================================================ transcript
 
@@ -1370,6 +1375,81 @@ function manualTask(i) {
   };
   box.append(drop);
   return box;
+}
+
+// ---------------------------------------------------------------- money (business lines, P&L)
+
+const usd = (v) => (v == null ? "—" : `${v < 0 ? "−" : ""}$${Math.abs(v).toFixed(2)}`);
+
+// Bars of weekly net (oldest first), scaled to `max` across all lines.
+function weeklyBars(series, max) {
+  const w = 8 * 9, hgt = 28, mid = hgt / 2;
+  const bars = (series || []).map((v, i) => {
+    const bh = max ? Math.max(1, (Math.abs(v) / max) * (mid - 1)) : 0;
+    const y = v >= 0 ? mid - bh : mid;
+    return v ? `<rect x="${i * 9}" y="${y.toFixed(1)}" width="7" height="${bh.toFixed(1)}" fill="${v >= 0 ? "#16a34a" : "#dc2626"}"><title>${v >= 0 ? "" : "−"}$${Math.abs(v).toFixed(2)}</title></rect>` : "";
+  }).join("");
+  return `<svg class="spark" width="${w}" height="${hgt}" viewBox="0 0 ${w} ${hgt}"><line x1="0" x2="${w}" y1="${mid}" y2="${mid}" stroke="currentColor" stroke-opacity=".25"/>${bars}</svg>`;
+}
+
+async function renderMoney() {
+  const pane = $("#pane-money");
+  let m;
+  try { m = await api("/api/money"); } catch (e) { return fail(e); }
+  pane.textContent = "";
+  const page = h("div", "page");
+  page.append(h("h1", null, "Money"), h("div", "sub", `${S.state.workspace} · ledger/ledger.csv and the line registry`));
+  const L = m.ledger;
+  if (L) {
+    const t = h("table", "grid");
+    t.innerHTML = "<tr><th></th><th class='num'>Revenue</th><th class='num'>Fees</th><th class='num'>Costs</th><th class='num'>Agent usage</th><th class='num'>Net</th><th class='num'>Your hours</th></tr>";
+    for (const [label, x] of [["This week", L.this_week], ["Last week", L.last_week], ["All time", L.all_time]]) {
+      const tr = h("tr");
+      tr.innerHTML = `<td>${label}</td><td class="num">${usd(x.revenue)}</td><td class="num">${usd(x.fees)}</td><td class="num">${usd(x.costs)}</td><td class="num">${usd(x.tokens)}</td><td class="num"><b>${usd(x.net)}</b></td><td class="num">${x.hours ? x.hours.toFixed(1) : "—"}</td>`;
+      t.append(tr);
+    }
+    page.append(t);
+  } else page.append(h("div", "sub", "No ledger/ledger.csv in this workspace yet."));
+  page.append(h("div", "set-section", "Lines"));
+  const max = Math.max(0, ...Object.values(L?.weekly_net || {}).flat().map(Math.abs));
+  const t = h("table", "grid money");
+  t.innerHTML = "<tr><th>Line</th><th>Status</th><th class='num'>Usage this week</th><th class='num'>Net this week</th><th class='num'>Last week</th><th class='num'>All time</th><th class='num'>Per hour</th><th class='num'>Per $ usage</th><th>Last 8 weeks</th><th>Test</th></tr>";
+  for (const r of m.lines) {
+    const l = r.line;
+    const tr = h("tr");
+    const st = h("select");
+    for (const s of ["testing", "active", "paused", "killed"]) { const o = h("option", null, s); o.value = s; st.append(o); }
+    st.value = l.status;
+    st.onchange = () => { if (sendIpc({ op: "line", action: "status", line: { id: l.id, status: st.value } })) setTimeout(renderMoney, 500); };
+    const budget = l.weekly_budget_usd ? `${usd(r.spent_week)} / ${usd(l.weekly_budget_usd)}` : usd(r.spent_week);
+    const test = l.status === "testing" ? `${r.days_left == null ? "" : r.days_left >= 0 ? `${r.days_left} days left` : `ended ${-r.days_left} days ago`}${l.kill_criteria ? ` · kill if: ${esc(l.kill_criteria)}` : ""}` : "";
+    tr.innerHTML = `<td><b>${esc(l.id)}</b> ${esc(l.name)}${l.playbook ? `<div class="sub mono">${esc(l.playbook)}</div>` : ""}</td><td></td>
+      <td class="num${l.weekly_budget_usd && r.spent_week >= l.weekly_budget_usd ? " bad" : ""}">${budget}${l.auto_paused ? " <span class='qchip st-void'>auto-paused</span>" : ""}</td>
+      <td class="num">${usd(r.this_week.net)}</td><td class="num">${usd(r.last_week.net)}</td><td class="num"><b>${usd(r.all_time.net)}</b></td>
+      <td class="num">${r.per_hour == null ? "—" : usd(r.per_hour)}</td><td class="num">${r.per_token_dollar == null ? "—" : r.per_token_dollar.toFixed(1) + "×"}</td>
+      <td>${weeklyBars(L?.weekly_net?.[l.id], max)}</td><td class="small">${test}</td>`;
+    tr.children[1].append(st);
+    t.append(tr);
+  }
+  if (!m.lines.length) page.append(h("div", "sub", "No lines yet. Add one below, or the orchestrator proposes them (propose_line → a new_venture item for your approval)."));
+  else page.append(t);
+  // Ledger lines that aren't registered yet.
+  const unknown = Object.keys(L?.per_line || {}).filter((id) => !m.lines.some((r) => r.line.id === id) && id !== "-");
+  if (unknown.length) page.append(h("div", "sub", `In the ledger but not registered: ${unknown.join(", ")}`));
+  page.append(h("div", "set-section", "Add or change a line"));
+  const f = h("div", "row line-form");
+  const fld = (ph, w, type) => { const e = h("input"); e.placeholder = ph; e.style.width = w; if (type) e.type = type; e.spellcheck = false; return e; };
+  const id = fld("id (e.g. A)", "90px"), name = fld("name", "160px"), play = fld("playbook (pipelines/…)", "190px"), bud = fld("$ / week", "90px", "number"), end = fld("", "140px", "date"), kill = fld("kill criteria", "240px");
+  const status = h("select");
+  for (const s of ["testing", "active"]) { const o = h("option", null, s); o.value = s; status.append(o); }
+  const save = h("button", "btn primary", "Save line");
+  save.onclick = () => {
+    const line = { id: id.value.trim(), name: name.value.trim(), status: status.value, playbook: play.value.trim(), weekly_budget_usd: +bud.value || 0, end: end.value, kill_criteria: kill.value.trim() };
+    if (sendIpc({ op: "line", action: "save", line })) setTimeout(renderMoney, 500);
+  };
+  f.append(id, name, status, play, bud, end, kill, save);
+  page.append(f, h("div", "sub", "Saving an existing id changes that line. The weekly budget caps the agent usage of threads tagged with the line: over it, the line is paused automatically and only paid-order threads start for it. Log your own time as ledger rows of kind hours to get profit per hour."));
+  pane.append(page);
 }
 
 // The Inbox: paste text or drop files here (or press Ctrl+Alt+I anywhere to save the
@@ -3154,6 +3234,7 @@ function wire() {
     if (act === "explorer") toggleSide();
     if (act === "manage") openManage();
     if (act === "queue") openQueue();
+    if (act === "money") openMoney();
     if (act === "settings") openSettings();
     if (act === "palette") palette();
   };

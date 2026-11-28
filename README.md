@@ -143,6 +143,18 @@ weekly review, and learn from rejected items. The rest is the same text in both 
   phone can approve or reject only with a Face ID signature that Orchestrator verifies
   against the paired key. The signature has to match the item's current content, be under 2
   minutes old and use a fresh nonce. The local API token alone can never decide.
+- **Business lines and the Money tab.** Lines (ventures) are data: an id, status (testing,
+  active, paused or killed), playbook, weekly budget, kill criteria and dates.
+  - **Adding lines.** You add and change lines in the **$ Money** tab. The orchestrator
+    proposes new ones with `propose_line` (a `new_venture` queue item) and asks to pause or
+    kill one with `update_line_status`. Both take effect only when you approve them.
+  - **Tagging threads.** Threads tagged with a line count against its weekly budget. A line
+    over its budget is paused automatically, and only paid-order threads start for it. A
+    tagged thread's usage is written to `ledger/ledger.csv` when it's resolved.
+  - **The Money tab** shows revenue, fees, costs, agent usage and net for this week, last week
+    and all time. Per line, it adds profit per hour of your time (from `hours` rows) and per
+    dollar of usage, an 8-week chart, and days left against the kill criteria for lines in
+    testing.
 - **Readable copies.** Each item is also written as a read-only Markdown file in
   `<workspace>/queue/pending|approved|rejected|done|void/`. Editing or moving those files
   changes nothing. Every queue event is appended to `<workspace>/queue/audit.log`.

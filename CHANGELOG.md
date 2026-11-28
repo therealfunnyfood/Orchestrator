@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.2 (2026-11-28)
+
+- **Business lines are data (business workspaces).** Each line, or venture, has an id, a
+  status (testing, active, paused or killed), a playbook, a weekly budget, kill criteria,
+  and start and end dates.
+  - You add and change lines in the new **$ Money** tab.
+  - The orchestrator proposes new ventures with `propose_line`, and asks to pause, kill or
+    revive one with `update_line_status`. Both become queue items, applied exactly as
+    approved.
+  - `list_lines` gives the orchestrator every line with its numbers.
+- **Per-line caps.** `spawn_thread` takes a `tag` naming a line. A tagged thread's usage counts
+  against that line's weekly budget. A line over its budget is paused automatically, you and
+  the orchestrator are told, and only paid-order threads start for it. Threads for paused or
+  killed lines are refused too.
+- **Ledger booking.** When a tagged thread is resolved, its agent usage is written to
+  `ledger/ledger.csv` as a `tokens` row, if that file exists.
+- **Money tab.** It shows revenue, fees, costs, agent usage and net for this week, last week
+  and all time. Per line, it adds profit per hour of your time (from `hours` rows in the
+  ledger) and per dollar of agent usage, an 8-week chart of weekly net, the week's usage
+  against the budget, and days left against the kill criteria for lines in testing.
+- **Phone feed.** The phone's snapshot now includes the lines and the new ledger fields.
+
 ## 0.6.1 (2026-11-28)
 
 - **Approve and reject from your phone, signed with Face ID (business workspaces).** This is

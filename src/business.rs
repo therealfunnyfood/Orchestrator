@@ -12,20 +12,41 @@ use std::path::Path;
 pub struct Totals {
     pub revenue: f64,
     pub fees: f64,
+    /// Other costs (tools, materials...), negative.
     pub costs: f64,
+    /// Agent usage at API rates (kind "tokens"), negative.
+    pub tokens: f64,
+    /// Revenue + fees + costs + tokens.
     pub net: f64,
+    /// The user's own time (kind "hours", the amount column holds hours); not money.
+    pub hours: f64,
     pub rows: u32,
 }
 
 impl Totals {
     fn add(&mut self, kind: &str, amount: f64) {
         self.rows += 1;
-        self.net += amount;
         match kind {
+            "hours" | "time" => {
+                self.hours += amount;
+                return;
+            }
             "revenue" | "sale" | "income" => self.revenue += amount,
             "fee" | "fees" => self.fees += amount,
+            "tokens" | "usage" => self.tokens += amount,
             _ => self.costs += amount,
         }
+        self.net += amount;
+    }
+
+    /// Net profit per hour of the user's time (None without hours logged).
+    pub fn per_hour(&self) -> Option<f64> {
+        (self.hours > 0.0).then(|| self.net / self.hours)
+    }
+
+    /// Net profit per dollar of agent usage (None without token costs).
+    pub fn per_token_dollar(&self) -> Option<f64> {
+        (self.tokens < 0.0).then(|| self.net / -self.tokens)
     }
 }
 
@@ -34,8 +55,15 @@ pub struct Ledger {
     pub this_week: Totals,
     pub last_week: Totals,
     pub all_time: Totals,
+    /// All time, per line.
     pub per_line: BTreeMap<String, Totals>,
+    pub per_line_this_week: BTreeMap<String, Totals>,
+    pub per_line_last_week: BTreeMap<String, Totals>,
+    /// Net per line for each of the last 8 weeks (oldest first; the last is this week).
+    pub weekly_net: BTreeMap<String, Vec<f64>>,
 }
+
+pub const CHART_WEEKS: usize = 8;
 
 /// Split one CSV line (quoted fields with "" escapes).
 pub fn csv_fields(line: &str) -> Vec<String> {
@@ -75,13 +103,22 @@ pub fn ledger(text: &str, now: f64) -> Ledger {
         let Ok(amount) = get(ci_amount).trim_start_matches('$').replace(',', "").parse::<f64>() else { continue };
         let kind = get(ci_kind).to_lowercase();
         let ts = parse_date(get(ci_date));
+        let line = if get(ci_line).is_empty() { "-".to_string() } else { get(ci_line).to_string() };
         l.all_time.add(&kind, amount);
-        l.per_line.entry(if get(ci_line).is_empty() { "-".into() } else { get(ci_line).to_string() }).or_default().add(&kind, amount);
+        l.per_line.entry(line.clone()).or_default().add(&kind, amount);
         if let Some(t) = ts {
             if t >= week_start {
                 l.this_week.add(&kind, amount);
+                l.per_line_this_week.entry(line.clone()).or_default().add(&kind, amount);
             } else if t >= last_week_start {
                 l.last_week.add(&kind, amount);
+                l.per_line_last_week.entry(line.clone()).or_default().add(&kind, amount);
+            }
+            // Weekly net for the chart (hours aren't money).
+            let weeks_ago = ((week_start - t) / (7.0 * 86400.0)).ceil().max(0.0) as usize;
+            if weeks_ago < CHART_WEEKS && !matches!(kind.as_str(), "hours" | "time") {
+                let series = l.weekly_net.entry(line).or_insert_with(|| vec![0.0; CHART_WEEKS]);
+                series[CHART_WEEKS - 1 - weeks_ago] += amount;
             }
         }
     }
@@ -173,12 +210,26 @@ bad,row\n";
         let l = ledger(csv, at(2026, 11, 25));
         assert_eq!(l.this_week.revenue, 40.0);
         assert_eq!(l.this_week.fees, -8.0);
-        assert_eq!(l.this_week.costs, -1.25);
+        assert_eq!(l.this_week.tokens, -1.25);
+        assert_eq!(l.this_week.costs, 0.0);
         assert!((l.this_week.net - 30.75).abs() < 1e-9);
         assert_eq!(l.last_week.revenue, 15.0);
         assert_eq!(l.all_time.rows, 5);
         assert!((l.all_time.net - 42.75).abs() < 1e-9);
         assert_eq!(l.per_line["A"].net, 32.0);
+        assert_eq!(l.per_line_this_week["B"].tokens, -1.25);
+        assert_eq!(l.per_line_last_week["B"].revenue, 15.0);
+        // Weekly chart: B made 15 last week and spent 1.25 this week; C's cost is 4 weeks back.
+        assert_eq!(l.weekly_net["B"][CHART_WEEKS - 1], -1.25);
+        assert_eq!(l.weekly_net["B"][CHART_WEEKS - 2], 15.0);
+        assert_eq!(l.weekly_net["C"][CHART_WEEKS - 5], -3.0);
+        // Hours count as the user's time, not money.
+        let with_hours = format!("{csv}2026-11-25,A,hours,gig-1,2,,\n");
+        let l = ledger(&with_hours, at(2026, 11, 25));
+        assert_eq!(l.per_line["A"].hours, 2.0);
+        assert_eq!(l.per_line["A"].net, 32.0);
+        assert_eq!(l.per_line["A"].per_hour(), Some(16.0));
+        assert_eq!(l.per_line["B"].per_token_dollar(), Some(13.75 / 1.25));
         assert_eq!(csv_fields("a,\"b, c\",\"say \"\"hi\"\"\""), vec!["a", "b, c", "say \"hi\""]);
     }
 

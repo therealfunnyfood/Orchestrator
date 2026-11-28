@@ -49,6 +49,10 @@ pub struct ThreadRow {
     pub api_cost: f64,
     /// Week key of the last "checkpoint and stop" request (usage gate), so it's asked once.
     pub stop_asked: String,
+    /// Business line this thread works for (a registered line id), if any.
+    pub tag: String,
+    /// How much of cost_usd has been written to the workspace ledger already.
+    pub ledgered: f64,
 }
 
 impl Default for ThreadRow {
@@ -79,6 +83,8 @@ impl Default for ThreadRow {
             standing: false,
             api_cost: 0.0,
             stop_asked: String::new(),
+            tag: String::new(),
+            ledgered: 0.0,
         }
     }
 }
@@ -265,6 +271,8 @@ pub struct ProjectNotes {
     pub phone_feed: bool,
     /// Signed approve/reject from enrolled phones (needs phone_feed too). Off by default.
     pub phone_decide: bool,
+    /// Business lines (lines.rs).
+    pub lines: Vec<crate::lines::Line>,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }
