@@ -454,7 +454,7 @@ function restoreTabs(ws) {
 async function closeWorkspace(path) {
   try {
     const wasShown = S.state.workspace.toLowerCase() === path.toLowerCase();
-    const r = await api("/api/workspace/close", { body: { path } });
+    const r = await ipcCall("workspace_close", { path });
     delete tabsByWs[path.toLowerCase()];
     if (wasShown) restoreTabs(r.workspace);
     await loadState();
@@ -1303,7 +1303,7 @@ async function importProject() {
   const it = await quickPick(items, "Import which Claude Code project? Orchestrator sets it up and continues the work");
   if (!it) return;
   try {
-    await api("/api/import", { body: { path: it.value } });
+    await ipcCall("import", { path: it.value });
     S.tabs = [];
     await loadState();
     await activate(0);
@@ -1336,8 +1336,8 @@ function renderBrief() {
     edit.onclick = () => { view.classList.toggle("hidden"); ta.classList.toggle("hidden"); saveB.classList.toggle("hidden"); edit.textContent = ta.classList.contains("hidden") ? "Edit" : "Cancel"; };
     saveB.onclick = async () => {
       if (field === "tuning") await api("/api/tuning", { body: { notes: ta.value } }).catch(fail);
-      else if (["lessons", "dev_lessons", "business_lessons", "project_lessons"].includes(field)) await api("/api/lessons", { body: { [field]: ta.value } }).catch(fail);
-      else await api("/api/notes", { body: { [field]: ta.value } }).catch(fail);
+      else if (["lessons", "dev_lessons", "business_lessons", "project_lessons"].includes(field)) await ipcCall("lessons_user", { [field]: ta.value }).catch(fail);
+      else await ipcCall("notes_user", { [field]: ta.value }).catch(fail);
       await loadState();
       renderBrief();
       toast("saved");
@@ -1848,7 +1848,9 @@ function renderNeedsPlayer(pane) {
 
 // ---- sweep (focus mode): one card at a time, full width, big buttons.
 // TL;DR first, then what I'd do, then the details under More. Same IPC paths as the cards.
-const SW = { active: false, pane: "needs", ids: [], skipped: new Set(), gone: new Set(), more: false, reject: false, rev: 0 };
+const SW = { active: false, pane: "needs", ids: [], skipped: new Set(), gone: new Set(), more: false, reject: false, rev: 0, shown: "", shownAt: 0 };
+// Enter waits this long after the card changes, so a key meant for the last card can't act on the next.
+const SW_SETTLE_MS = 700;
 const SW_ASK = { approve: "approve it", reject: "reject it", edit: "edit it first", do: "do it", skip: "skip it" };
 const swView = (id) => { const v = ndFind(id); return v && v.status === "open" ? v : null; };
 const swLeft = () => SW.ids.filter((id) => !SW.gone.has(id) && !SW.skipped.has(id) && swView(id));
@@ -1869,11 +1871,20 @@ function swStart(pane) {
 function swStop() { SW.active = false; SW.reject = false; swRefresh(); }
 function swDid(v, ok) { if (ok) { SW.gone.add(v.id); SW.more = false; SW.reject = false; swRefresh(); } return ok; }
 function swSkip(v) { SW.skipped.add(v.id); SW.more = false; SW.reject = false; swRefresh(); }
-// What Enter does: the same checks as the click, and never on a careful item.
-function swEnter() {
+// What Enter does: the same checks as the click, and never on a careful item. Only on the
+// card that's on screen (same id and payload as shown), not on a held key, and not right
+// after the card changed.
+function swEnter(e) {
+  if (e && e.repeat) return;
   const left = swLeft();
   const v = left.length && swView(left[0]);
   if (!v) return;
+  const box = $(".nd-sweep");
+  if (!box || box.dataset.swId !== v.id || box.dataset.swHash !== ((v.queue || {}).payload_hash || "")) {
+    swRefresh();
+    return toast("This card just changed. Look at it again first.", true);
+  }
+  if (Date.now() - SW.shownAt < SW_SETTLE_MS) return;
   if (v.careful) return toast("This one needs a click. Read it first.", true);
   const rec = v.recommend;
   if (v.kind === "decision" && rec === "approve") return swApprove(v);
@@ -1921,6 +1932,10 @@ function renderSweep(pane) {
   bar.append(fill);
   box.append(bar);
   box.dataset.anchor = v.id;
+  box.dataset.swId = v.id;
+  box.dataset.swHash = (v.queue || {}).payload_hash || "";
+  const shown = v.id + "|" + box.dataset.swHash;
+  if (SW.shown !== shown) { SW.shown = shown; SW.shownAt = Date.now(); }
   box.append(ndChips(v, false));
   box.append(h("div", "nd-pdo", v.tldr || v.title));
   const q = v.queue || {};
@@ -2943,7 +2958,7 @@ function xwsBlock(x, id, onSent) {
   return box;
 }
 
-const XWS_OUT = { allowed: "Sent (once).", always: "Sent. Always allowed from now on.", denied: "Denied.", expired: "The agent stopped waiting, so nothing was sent.", cancelled: "Cancelled.", rule: "Sent (standing rule)." };
+const XWS_OUT = { allowed: "Sent (once).", always: "Sent. Always allowed from now on.", denied: "Denied.", expired: "The agent stopped waiting, so nothing was sent.", cancelled: "Cancelled.", gone: "Not sent.", rule: "Sent (standing rule)." };
 function xwsRequestCard(ev) {
   const e = h("div", "ev xws-card");
   e.dataset.id = ev.id;
@@ -4215,7 +4230,7 @@ function wire() {
     if (e.key === "Escape" && !$("#lightbox").classList.contains("hidden")) return $("#lightbox").classList.add("hidden");
     if (SW.active && cur()?.type === SW.pane) {
       if (e.key === "Escape") { e.preventDefault(); return swStop(); }
-      if (e.key === "Enter" && !ctrl && !/^(INPUT|TEXTAREA|BUTTON|SELECT)$/.test(document.activeElement?.tagName || "")) { e.preventDefault(); return swEnter(); }
+      if (e.key === "Enter" && !ctrl && !/^(INPUT|TEXTAREA|BUTTON|SELECT)$/.test(document.activeElement?.tagName || "")) { e.preventDefault(); return swEnter(e); }
     }
     // 1-9 picks an option on a single open question when the composer is empty
     if (/^[1-9]$/.test(e.key) && !ctrl && document.activeElement?.id === "input" && !$("#input").value) {

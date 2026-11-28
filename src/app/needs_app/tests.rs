@@ -232,3 +232,29 @@ async fn after_a_restart_open_questions_count_as_timed_out() {
     app.need_answer(&v.id, json!([{"selected": ["$18"]}])).unwrap();
     assert!(told(&app, &k).contains("[late answer from the user]"));
 }
+
+#[test]
+fn money_kinds_commands_and_secrets_are_careful() {
+    for k in ["pay", "payment", "buy_domain", "purchase", "ad_spend", "refund", "subscription", "ad", "run ads", "advert-boost", "Pay-Invoice"] {
+        assert!(money_kind(k), "{k}");
+    }
+    for k in ["add", "read", "address", "post", "email", "upload_file", "readme"] {
+        assert!(!money_kind(k), "{k}");
+    }
+    let mut i = crate::queue::QueueItem { kind: "post".into(), risk: "low".into(), ..Default::default() };
+    assert!(!careful(&i));
+    i.command = "curl https://example.com".into();
+    assert!(careful(&i), "a command");
+    i.command.clear();
+    i.secrets = vec!["SHOP_KEY".into()];
+    assert!(careful(&i), "secrets");
+}
+
+#[tokio::test]
+async fn an_agent_cant_dismiss_a_message_request() {
+    let (app, ws, _) = app("nodismissmsg");
+    let k = orch_key(&ws);
+    let id = app.need_add(Need { workspace: ws.clone(), kind: "message".into(), title: "Send?".into(), source: k.clone(), ..Default::default() });
+    let e = app.need_dismiss_agent(&k, &id, "never mind").unwrap_err();
+    assert!(e.contains("can't dismiss"), "{e}");
+}

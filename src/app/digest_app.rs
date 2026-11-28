@@ -46,10 +46,12 @@ impl App {
     }
 
     /// Send a notification now (toast and phone push).
-    fn notify_send(&self, ws: &str, title: &str, body: &str) {
+    /// Toast, plus the phone push if one is set up. False when the phone push couldn't be
+    /// sent (its secrets couldn't be read).
+    fn notify_send(&self, ws: &str, title: &str, body: &str) -> bool {
         let phone = {
             let st = self.store.lock().unwrap();
-            let Some(n) = st.notes(ws) else { return };
+            let Some(n) = st.notes(ws) else { return true };
             n.notify_phone.clone()
         };
         let name = std::path::Path::new(ws).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -59,9 +61,13 @@ impl App {
             let names: Vec<String> = crate::notify::phone_secrets(&phone).iter().map(|s| s.to_string()).collect();
             match self.vault.get(ws, &names) {
                 Ok(secrets) => crate::notify::push(&phone, &secrets, &title, body),
-                Err(e) => self.hub.broadcast(json!({"kind": "toast", "text": format!("phone notification not sent: {e}")})),
+                Err(e) => {
+                    self.hub.broadcast(json!({"kind": "toast", "text": format!("phone notification not sent: {e}")}));
+                    return false;
+                }
             }
         }
+        true
     }
 
     /// Send what's held for `ws` as one digest; returns how many it covered.
@@ -78,7 +84,14 @@ impl App {
             return 0;
         }
         let (title, body) = digest::digest_text(&held, busy_ended);
-        self.notify_send(ws, &title, &body);
+        if !self.notify_send(ws, &title, &body) {
+            // The phone didn't get it: keep the items for the next digest.
+            let mut st = self.store.lock().unwrap();
+            let n = st.notes_mut(ws);
+            let newer = std::mem::take(&mut n.held);
+            n.held = held.iter().cloned().chain(newer).collect();
+            st.save();
+        }
         self.business_event(ws, "digest", Some("digest"), json!({"count": held.len(), "text": format!("{title}: {body}")}));
         self.touch();
         held.len()
@@ -298,6 +311,20 @@ mod tests {
         // A missed slot (last digest two days ago) sends them all at once.
         app.store.lock().unwrap().notes_mut(&ws).digest_last = now() - 2.0 * 86400.0;
         app.digest_tick();
+        assert!(held(&app, &ws).is_empty());
+    }
+
+    /// The phone push can't be sent (its secret is missing): the items stay for next time.
+    #[test]
+    fn a_failed_phone_push_keeps_the_held_items() {
+        let app = test_app();
+        let ws = business(&app);
+        app.notify(&ws, "schedule", "held one", "x");
+        app.store.lock().unwrap().notes_mut(&ws).notify_phone = "ntfy".into();
+        app.send_digest(&ws, false);
+        assert_eq!(held(&app, &ws).len(), 1, "kept for the next digest");
+        app.store.lock().unwrap().notes_mut(&ws).notify_phone.clear();
+        assert_eq!(app.send_digest(&ws, false), 1);
         assert!(held(&app, &ws).is_empty());
     }
 

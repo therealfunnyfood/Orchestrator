@@ -485,6 +485,17 @@ fn summary(app: &App, t: &ThreadRow) -> String {
     )
 }
 
+/// A thread the caller may touch: it must exist and be in the caller's own workspace.
+/// Thread names are global, so every tool that takes one goes through this.
+pub(crate) fn own_thread(app: &App, key: &str, name: &str) -> Result<ThreadRow, String> {
+    let ws = app.ws_of(key);
+    let st = app.store.lock().unwrap();
+    match st.get(name) {
+        Some(t) if crate::store::same_path(if t.workspace.is_empty() { &st.workspace } else { &t.workspace }, &ws) => Ok(t.clone()),
+        _ => Err(format!("no thread named '{name}' in this workspace")),
+    }
+}
+
 fn arg<'a>(args: &'a Value, k: &str) -> Option<&'a str> {
     args.get(k).and_then(Value::as_str)
 }
@@ -628,6 +639,7 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
         "send_to_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
             let msg = arg(args, "message").ok_or("message is required")?;
+            own_thread(app, key, n)?;
             let now = arg(args, "when") != Some("after");
             app.note_thread_estimate(n, task_estimate(args, msg));
             Ok(match app.send_to_thread(n, msg, "orchestrator", vec![], now)? {
@@ -647,6 +659,8 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
                 .unwrap_or_default();
             if names.is_empty() {
                 names = app.thread_names_here(&app.ws_of(key));
+            } else {
+                names.retain(|n| own_thread(app, key, n).is_ok());
             }
             if let Some(m) = arg(args, "message").filter(|m| !m.trim().is_empty()) {
                 app.tell_user(key, m);
@@ -718,8 +732,7 @@ Each thread's messages and final report start your next turn.".into());
         }
         "read_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
-            let st = app.store.lock().unwrap();
-            let t = st.get(n).ok_or(format!("no thread named '{n}'"))?;
+            let t = &own_thread(app, key, n)?;
             let mut result = if t.last_result.is_empty() { "(no result yet)".to_string() } else { t.last_result.clone() };
             if result.len() > MAX_RESULT_CHARS {
                 let mut end = MAX_RESULT_CHARS;
@@ -829,6 +842,7 @@ Each thread's messages and final report start your next turn.".into());
         }
         "rate_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
+            own_thread(app, key, n)?;
             app.rate_thread(n, arg(args, "verdict").unwrap_or(""), arg(args, "note").unwrap_or(""))?;
             Ok("recorded".into())
         }
@@ -923,6 +937,7 @@ Each thread's messages and final report start your next turn.".into());
         }
         "configure_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
+            own_thread(app, key, n)?;
             let effort = approved_effort(app, key, n, arg(args, "effort"), arg(args, "effort_reason").unwrap_or("")).await?;
             app.configure_thread(n, None, arg(args, "model"), effort.as_deref())?;
             Ok(format!("updated {n}"))
@@ -930,7 +945,8 @@ Each thread's messages and final report start your next turn.".into());
         "resolve_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
             let reopen = args.get("reopen").and_then(Value::as_bool).unwrap_or(false);
-            if !reopen && app.store.lock().unwrap().get(n).is_some_and(|r| r.standing) {
+            let row = own_thread(app, key, n)?;
+            if !reopen && row.standing {
                 return Err(format!("{n} is a standing thread (a schedule wakes it), so it stays open; the user can resolve it or delete its schedule"));
             }
             app.set_resolved(n, !reopen, arg(args, "note").unwrap_or(""), "orchestrator")?;
@@ -938,6 +954,7 @@ Each thread's messages and final report start your next turn.".into());
         }
         "stop_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
+            own_thread(app, key, n)?;
             Ok(if app.stop(n) { "stopped".into() } else { "thread was not running".into() })
         }
         other => Err(format!("unknown tool {other}")),
@@ -1071,7 +1088,7 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide", "line_user", "need_user", "need_answer", "set_busy", "set_digests", "digest_now", "xws_user", "xws_decide", "xws_rule_add", "xws_rule_revoke", "submit_orchestrator", "send_to_thread", "edit_message", "app.answer(", "set_project_permission", "set_thread_permission", "create_thread", "set_mix", "configure_thread", "configure_orchestrator", "reset_orchestrator", "delete_thread", "remove_queued", "send_now", "clear_queue", "download_and_launch", "save_resumes_for_update", "quit_app"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide", "line_user", "need_user", "need_answer", "set_busy", "set_digests", "digest_now", "xws_user", "xws_decide", "xws_rule_add", "xws_rule_revoke", "submit_orchestrator", "send_to_thread", "edit_message", "app.answer(", "set_project_permission", "set_thread_permission", "create_thread", "set_mix", "configure_thread", "configure_orchestrator", "reset_orchestrator", "delete_thread", "remove_queued", "send_now", "clear_queue", "download_and_launch", "save_resumes_for_update", "quit_app", "save_lessons", "save_notes", "import_project", "close_workspace"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }
@@ -1086,7 +1103,8 @@ mod tests {
         let web = include_str!("web.rs");
         assert!(!web.contains("\"you\""), "web.rs must not act as \"you\"");
         for r in ["\"/api/send\"", "\"/api/answer\"", "\"/api/edit\"", "\"/api/permission\"", "\"/api/threads", "\"/api/mix\"",
-            "\"/api/update/install\"", "\"/api/orchestrator\"", "\"/api/queue\""] {
+            "\"/api/update/install\"", "\"/api/orchestrator\"", "\"/api/queue\"", "\"/api/lessons\"", "\"/api/notes\"", "\"/api/import\"",
+            "\"/api/workspace/close\""] {
             assert!(!web.contains(r), "web.rs must not have the route {r}");
         }
         assert!(web.contains("USER_ONLY_SETTINGS"), "/api/settings must refuse the gate and secret settings");
@@ -1095,7 +1113,8 @@ mod tests {
         }
         let main = include_str!("main.rs");
         for op in ["\"send\"", "\"edit\"", "\"answer\"", "\"thread_create\"", "\"permission\"", "\"settings_user\"",
-            "\"mix\"", "\"configure\"", "\"orch_reset\"", "\"thread_delete\"", "\"queue_msg\"", "\"update_install\""] {
+            "\"mix\"", "\"configure\"", "\"orch_reset\"", "\"thread_delete\"", "\"queue_msg\"", "\"update_install\"",
+            "\"notes_user\"", "\"lessons_user\"", "\"import\"", "\"workspace_close\""] {
             assert!(main.contains(op), "handle_ipc must handle {op}");
         }
     }

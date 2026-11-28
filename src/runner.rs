@@ -114,11 +114,11 @@ fn supports_flag(exe: &std::path::Path, flag: &str) -> bool {
     help.contains(flag)
 }
 
-/// Deletes the file holding a turn's system prompt when the turn is over.
-struct TempFile(Option<PathBuf>);
+/// Deletes the files holding a turn's system prompt and MCP config when the turn is over.
+struct TempFile(Vec<PathBuf>);
 impl Drop for TempFile {
     fn drop(&mut self) {
-        if let Some(p) = &self.0 {
+        for p in &self.0 {
             let _ = std::fs::remove_file(p);
         }
     }
@@ -128,12 +128,17 @@ impl Drop for TempFile {
 /// lessons and history, and Windows refuses command lines over 32K characters
 /// ("The filename or extension is too long").
 fn system_prompt_file(text: &str) -> Result<PathBuf, String> {
+    turn_file(text, "md", "system prompt")
+}
+
+/// A file for one turn, in the app's temp folder (`ext` "md" or "json").
+fn turn_file(text: &str, ext: &str, what: &str) -> Result<PathBuf, String> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join("orchestrator-prompts");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not write the system prompt file: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not write the {what} file: {e}"))?;
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let p = dir.join(format!("{}-{n}.md", std::process::id()));
-    std::fs::write(&p, text).map_err(|e| format!("could not write the system prompt file: {e}"))?;
+    let p = dir.join(format!("{}-{n}-{:08x}.{ext}", std::process::id(), rand::random::<u32>()));
+    std::fs::write(&p, text).map_err(|e| format!("could not write the {what} file: {e}"))?;
     Ok(p)
 }
 
@@ -173,7 +178,7 @@ fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Op
     if !spec.append_system.is_empty() {
         let p = system_prompt_file(&spec.append_system)?;
         cmd.arg("--append-system-prompt-file").arg(&p);
-        prompt_file.0 = Some(p);
+        prompt_file.0.push(p);
         // By default Claude Code records the system prompt on a conversation's first
         // request and reuses it on every resume, ignoring new text; the app's prompt
         // (notes, lessons, timing, open workspaces) changes between turns.
@@ -185,7 +190,11 @@ fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Op
         cmd.args(["--tools", tools]);
     }
     if let Some(mcp) = &spec.mcp_config {
-        cmd.args(["--mcp-config", mcp]);
+        // A file, not the command line: the config holds the session's own MCP secret, and
+        // any process can list command lines.
+        let p = turn_file(mcp, "json", "MCP config")?;
+        cmd.arg("--mcp-config").arg(&p);
+        prompt_file.0.push(p);
     }
 
     if launched_inside_claude() {
@@ -275,7 +284,7 @@ async fn run_once(
     on_line: &mut (dyn FnMut(&Value) + Send),
 ) -> Result<TurnResult, TurnError> {
     // Lives until the turn ends (the CLI may read it after starting).
-    let mut prompt_file = TempFile(None);
+    let mut prompt_file = TempFile(vec![]);
     let mut cmd = build_command(settings, spec, backend, resume, &mut prompt_file).map_err(TurnError::Failed)?;
     let mut child = cmd.spawn().map_err(|e| {
         TurnError::Failed(format!("could not start Claude Code ({}): {e}", settings.claude_exe().display()))

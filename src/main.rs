@@ -67,8 +67,9 @@ pub fn set_badge(n: usize) {
 
 /// IPC ops that act as the user, spend, or can't be undone (see handle_ipc). mcp.rs tests
 /// check web.rs never does these.
-const USER_OPS: [&str; 13] = ["send", "edit", "answer", "thread_create", "permission", "settings_user",
-    "mix", "configure", "orch_reset", "thread_delete", "queue_msg", "update_install", "resolve"];
+const USER_OPS: [&str; 17] = ["send", "edit", "answer", "thread_create", "permission", "settings_user",
+    "mix", "configure", "orch_reset", "thread_delete", "queue_msg", "update_install", "resolve",
+    "notes_user", "lessons_user", "import", "workspace_close"];
 
 async fn user_op(app: &Arc<app::App>, msg: &serde_json::Value) -> Result<serde_json::Value, String> {
     use serde_json::{json, Value};
@@ -176,6 +177,30 @@ async fn user_op(app: &Arc<app::App>, msg: &serde_json::Value) -> Result<serde_j
             };
             Ok(json!({"ok": ok}))
         }
+        // The project brief and rules, and the lessons, as the user edits them on the Brief
+        // page (agents have their own tools, save_project_notes and save_lessons).
+        "notes_user" => {
+            let ws = app.workspace();
+            let (brief, rules) = (msg.get("brief").and_then(Value::as_str), msg.get("rules").and_then(Value::as_str));
+            app.save_notes(&ws, brief, rules);
+            Ok(json!({"ok": true}))
+        }
+        "lessons_user" => {
+            let ws = app.workspace();
+            let f = |k: &str| msg.get(k).and_then(Value::as_str);
+            app.save_lessons("", None, app::Lessons {
+                general: f("lessons"), dev: f("dev_lessons"), business: f("business_lessons"),
+                project: f("project_lessons").map(|l| (ws.as_str(), l)),
+            })?;
+            Ok(json!({"ok": true}))
+        }
+        // Import a Claude Code project (starts a setup turn) and close a workspace.
+        "import" => {
+            let (a, path) = (app.clone(), s("path"));
+            let ws = tokio::task::spawn_blocking(move || a.import_project(&path)).await.map_err(|e| e.to_string())??;
+            Ok(json!({"workspace": ws}))
+        }
+        "workspace_close" => Ok(json!({"workspace": app.close_workspace(&s("path"))?})),
         // Download the newer release, verify it, start its installer and quit so it can update.
         "update_install" => {
             let update = app.update.lock().unwrap().clone().ok_or("no update available")?;

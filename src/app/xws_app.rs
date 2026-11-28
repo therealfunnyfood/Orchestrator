@@ -234,6 +234,16 @@ impl App {
                 Err(format!("the user denied this message; it was NOT sent{}", if note.is_empty() { ". Don't send it again the same way".to_string() } else { format!(". Their note: {note}") }))
             }
             XwsDecision::Allow { always } => {
+                // The user may have taken a while: the target must still be there, and be the
+                // same session (a thread deleted and re-made elsewhere is not the same one).
+                let target = match self.xws_target(&target.ws, &target.session) {
+                    Ok(t) if t.key == target.key && same_path(&t.ws, &target.ws) => t,
+                    _ => {
+                        self.xws_closed(&id, key, &need_id, "gone", "not sent: the target is gone");
+                        self.xws_audit(&from_ws, &format!("not sent {route}: the target is gone"));
+                        return Err("not sent: the target is gone (its workspace was closed or the session was deleted)".into());
+                    }
+                };
                 if always {
                     let _ = self.xws_rule_add(&from_ws, &target.ws, "prompt");
                 }
@@ -268,7 +278,8 @@ impl App {
             // Paused: enqueue holds it (the worker only runs the user's own messages).
             self.deliver(&t.key, msg, !paused);
         } else {
-            self.post_news(&t.key, "@app", &text);
+            // Its own label: another agent's words must never look like a notice from the app.
+            self.post_news(&t.key, &format!("@workspace {from_name}/{from_session}"), &text);
         }
         // A business target keeps its own chained record of what came in.
         if self.is_business(&t.ws) {
@@ -536,6 +547,75 @@ mod tests {
         assert!(app.message_session(&key, &msg("worker-a", "RULED")).await.unwrap().contains("standing rule"));
         let ls = app.list_sessions(&key, None).unwrap();
         assert!(ls.contains("worker-a") && ls.contains("standing rule") && ls.contains("your own workspace"), "{ls}");
+    }
+
+    #[tokio::test]
+    async fn a_target_gone_before_the_ok_gets_nothing() {
+        let (app, dev, _, key) = app("gone");
+        let h = spawn(&app, &key, msg("worker-a", "GONE"));
+        let need = pending(&app).await;
+        app.store.lock().unwrap().threads.retain(|t| t.name != "worker-a");
+        app.xws_user("allow_once", &json!({"id": need})).unwrap();
+        let e = h.await.unwrap().unwrap_err();
+        assert!(e.contains("not sent: the target is gone"), "{e}");
+        assert!(queued(&app, "worker-a").is_empty());
+        assert!(app.needs_of(&dev).open.iter().all(|v| v.id != need));
+        assert!(app.store.lock().unwrap().audit.iter().any(|a| a.2.contains("the target is gone")));
+    }
+
+    #[tokio::test]
+    async fn an_orchestrator_target_sees_a_workspace_label_not_the_app() {
+        let (app, dev, biz, key) = app("label");
+        // Unpause biz so the message goes to the orchestrator's news, not its queue.
+        app.store.lock().unwrap().projects.get_mut(&biz).unwrap().paused = false;
+        app.xws_user("rule_add", &json!({"from": dev, "to": biz})).unwrap();
+        // Hold the news: pretend the orchestrator is in wait_for_threads.
+        app.waiting.lock().unwrap().insert(orch_key(&biz));
+        app.message_session(&key, &msg("orchestrator", "LABELLED")).await.unwrap();
+        let inbox = app.drain_inbox(&orch_key(&biz)).unwrap();
+        assert!(inbox.starts_with("[from the workspace dev/orchestrator]"), "{inbox}");
+        assert!(!inbox.contains("[from the app]"), "{inbox}");
+    }
+
+    async fn tool(app: &Arc<App>, key: &str, name: &str, args: Value) -> (bool, String) {
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}});
+        let r = crate::mcp::handle(app, key, &msg).await.unwrap();
+        (r["result"]["isError"].as_bool().unwrap(), r["result"]["content"][0]["text"].as_str().unwrap().to_string())
+    }
+
+    /// Thread names are global, but an orchestrator only reaches its own workspace's
+    /// threads; another workspace's need message_session (and the user's OK).
+    #[tokio::test]
+    async fn thread_tools_refuse_another_workspaces_thread() {
+        let (app, dev, _, key) = app("own");
+        {
+            let mut st = app.store.lock().unwrap();
+            let mut mine = st.get("worker-a").unwrap().clone();
+            mine.name = "worker-d".into();
+            mine.workspace = dev.clone();
+            mine.cwd = dev.clone();
+            st.threads.push(mine);
+        }
+        for (name, args) in [
+            ("send_to_thread", json!({"name": "worker-a", "message": "SNEAK"})),
+            ("read_thread", json!({"name": "worker-a"})),
+            ("configure_thread", json!({"name": "worker-a", "model": "haiku"})),
+            ("resolve_thread", json!({"name": "worker-a"})),
+            ("resolve_thread", json!({"name": "worker-a", "reopen": true})),
+            ("stop_thread", json!({"name": "worker-a"})),
+            ("rate_thread", json!({"name": "worker-a", "verdict": "good"})),
+        ] {
+            let (err, text) = tool(&app, &key, name, args).await;
+            assert!(err && text.contains("in this workspace"), "{name}: {text}");
+        }
+        assert!(queued(&app, "worker-a").is_empty(), "nothing queued for the other workspace's thread");
+        assert!(!app.store.lock().unwrap().get("worker-a").unwrap().resolved);
+        let (_, text) = tool(&app, &key, "wait_for_threads", json!({"names": ["worker-a"], "timeout_seconds": 1})).await;
+        assert!(!text.contains("worker-a"), "{text}");
+        let (err, text) = tool(&app, &key, "read_thread", json!({"name": "worker-d"})).await;
+        assert!(!err && text.contains("worker-d"), "own thread still works: {text}");
+        let (_, text) = tool(&app, &key, "list_threads", json!({})).await;
+        assert!(text.contains("worker-d") && !text.contains("worker-a"), "{text}");
     }
 
     #[tokio::test]

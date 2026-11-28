@@ -204,6 +204,9 @@ pub fn search_chats(app: &App, ws: &str, q: &str, limit: usize) -> Value {
     json!({"q": q, "hits": hits, "truncated": truncated})
 }
 
+/// The header carrying a session's own MCP secret (see `App::mcp_config`).
+pub const MCP_SECRET_HEADER: &str = "X-Orch-Mcp-Secret";
+
 pub fn orch_key(workspace: &str) -> String {
     // FNV-1a of the lowercased path: stable id per workspace folder.
     let mut h: u32 = 0x811c9dc5;
@@ -255,6 +258,9 @@ pub struct App {
     questions: Mutex<HashMap<String, PendingQuestion>>,
     /// Cross-workspace message requests waiting for the user, by request id.
     xws_pending: Mutex<HashMap<String, xws_app::XwsPending>>,
+    /// Each session's own MCP secret (key -> secret), made when its MCP config is written.
+    /// Memory only: after a restart every turn gets a fresh config, so new secrets.
+    mcp_secrets: Mutex<HashMap<String, String>>,
     answered_ids: Mutex<std::collections::HashSet<String>>,
     /// When the running turn on each key started (for the UI's timer).
     started: Mutex<HashMap<String, f64>>,
@@ -322,6 +328,7 @@ impl App {
             inbox: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
             xws_pending: Mutex::new(HashMap::new()),
+            mcp_secrets: Mutex::new(HashMap::new()),
             answered_ids: Mutex::new(Default::default()),
             started: Mutex::new(HashMap::new()),
             estimates: Mutex::new(HashMap::new()),
@@ -1748,14 +1755,38 @@ wait for. Then act on it."
         json!({"results": results, "api_key_set": !s.api_key.trim().is_empty()})
     }
 
-    /// MCP config pointing a session at its own endpoint on this app.
+    /// MCP config pointing a session at its own endpoint on this app. The endpoint's key is
+    /// guessable (orchestrator keys hash the path, thread names are listed), so each session
+    /// also gets its own random secret: without it, one agent could call tools as another.
     fn mcp_config(&self, key: &str) -> String {
         json!({"mcpServers": {"app": {
             "type": "http",
             "url": format!("http://127.0.0.1:{}/mcp/{key}", self.port.load(Ordering::Relaxed)),
-            "headers": {"X-Orch-Token": self.token},
+            "headers": {"X-Orch-Token": self.token, MCP_SECRET_HEADER: self.mcp_secret(key)},
         }}})
         .to_string()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mcp_config_for_test(&self, key: &str) -> String {
+        self.mcp_config(key)
+    }
+
+    /// The session's MCP secret, made on first use.
+    pub(crate) fn mcp_secret(&self, key: &str) -> String {
+        use rand::Rng;
+        const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        self.mcp_secrets.lock().unwrap().entry(key.to_string()).or_insert_with(|| {
+            let mut rng = rand::rng();
+            (0..40).map(|_| CHARS[rng.random_range(0..CHARS.len())] as char).collect()
+        }).clone()
+    }
+
+    /// Whether `given` is session `key`'s MCP secret (constant time). No secret yet: refused.
+    pub(crate) fn mcp_secret_ok(&self, key: &str, given: &str) -> bool {
+        let m = self.mcp_secrets.lock().unwrap();
+        let Some(want) = m.get(key) else { return false };
+        want.len() == given.len() && want.bytes().zip(given.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
     }
 
     pub fn set_plan(&self, key: &str, items: Value) {

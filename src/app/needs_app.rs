@@ -75,9 +75,22 @@ fn view_of_need(n: &Need, mark: &Mark, waiting: bool, t: f64) -> View {
     }
 }
 
-/// High risk, spending or a failed capacity check: never a one-key approve.
-fn careful(i: &crate::queue::QueueItem) -> bool {
-    i.risk == "high" || i.kind.contains("spend") || i.capacity.as_ref().is_some_and(|c| !c.ok)
+/// High risk, spending, a command or secrets, or a failed capacity check: never a one-key
+/// approve.
+pub(crate) fn careful(i: &crate::queue::QueueItem) -> bool {
+    i.risk == "high" || money_kind(&i.kind) || !i.command.trim().is_empty() || !i.secrets.is_empty()
+        || i.capacity.as_ref().is_some_and(|c| !c.ok)
+}
+
+/// A kind about money: a word starting pay, buy, purchase, spend, refund or subscri, or the
+/// word ad/ads/advert… ("add", "read" and "address" don't count).
+pub(crate) fn money_kind(kind: &str) -> bool {
+    let k = kind.to_lowercase();
+    k.contains("spend")
+        || k.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| {
+            ["pay", "buy", "purchase", "spend", "refund", "subscri"].iter().any(|p| w.starts_with(p))
+                || w == "ad" || w == "ads" || w.starts_with("advert")
+        })
 }
 
 fn view_of_item(i: &crate::queue::QueueItem, item_json: Value, mark: &Mark, t: f64) -> View {
@@ -667,6 +680,9 @@ Help them: tell them what to try (tell_user), or send clearer steps with request
             return Err("queue items are decided by the user; you can't dismiss them".into());
         }
         let n = self.need_get(id).ok_or(format!("no entry {id}"))?;
+        if n.kind == "message" {
+            return Err("a message to another workspace waits for the user; you can't dismiss it".into());
+        }
         let ws = self.ws_of(key);
         let mine = n.source == key || (key.starts_with(ORCHESTRATOR) && same_path(&n.workspace, &ws));
         if !mine {

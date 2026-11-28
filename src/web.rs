@@ -84,9 +84,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/handoff", post(handoff))
         .route("/api/popout", post(popout))
         .route("/api/claude-projects", get(claude_projects))
-        .route("/api/import", post(import))
         .route("/api/past-sessions", get(past_sessions))
-        .route("/api/notes", post(notes))
         .route("/api/open-url", post(open_url))
         .route("/api/check-update", post(check_update))
         .route("/api/setup/status", get(setup_status))
@@ -96,7 +94,6 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/efficiency", get(|State(a): State<Shared>| async move { Json(a.efficiency_json(&a.workspace(), 7.0)) }))
         .route("/api/timing", get(|State(a): State<Shared>| async move { Json(a.timing_json(&a.workspace(), 30.0)) }))
         .route("/api/tuning", post(tuning))
-        .route("/api/lessons", post(lessons))
         .route("/api/show", post(|| async { Json(json!({"shown": crate::show_main()})) }))
         .route("/api/plan-usage/refresh", post(refresh_plan_usage))
         .route("/api/inbox", post(inbox_drop))
@@ -123,7 +120,6 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/search", get(search))
         .route("/api/stop", post(stop))
         .route("/api/workspace", post(workspace))
-        .route("/api/workspace/close", post(close_workspace))
         .route("/api/pick-folder", post(pick_folder))
         .route("/api/settings", get(|State(a): State<Shared>| async move { Json(a.settings_json()) }).post(save_settings))
         .route("/api/auth-check", post(|State(a): State<Shared>| async move { Json(a.auth_check().await) }))
@@ -156,6 +152,12 @@ async fn pump(app: Shared, mut socket: WebSocket) {
 }
 
 async fn mcp(State(app): State<Shared>, Path(key): Path<String>, headers: axum::http::HeaderMap, Json(body): Json<Value>) -> Response {
+    // The shared token isn't enough: every agent holds it. Only the session's own secret
+    // (in its MCP config) lets a caller use that session's tools.
+    let secret = headers.get(crate::app::MCP_SECRET_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !app.mcp_secret_ok(&key, secret) {
+        return (StatusCode::FORBIDDEN, "bad session secret").into_response();
+    }
     let streams = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()).is_some_and(|a| a.contains("text/event-stream"));
     let token = body.pointer("/params/_meta/progressToken").cloned();
     if body.get("method").and_then(Value::as_str) == Some("tools/call") && streams && token.is_some() {
@@ -194,11 +196,6 @@ async fn handoff(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
 
 async fn workspace(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     let ws = app.set_workspace(s(&b, "path").unwrap_or(""), b.get("create").and_then(Value::as_bool).unwrap_or(false))?;
-    Ok(Json(json!({"workspace": ws})))
-}
-
-async fn close_workspace(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let ws = app.close_workspace(s(&b, "path").unwrap_or(""))?;
     Ok(Json(json!({"workspace": ws})))
 }
 
@@ -406,13 +403,6 @@ async fn claude_projects(State(app): State<Shared>) -> ApiResult {
 }
 
 /// Switch to a Claude Code project and start the orchestrator's setup run.
-async fn import(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let path = s(&b, "path").unwrap_or("").to_string();
-    let a = app.clone();
-    let ws = tokio::task::spawn_blocking(move || a.import_project(&path)).await.map_err(|e| ApiError(e.to_string()))??;
-    Ok(Json(json!({"workspace": ws})))
-}
-
 async fn past_sessions(State(app): State<Shared>) -> ApiResult {
     let a = app.clone();
     let ws = app.workspace();
@@ -420,22 +410,8 @@ async fn past_sessions(State(app): State<Shared>) -> ApiResult {
     Ok(Json(json!({"sessions": list.iter().map(|s| s.to_json()).collect::<Vec<_>>()})))
 }
 
-async fn notes(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    app.save_notes(&app.workspace(), s(&b, "brief"), s(&b, "rules"));
-    Ok(Json(json!({"ok": true})))
-}
-
 async fn refresh_plan_usage(State(app): State<Shared>) -> ApiResult {
     Ok(Json(json!({"plan_usage": app.refresh_plan_usage().await?})))
-}
-
-async fn lessons(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let ws = app.workspace();
-    app.save_lessons("", None, crate::app::Lessons {
-        general: s(&b, "lessons"), dev: s(&b, "dev_lessons"), business: s(&b, "business_lessons"),
-        project: s(&b, "project_lessons").map(|l| (ws.as_str(), l)),
-    }).map_err(ApiError)?;
-    Ok(Json(json!({"ok": true})))
 }
 
 /// The Inbox drop zone (text or one file as base64). Clipboard capture isn't here: it only
@@ -668,3 +644,62 @@ fn mcp_streamed(app: Shared, key: String, body: Value, token: Value) -> Response
     Sse::new(stream).into_response()
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Paths;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve(name: &str) -> (Arc<App>, u16, String) {
+        let root = std::env::temp_dir().join(format!("orch-web-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("dev");
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws = ws.to_string_lossy().to_string();
+        std::fs::write(root.join("state.json"), json!({"workspace": ws, "open_workspaces": [ws]}).to_string()).unwrap();
+        let app = App::new(Paths { config_dir: root.clone(), data_dir: root.clone() }, "t".repeat(40));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        app.port.store(port, Ordering::Relaxed);
+        let r = router(app.clone(), false);
+        tokio::spawn(async move { axum::serve(listener, r).await.unwrap() });
+        (app, port, crate::app::orch_key(&ws))
+    }
+
+    async fn post(port: u16, path: &str, extra: &str, body: &str) -> (u16, String) {
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Orch-Token: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "t".repeat(40), body.len()
+        );
+        s.write_all(req.as_bytes()).await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        let code = out.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        (code, out)
+    }
+
+    /// The shared token is not enough for /mcp/{key}: only that session's own secret works.
+    #[tokio::test]
+    async fn mcp_needs_the_sessions_own_secret() {
+        let (app, port, key) = serve("secret").await;
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let path = format!("/mcp/{key}");
+        let h = crate::app::MCP_SECRET_HEADER;
+        // Nothing issued yet: refused even with the token.
+        assert_eq!(post(port, &path, "", body).await.0, 403);
+        let good = app.mcp_secret(&key);
+        let other = app.mcp_secret("worker-b");
+        assert_ne!(good, other);
+        assert_eq!(post(port, &path, "", body).await.0, 403, "missing secret");
+        assert_eq!(post(port, &path, &format!("{h}: {}\r\n", "x".repeat(40)), body).await.0, 403, "wrong secret");
+        assert_eq!(post(port, &path, &format!("{h}: {other}\r\n"), body).await.0, 403, "another session's secret");
+        let (code, out) = post(port, &path, &format!("{h}: {good}\r\n"), body).await;
+        assert_eq!(code, 200, "{out}");
+        assert!(out.contains("update_plan"), "{out}");
+        // The config a turn gets carries it.
+        let cfg: Value = serde_json::from_str(&app.mcp_config_for_test(&key)).unwrap();
+        assert_eq!(cfg["mcpServers"]["app"]["headers"][h], good);
+    }
+}
