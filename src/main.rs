@@ -65,6 +65,74 @@ pub fn set_badge(n: usize) {
     }
 }
 
+/// IPC ops that act as the user (see handle_ipc). mcp.rs tests check web.rs never does these.
+const USER_OPS: [&str; 6] = ["send", "edit", "answer", "thread_create", "permission", "settings_user"];
+
+fn user_op(app: &Arc<app::App>, msg: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use serde_json::{json, Value};
+    let s = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    match s("op").as_str() {
+        "send" => {
+            let (target, text) = (s("thread"), s("text").trim().to_string());
+            if text.is_empty() {
+                return Err("empty message".into());
+            }
+            let attach: Vec<String> = msg.get("attachments").and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            // Default: straight into a running turn. "queue": true waits for it to finish.
+            let now = !msg.get("queue").and_then(Value::as_bool).unwrap_or(false);
+            let delivery = if target.starts_with(app::ORCHESTRATOR) {
+                app.submit_orchestrator(&target, &text, attach, now)
+            } else {
+                app.send_to_thread(&target, &text, "you", attach, now)?
+            };
+            Ok(json!({"delivery": delivery, "queued": delivery == "queued"}))
+        }
+        "edit" => {
+            let ts = msg.get("ts").and_then(Value::as_f64).ok_or("ts is required")?;
+            let text = s("text").trim().to_string();
+            if text.is_empty() {
+                return Err("empty message".into());
+            }
+            app.edit_message(&s("thread"), ts, &text)?;
+            Ok(json!({}))
+        }
+        "answer" => {
+            app.answer(&s("id"), msg.get("answers").cloned().unwrap_or(json!([])))?;
+            Ok(json!({}))
+        }
+        "thread_create" => {
+            let name = s("name").trim().to_string();
+            let opt = |k: &str| msg.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_string);
+            let row = app.create_thread(&app.workspace(), &name, opt("cwd").as_deref(), opt("backend").as_deref(), opt("model").as_deref(), opt("effort").as_deref())?;
+            if let Some(task) = opt("task").map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+                app.send_to_thread(&name, &task, "you", vec![], false)?;
+            }
+            Ok(serde_json::to_value(row).unwrap_or(Value::Null))
+        }
+        "permission" => {
+            let level = s("level");
+            let thread = s("thread");
+            if msg.get("default").and_then(Value::as_bool) == Some(true) {
+                app.update_settings(&json!({"permission_default": level}))?;
+            }
+            if !thread.is_empty() && !thread.starts_with(app::ORCHESTRATOR) {
+                app.set_thread_permission(&thread, &level)?;
+            } else {
+                app.set_project_permission(&level)?;
+            }
+            Ok(json!({"permission": app.project_permission()}))
+        }
+        // Settings that are gates or secrets (app::USER_ONLY_SETTINGS); the rest go over HTTP.
+        "settings_user" => {
+            let patch = msg.get("patch").cloned().unwrap_or(json!({}));
+            app.update_settings(&patch)?;
+            Ok(app.settings_json())
+        }
+        other => Err(format!("unknown op {other}")),
+    }
+}
+
 /// Messages the desktop window's page sends to the app over the webview's private IPC
 /// channel. Only the user's clicks get here: agents can reach the app's HTTP API (they can
 /// read its token), but not this channel. So approval decisions come only this way.
@@ -72,6 +140,26 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
     let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) else { return };
     let s = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let app = app.clone();
+    // The user's own words and gates (send, edit, answer, new thread with a task, permission
+    // levels, the effort cap and the API key): never over HTTP, where an agent could act as
+    // the user. The page awaits the reply ({"kind": "ipc_reply", "req": ...}).
+    if USER_OPS.contains(&s("op").as_str()) {
+        rt().spawn(async move {
+            let r = user_op(&app, &msg);
+            let req = msg.get("req").cloned().unwrap_or(serde_json::Value::Null);
+            if req.is_null() {
+                if let Err(e) = r {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            } else {
+                app.hub.broadcast(match r {
+                    Ok(v) => serde_json::json!({"kind": "ipc_reply", "req": req, "ok": true, "result": v}),
+                    Err(e) => serde_json::json!({"kind": "ipc_reply", "req": req, "ok": false, "error": e}),
+                });
+            }
+        });
+        return;
+    }
     match s("op").as_str() {
         "queue_decide" => {
             let (id, action, reason) = (s("id"), s("action"), s("reason"));

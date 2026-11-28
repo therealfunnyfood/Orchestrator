@@ -66,6 +66,32 @@ async function api(path, opts = {}) {
   return data;
 }
 
+// The user's own actions (sending, editing, answering, new threads, permission levels, the
+// effort cap, the API key) go over the window's private IPC channel, never HTTP: agents can
+// read the HTTP token. The app replies with {"kind":"ipc_reply","req",...} on the websocket.
+const IPC_WAIT = new Map();
+let ipcSeq = 0;
+function ipcCall(op, body = {}) {
+  return new Promise((resolve, reject) => {
+    if (!window.ipc?.postMessage) return reject(new Error("This only works in the Orchestrator window, not in a browser"));
+    const req = `r${Date.now()}-${++ipcSeq}`;
+    const t = setTimeout(() => { IPC_WAIT.delete(req); reject(new Error("the app didn't answer")); }, 30000);
+    IPC_WAIT.set(req, { resolve, reject, t });
+    window.ipc.postMessage(JSON.stringify({ ...body, op, req }));
+  });
+}
+function ipcReply(ev) {
+  const w = IPC_WAIT.get(ev.req);
+  if (!w) return;
+  IPC_WAIT.delete(ev.req);
+  clearTimeout(w.t);
+  if (ev.ok) w.resolve(ev.result || {}); else w.reject(new Error(ev.error || "failed"));
+}
+const USER_ONLY_SETTINGS = ["max_effort", "permission_default", "api_key", "clear_api_key"];
+function saveSettings(patch) {
+  return Object.keys(patch).some((k) => USER_ONLY_SETTINGS.includes(k)) ? ipcCall("settings_user", { patch }) : api("/api/settings", { body: patch });
+}
+
 function toast(text, err) {
   const t = $("#toast");
   t.textContent = text;
@@ -913,7 +939,7 @@ function renderEventInner(ev, log) {
       go.title = "Pick up where it stopped";
       go.onclick = () => {
         acts.remove();
-        api("/api/send", { body: { thread: ev.thread, text: "Continue where you left off. The app closed in the middle of your last turn, so check what was already done before redoing anything." } }).catch(fail);
+        ipcCall("send", { thread: ev.thread, text: "Continue where you left off. The app closed in the middle of your last turn, so check what was already done before redoing anything." }).catch(fail);
       };
       acts.append(go);
       n.append(acts);
@@ -1081,7 +1107,7 @@ async function drawSetup() {
         if (!body.api_key && !S.state.defaults.api_key_set) { result.className = "result bad"; result.textContent = "Paste your API key first."; return false; }
         result.className = "result"; result.textContent = "Checking the key…";
         try {
-          await api("/api/settings", { body });
+          await saveSettings(body);
           await loadState();
           const r = await api("/api/auth-check", { body: {} });
           const a = r.results.find((x) => x.backend === "api");
@@ -1129,7 +1155,8 @@ async function drawSetup() {
     setupNav(box, {
       next: "Start using Orchestrator",
       onNext: async () => {
-        await api("/api/setup/finish", { body: { mode: SETUP.mode, mix: SETUP.mix, permission: SETUP.perm } }).catch(fail);
+        await api("/api/setup/finish", { body: { mode: SETUP.mode, mix: SETUP.mix } }).catch(fail);
+        if (SETUP.perm) await ipcCall("permission", { level: SETUP.perm, default: true }).catch(fail);
         closeSetup();
         return false;
       },
@@ -2331,7 +2358,7 @@ function startEdit(el) {
 
 async function resend(ts, text) {
   try {
-    await api("/api/edit", { body: { thread: curKey(), ts, text } });
+    await ipcCall("edit", { thread: curKey(), ts, text });
   } catch (e) { fail(e); }
 }
 
@@ -2652,7 +2679,7 @@ async function submitAnswers(card, qs) {
   const answers = collectAnswers(card);
   const missing = answers.findIndex((a) => !a.selected.length && !a.other);
   if (missing !== -1) return toast(`Answer “${qs[missing]?.header || qs[missing]?.question || "each question"}” first`, true);
-  try { await api("/api/answer", { body: { id: card.dataset.id, answers } }); }
+  try { await ipcCall("answer", { id: card.dataset.id, answers }); }
   catch (e) { fail(e); }
 }
 
@@ -2807,6 +2834,7 @@ function connect() {
     const ev = JSON.parse(m.data);
     if (ev.kind === "state") return scheduleState();
     if (ev.kind === "toast") return toast(ev.text);
+    if (ev.kind === "ipc_reply") return ipcReply(ev);
     if (ev.kind === "delta" || ev.kind === "draft_reset") {
       if (ev.thread !== curKey()) return;
       if (ev.kind === "draft_reset") { $("#draft")?.remove(); return; }
@@ -2884,7 +2912,16 @@ function xwsBlock(x, id, onSent) {
   box.append(route, h("pre", "xws-msg", x.message || ""));
   if (x.why) box.append(h("div", "nd-why", "Why: " + x.why));
   const acts = h("div", "nd-acts");
-  const go = (msg) => { if (sendIpc({ op: "xws", id, ...msg })) { $$("button", box).forEach((b) => { b.disabled = true; }); onSent?.(); } };
+  const go = (msg) => {
+    if (!sendIpc({ op: "xws", id, ...msg })) return;
+    $$("button", box).forEach((b) => { b.disabled = true; });
+    // A focused note with text holds the Needs pane still (so typing isn't wiped): clear it,
+    // say what happened, and redraw as soon as the new state is in.
+    note.value = ""; note.blur(); denyRow.classList.add("hidden");
+    acts.replaceChildren(h("span", "sub", msg.action === "deny" ? "Denied: nothing was sent." : msg.action === "allow_always" ? "Allowed, and always from now on. Sending…" : "Allowed once. Sending…"));
+    onSent?.();
+    setTimeout(() => loadState().then(() => renderNeedsPane(true)).catch(() => {}), 150);
+  };
   const once = h("button", "btn primary", "Allow once");
   once.onclick = () => go({ action: "allow_once" });
   const always = h("button", "btn", `Always allow ${x.from_name} → ${x.to_name}`);
@@ -3216,7 +3253,7 @@ async function pickPermission(key = curKey()) {
   const it = await quickPick(items, thread ? `Permission level for ${thread.name}` : "Permission level for this project (every thread without its own)");
   if (!it) return;
   try {
-    await api("/api/permission", { body: { thread: thread ? thread.name : "", level: it.value } });
+    await ipcCall("permission", { thread: thread ? thread.name : "", level: it.value });
     await loadState();
     toast(`${thread ? thread.name : "project"}: ${it.value ? permLabel(it.value) : "project default"} (from the next turn)`);
   } catch (e) { fail(e); }
@@ -3306,7 +3343,7 @@ const COMMANDS = [
     const p = PERMS.find((x) => x[0].toLowerCase() === a.toLowerCase() || x[1].toLowerCase().startsWith(a.toLowerCase()));
     if (!p) throw new Error("levels: " + PERMS.map((x) => x[0]).join(", "));
     const k = curKey();
-    return api("/api/permission", { body: { thread: k && !isOrch(k) ? k : "", level: p[0] } }).then(loadState).then(() => toast(`permission: ${p[1]}`));
+    return ipcCall("permission", { thread: k && !isOrch(k) ? k : "", level: p[0] }).then(loadState).then(() => toast(`permission: ${p[1]}`));
   } },
   { cmd: "/usage", args: "", desc: "Show your plan's usage limits", cat: "Config", run: () => usagePopover($("#composer")) },
   { cmd: "/mix", args: "<0-10>", desc: "Plan/API mix for the whole project (0 = all plan, 10 = all API)", cat: "Config", complete: "mix", run: (a) => {
@@ -3354,7 +3391,7 @@ async function sendTo(args) {
   const m = (args || "").match(/^(\S+)\s+([\s\S]+)$/);
   if (!m) throw new Error("usage: /to <thread> <message>");
   const target = m[1] === "orchestrator" ? orchKey() : m[1];
-  await api("/api/send", { body: { thread: target, text: m[2] } });
+  await ipcCall("send", { thread: target, text: m[2] });
   toast(`sent to ${m[1]}`);
 }
 
@@ -3485,7 +3522,7 @@ async function submit(queue = false) {
   try {
     if (text.startsWith("/")) await runCommand(text);
     else {
-      const r = await api("/api/send", { body: { thread: curKey(), text, attachments, queue } });
+      const r = await ipcCall("send", { thread: curKey(), text, attachments, queue });
       if (r.queued) toast("queued — runs after the current turn");
       else if (r.delivery === "injected") toast("sent — it'll read this at its next step");
       S.attachments = [];
@@ -3503,7 +3540,7 @@ async function submit(queue = false) {
 async function newThread(args) {
   const m = (args || "").match(/^(\S+)\s*([\s\S]*)$/);
   if (m) {
-    await api("/api/threads", { body: { name: m[1], task: m[2] } });
+    await ipcCall("thread_create", { name: m[1], task: m[2] });
     await loadState();
     return openChat(m[1]);
   }
@@ -3523,7 +3560,7 @@ async function createFromDialog() {
   };
   if (effort !== "__default") body.effort = effort;
   try {
-    await api("/api/threads", { body });
+    await ipcCall("thread_create", body);
     closeDialog();
     await loadState();
     openChat(body.name);
@@ -3591,7 +3628,7 @@ async function renderManage() {
       for (const [v, l] of opts) { const o = h("option", null, l); o.value = v; s.append(o); }
       s.value = value;
       s.onchange = () => (field === "permission"
-        ? api("/api/permission", { body: { thread: r.name, level: s.value } }).then(loadState)
+        ? ipcCall("permission", { thread: r.name, level: s.value }).then(loadState)
         : configure(r.name, { [field]: s.value })).then(() => toast(`${r.name}: ${field} ${s.value || "default"}`)).catch(fail);
       td.append(s);
       return td;
@@ -3707,7 +3744,7 @@ async function renderSettings() {
     d.append(t, ds, control);
     page.append(d);
   };
-  const save = (patch, msg) => api("/api/settings", { body: patch }).then(() => { toast(msg || "saved"); loadState(); }).catch(fail);
+  const save = (patch, msg) => saveSettings(patch).then(() => { toast(msg || "saved"); loadState(); }).catch(fail);
   const select = (field, opts, value) => {
     const el = h("select");
     for (const [v, l] of opts) { const o = h("option", null, l); o.value = v; el.append(o); }
@@ -4008,7 +4045,7 @@ async function renderSettings() {
     const el = h("select");
     for (const [v, l, d] of PERMS) { const o = h("option", null, `${l}: ${d}`); o.value = v; el.append(o); }
     el.value = S.state.permission;
-    el.onchange = () => api("/api/permission", { body: { level: el.value } }).then(() => { toast("saved"); loadState(); }).catch(fail);
+    el.onchange = () => ipcCall("permission", { level: el.value }).then(() => { toast("saved"); loadState(); }).catch(fail);
     setting("Permissions", "This project", "How much threads may do without asking you. Approvals appear as cards in the chat. Each thread can override it (Threads tab). Your Claude Code allow and deny rules still apply.", el);
   }
   setting("Permissions", "Default for new projects", "", select("permission_default", PERMS.map(([v, l]) => [v, l]), s.permission_default || "bypassPermissions"));

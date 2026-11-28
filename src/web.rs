@@ -78,19 +78,16 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/ws", get(ws))
         .route("/mcp/{key}", post(mcp).get(|| async { StatusCode::METHOD_NOT_ALLOWED }).delete(|| async { StatusCode::METHOD_NOT_ALLOWED }))
         .route("/file", get(file))
-        .route("/api/answer", post(answer))
         .route("/api/upload", post(upload))
         .route("/api/open", post(open_path))
         .route("/api/doc", post(read_doc))
         .route("/api/handoff", post(handoff))
         .route("/api/popout", post(popout))
-        .route("/api/edit", post(edit))
         .route("/api/claude-projects", get(claude_projects))
         .route("/api/import", post(import))
         .route("/api/past-sessions", get(past_sessions))
         .route("/api/notes", post(notes))
         .route("/api/mix", post(set_mix))
-        .route("/api/permission", post(set_permission))
         .route("/api/open-url", post(open_url))
         .route("/api/check-update", post(check_update))
         .route("/api/update/install", post(install_update))
@@ -127,9 +124,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/all-threads", get(|State(a): State<Shared>| async move { Json(a.all_threads_json()) }))
         .route("/api/events/{key}", get(events))
         .route("/api/search", get(search))
-        .route("/api/send", post(send))
         .route("/api/stop", post(stop))
-        .route("/api/threads", post(create_thread))
         .route("/api/threads/{name}", patch(patch_thread).delete(delete_thread))
         .route("/api/orchestrator", post(patch_orchestrator))
         .route("/api/workspace", post(workspace))
@@ -191,38 +186,8 @@ async fn search(State(app): State<Shared>, Query(q): Query<HashMap<String, Strin
     Json(out.unwrap_or_else(|_| json!({"hits": [], "truncated": false})))
 }
 
-async fn send(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let target = s(&b, "thread").unwrap_or("");
-    let text = s(&b, "text").unwrap_or("").trim();
-    if text.is_empty() {
-        return Err(ApiError("empty message".into()));
-    }
-    let attach: Vec<String> = b
-        .get("attachments")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
-    // Default: straight into a running turn. "queue": true waits for it to finish.
-    let now = !b.get("queue").and_then(Value::as_bool).unwrap_or(false);
-    let delivery = if target.starts_with(ORCHESTRATOR) {
-        app.submit_orchestrator(target, text, attach, now)
-    } else {
-        app.send_to_thread(target, text, "you", attach, now)?
-    };
-    Ok(Json(json!({"ok": true, "delivery": delivery, "queued": delivery == "queued"})))
-}
-
 async fn stop(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     Ok(Json(json!({"stopped": app.stop(s(&b, "thread").unwrap_or(""))})))
-}
-
-async fn create_thread(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let name = s(&b, "name").unwrap_or("").trim().to_string();
-    let row = app.create_thread(&app.workspace(), &name, s(&b, "cwd"), s(&b, "backend"), s(&b, "model"), s(&b, "effort"))?;
-    if let Some(task) = s(&b, "task").map(str::trim).filter(|t| !t.is_empty()) {
-        app.send_to_thread(&name, task, "you", vec![], false)?;
-    }
-    Ok(Json(serde_json::to_value(row).unwrap()))
 }
 
 async fn patch_thread(State(app): State<Shared>, Path(name): Path<String>, Json(b): Json<Value>) -> ApiResult {
@@ -279,15 +244,15 @@ async fn pick_folder(Json(b): Json<Value>) -> ApiResult {
 }
 
 async fn save_settings(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
+    // Gates and secrets (the effort cap, permission default, API key) change only from the
+    // window (IPC op settings_user): agents can reach this route.
+    if let Some(k) = crate::app::USER_ONLY_SETTINGS.iter().find(|k| b.get(**k).is_some()) {
+        return Err(ApiError(format!("{k} can only be changed in the app's window")));
+    }
     app.update_settings(&b)?;
     Ok(Json(app.settings_json()))
 }
 
-
-async fn answer(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    app.answer(s(&b, "id").unwrap_or(""), b.get("answers").cloned().unwrap_or(json!([])))?;
-    Ok(Json(json!({"ok": true})))
-}
 
 /// Save a pasted or dropped file so it can be attached to a message.
 async fn upload(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
@@ -453,18 +418,6 @@ async fn popout(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     }
     let title = if key.starts_with(ORCHESTRATOR) { "orchestrator".to_string() } else { key.clone() };
     Ok(Json(json!({"native": crate::pop_out(&key, &title)})))
-}
-
-/// Edit or retry an earlier message (branches the conversation before it).
-async fn edit(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let key = s(&b, "thread").unwrap_or("");
-    let ts = b.get("ts").and_then(Value::as_f64).ok_or(ApiError("ts is required".into()))?;
-    let text = s(&b, "text").unwrap_or("").trim();
-    if text.is_empty() {
-        return Err(ApiError("empty message".into()));
-    }
-    app.edit_message(key, ts, text)?;
-    Ok(Json(json!({"ok": true})))
 }
 
 /// Manage queued messages: remove one, run one now, or clear them all.
@@ -699,10 +652,7 @@ async fn setup_finish(State(app): State<Shared>, Json(b): Json<Value>) -> ApiRes
     };
     app.update_settings(&json!({"setup_done": true, "api_mix": mix}))?;
     app.set_mix(mix as u8);
-    if let Some(level) = s(&b, "permission").filter(|l| !l.is_empty()) {
-        app.update_settings(&json!({"permission_default": level}))?;
-        app.set_project_permission(level)?;
-    }
+    // The permission level is set by the window over IPC (op permission), not here.
     Ok(Json(json!({"ok": true})))
 }
 
@@ -730,16 +680,6 @@ async fn check_update(State(app): State<Shared>) -> ApiResult {
     *app.update.lock().unwrap() = found.clone();
     app.touch();
     Ok(Json(json!({"update": found, "version": crate::updates::VERSION})))
-}
-
-/// Set the project's permission level, or a thread's override ({thread, level}; level "" = project's).
-async fn set_permission(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let level = s(&b, "level").unwrap_or("");
-    match s(&b, "thread").filter(|t| !t.is_empty() && !t.starts_with(ORCHESTRATOR)) {
-        Some(t) => app.set_thread_permission(t, level)?,
-        None => app.set_project_permission(level)?,
-    }
-    Ok(Json(json!({"ok": true, "permission": app.project_permission()})))
 }
 
 /// A tool call answered as a server-sent event stream: progress pings every 20s

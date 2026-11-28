@@ -1071,8 +1071,31 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide", "line_user", "need_user", "need_answer", "set_busy", "set_digests", "digest_now", "xws_user", "xws_decide", "xws_rule_add", "xws_rule_revoke"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide", "line_user", "need_user", "need_answer", "set_busy", "set_digests", "digest_now", "xws_user", "xws_decide", "xws_rule_add", "xws_rule_revoke", "submit_orchestrator", "send_to_thread", "edit_message", "app.answer(", "set_project_permission", "set_thread_permission", "create_thread"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
+        }
+    }
+
+    /// Agents hold the HTTP token, so no HTTP route may speak as the user: sending, editing or
+    /// retrying their messages, answering questions or permission prompts, starting a thread
+    /// with a task, permission levels, the effort cap or the API key. Those are IPC only.
+    #[test]
+    fn http_api_has_no_route_that_acts_as_the_user() {
+        let web = include_str!("web.rs");
+        // Only resolving a thread is recorded as "you" (it sends nothing).
+        for l in web.lines().filter(|l| l.contains("\"you\"")) {
+            assert!(l.contains("set_resolved"), "web.rs must not send anything as \"you\": {l}");
+        }
+        for r in ["\"/api/send\"", "\"/api/answer\"", "\"/api/edit\"", "\"/api/permission\"", "\"/api/threads\", post"] {
+            assert!(!web.contains(r), "web.rs must not have the route {r}");
+        }
+        assert!(web.contains("USER_ONLY_SETTINGS"), "/api/settings must refuse the gate and secret settings");
+        for k in ["max_effort", "permission_default", "api_key", "clear_api_key"] {
+            assert!(crate::app::USER_ONLY_SETTINGS.contains(&k), "{k} must be window-only");
+        }
+        let main = include_str!("main.rs");
+        for op in ["\"send\"", "\"edit\"", "\"answer\"", "\"thread_create\"", "\"permission\"", "\"settings_user\""] {
+            assert!(main.contains(op), "handle_ipc must handle {op}");
         }
     }
 }
