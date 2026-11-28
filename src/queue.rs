@@ -210,16 +210,86 @@ fn set_readonly(p: &Path, ro: bool) {
     }
 }
 
-/// Append one line to the workspace's audit log (queue/audit.log). Append-only: the
-/// app never rewrites it.
-pub fn audit(workspace: &str, line: &str) {
+/// What `list_approved` may return: nothing at all while outbound is paused.
+pub fn listable<'a>(items: impl Iterator<Item = &'a QueueItem>, outbound_paused: bool) -> Vec<&'a QueueItem> {
+    if outbound_paused {
+        return vec![];
+    }
+    still_approved(items).0
+}
+
+/// The chain hash that ends an audit line: it covers the previous line's hash, so an
+/// edited or deleted line breaks the chain.
+fn chain_hash(prev: &str, body: &str) -> String {
+    let h = Sha256::digest(format!("{prev}\n{body}").as_bytes());
+    format!("{:x}", h)[..16].to_string()
+}
+
+/// The chain hash at the end of the file's last line ("" for an empty or missing log).
+pub fn audit_file_tip(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    text.lines().rev().find(|l| !l.trim().is_empty()).and_then(|l| l.rsplit_once("  #")).map(|(_, h)| h.trim().to_string()).unwrap_or_default()
+}
+
+/// Lines whose chain hash doesn't match: an edited, inserted or deleted line shows up here.
+pub fn audit_broken_lines(path: &Path) -> Vec<usize> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut prev = String::new();
+    let mut bad = vec![];
+    for (n, l) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+        match l.rsplit_once("  #") {
+            Some((body, h)) if chain_hash(&prev, body) == h.trim() => prev = h.trim().to_string(),
+            Some((_, h)) => {
+                bad.push(n + 1);
+                prev = h.trim().to_string();
+            }
+            None => bad.push(n + 1),
+        }
+    }
+    bad
+}
+
+/// Append a line to the workspace's audit log (queue/audit.log), chained to the previous
+/// one. `tip` is the chain hash the app last wrote; if the file ends differently, it was
+/// changed outside the app, and that is logged first. Returns the new tip. The file is
+/// kept read-only between writes; the app never rewrites it.
+pub fn audit_append(workspace: &str, tip: &str, line: &str) -> String {
     use std::io::Write;
     let dir = Path::new(workspace).join("queue");
     let _ = std::fs::create_dir_all(&dir);
-    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("audit.log")) {
-        let _ = writeln!(f, "{stamp}  {}", line.replace('\n', " "));
+    let path = dir.join("audit.log");
+    let found = audit_file_tip(&path);
+    let mut lines = vec![];
+    // Broken links after the last TAMPER line are new (earlier ones were already reported).
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let last_report = text.lines().enumerate().filter(|(_, l)| l.contains("  TAMPER: ") || l.contains("  LEGACY: ")).map(|(n, _)| n + 1).last().unwrap_or(0);
+    let new_breaks: Vec<usize> = audit_broken_lines(&path).into_iter().filter(|&n| n > last_report).collect();
+    let chained_before = text.lines().any(|l| l.rsplit_once("  #").is_some_and(|(_, h)| h.len() == 16));
+    if tip.is_empty() && !chained_before && !text.trim().is_empty() {
+        // A log from before 0.5.1, which didn't chain its lines: start the chain here.
+        lines.push(format!("LEGACY: the {} line(s) above were written before this log was hash-chained", text.lines().filter(|l| !l.trim().is_empty()).count()));
+    } else if found != tip || !new_breaks.is_empty() {
+        lines.push(format!(
+            "TAMPER: audit.log was changed outside the app (the app last wrote #{}, the file ends with #{}{})",
+            if tip.is_empty() { "-" } else { tip },
+            if found.is_empty() { "-" } else { &found },
+            if new_breaks.is_empty() { String::new() } else { format!("; altered lines: {:?}", new_breaks) }
+        ));
     }
+    lines.push(line.replace(['\n', '\r'], " "));
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    set_readonly(&path, false);
+    let mut prev = if chained_before { found } else { String::new() };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        for l in lines {
+            let body = format!("{stamp}  {l}");
+            let h = chain_hash(&prev, &body);
+            let _ = writeln!(f, "{body}  #{h}");
+            prev = h;
+        }
+    }
+    set_readonly(&path, true);
+    prev
 }
 
 #[cfg(test)]
@@ -325,6 +395,51 @@ mod tests {
         let mut i = item(&d);
         decide(&mut i, Decision::Reject("no".into()), "", 1.0).unwrap();
         assert!(decide(&mut i, Decision::Approve, "", 2.0).is_err());
+    }
+
+    #[test]
+    fn kill_switch_blocks_list_approved() {
+        let d = tmp("killswitch");
+        let mut i = item(&d);
+        decide(&mut i, Decision::Approve, "", 1.0).unwrap();
+        let items = vec![i];
+        assert_eq!(listable(items.iter(), false).len(), 1);
+        assert!(listable(items.iter(), true).is_empty(), "nothing may be listed while outbound is paused");
+    }
+
+    #[test]
+    fn audit_log_is_chained_and_detects_edits() {
+        let d = tmp("audit");
+        let ws = d.to_string_lossy().to_string();
+        let path = d.join("queue/audit.log");
+        let mut tip = audit_append(&ws, "", "QUEUED q1");
+        tip = audit_append(&ws, &tip, "APPROVED q1 by=user");
+        assert!(audit_broken_lines(&path).is_empty());
+        assert!(std::fs::metadata(&path).unwrap().permissions().readonly(), "kept read-only between writes");
+        // Someone rewrites history outside the app.
+        set_readonly(&path, false);
+        let text = std::fs::read_to_string(&path).unwrap().replace("APPROVED q1 by=user", "REJECTED q1 by=user");
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(audit_broken_lines(&path), vec![2]);
+        // The next append notices the file no longer ends where the app left it.
+        let _ = audit_append(&ws, &tip, "EXECUTED q2");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("TAMPER: audit.log was changed outside the app"));
+    }
+
+    #[test]
+    fn unchained_log_from_before_is_marked_legacy_not_tampered() {
+        let d = tmp("legacy");
+        let ws = d.to_string_lossy().to_string();
+        std::fs::create_dir_all(d.join("queue")).unwrap();
+        std::fs::write(d.join("queue/audit.log"), "2026-11-28 10:50:45  QUEUED q1\n2026-11-28 10:53:22  APPROVED q1 by=user\n").unwrap();
+        let tip = audit_append(&ws, "", "QUEUED q2");
+        let text = std::fs::read_to_string(d.join("queue/audit.log")).unwrap();
+        assert!(text.contains("LEGACY: the 2 line(s) above"));
+        assert!(!text.contains("TAMPER"));
+        // From here on the chain holds.
+        let _ = audit_append(&ws, &tip, "APPROVED q2 by=user");
+        assert!(!std::fs::read_to_string(d.join("queue/audit.log")).unwrap().contains("TAMPER"));
     }
 
     #[test]

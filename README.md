@@ -121,6 +121,15 @@ workspaces are unaffected.
   `<workspace>/queue/pending|approved|rejected|done|void/`. Editing or moving those files
   changes nothing. Every queue event is appended to `<workspace>/queue/audit.log`.
 - The sidebar and the tray icon show how many items are waiting for you.
+- **Kill switch.** **⏸ Pause outbound** (status bar or Queue tab) stops agents from getting
+  any approved item until you resume. The tray menu has the same switch for every business
+  workspace at once. **Pause workspace** stops every running turn in it and holds thread
+  news and automatic turns until you resume. Your own messages still go through. Only you
+  can flip these, from the app window.
+- **Audit log.** `<workspace>/queue/audit.log` records every item queued, approved,
+  rejected, executed or voided, and every pause and resume. Each line ends with a hash
+  that chains it to the line before. The file is read-only, and if anything edits it
+  outside the app, the next entry records a `TAMPER:` line.
 
 ### Permission levels
 

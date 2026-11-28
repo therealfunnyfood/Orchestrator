@@ -120,6 +120,10 @@ pub struct Store {
     pub lessons_split: bool,
     /// Approval queue items of business workspaces (all workspaces; see queue.rs).
     pub queue: Vec<crate::queue::QueueItem>,
+    /// Kill switch for every business workspace at once (tray menu).
+    pub outbound_paused_all: bool,
+    /// App-side copy of the business audit logs: (time, workspace, line), newest last.
+    pub audit: Vec<(f64, String, String)>,
     /// User messages to the orchestrator since it last reviewed its lessons.
     pub since_lessons: u32,
     #[serde(skip)]
@@ -207,6 +211,12 @@ pub struct ProjectNotes {
     /// "business" turns on the business features (approval queue, ...); anything else
     /// (the default) is a development workspace and behaves as before.
     pub kind: String,
+    /// Business kill switch: approved items aren't handed out while this is on.
+    pub outbound_paused: bool,
+    /// Business: the workspace is paused (no agent-started turns, schedules or threads).
+    pub paused: bool,
+    /// Hash at the end of the last line the app wrote to queue/audit.log.
+    pub audit_tip: String,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.1 (2026-11-28)
+
+- **Kill switch (business workspaces).** **⏸ Pause outbound**, in the status bar or the
+  Queue tab, stops agents from getting any approved item to execute until you resume. They
+  get a clear "paused, don't work around this" message instead. The tray menu has **Pause
+  outbound (all business workspaces)**.
+- **Pause workspace** stops every running turn in a business workspace right away. Agents
+  can't start or message threads, and thread news and automatic turns (such as continuing
+  after a usage limit) wait until you resume. Your own messages still go through.
+- Only you can flip these switches, from the app window.
+- **Tamper-evident audit log.** `queue/audit.log` now also records pauses and resumes, and
+  each line ends with a hash chained to the line before. The file is kept read-only. If
+  it's edited outside the app, the next entry records a `TAMPER:` line naming the altered
+  lines. A log written by 0.5.0 is marked `LEGACY` once, and chaining starts from there.
+
 ## 0.5.0 (2026-11-28)
 
 - **Business workspaces.** A new setting, Settings → Workspace type, can switch a workspace

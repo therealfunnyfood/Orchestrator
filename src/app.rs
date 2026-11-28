@@ -370,6 +370,8 @@ impl App {
                 "brief": n.brief, "rules": n.rules, "tuning": n.tuning, "imported_at": n.imported_at, "updated_at": n.updated_at,
                 "lessons": st.lessons, "lessons_updated_at": st.lessons_updated_at, "project_lessons": n.lessons,
                 "kind": if n.kind == "business" { "business" } else { "development" },
+                "outbound_paused": n.outbound_paused || st.outbound_paused_all, "outbound_paused_all": st.outbound_paused_all,
+                "paused": n.kind == "business" && n.paused,
             })
         };
         let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
@@ -609,9 +611,15 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
             let (app, key) = (self.clone(), key.to_string());
             tokio::spawn(async move {
                 loop {
+                    // A paused business workspace runs only the user's own messages; the rest
+                    // (thread news, resumes, automatic turns) waits until it's resumed.
+                    let paused = app.is_paused(&app.ws_of(&key));
                     let next = {
                         let mut queues = app.queues.lock().unwrap();
-                        let next = queues.get_mut(&key).and_then(VecDeque::pop_front);
+                        let next = queues.get_mut(&key).and_then(|q| {
+                            let pos = if paused { q.iter().position(|m| m.sender == "you") } else if q.is_empty() { None } else { Some(0) };
+                            pos.and_then(|p| q.remove(p))
+                        });
                         if next.is_none() {
                             app.workers.lock().unwrap().remove(&key);
                         }
@@ -639,6 +647,17 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
         }
         self.touch();
         (id, waited)
+    }
+
+    /// Start the worker for messages that were held (e.g. while the workspace was paused).
+    fn kick(self: &Arc<Self>, key: &str) {
+        if self.workers.lock().unwrap().contains(key) {
+            return;
+        }
+        let first = self.queues.lock().unwrap().get_mut(key).and_then(VecDeque::pop_front);
+        if let Some(msg) = first {
+            self.enqueue(key, msg, true);
+        }
     }
 
     pub fn remove_queued(&self, key: &str, id: &str) -> bool {
@@ -2490,6 +2509,93 @@ read-only copies the app writes: editing or moving them changes nothing.
 ";
 
 impl App {
+    /// Append to a business workspace's audit log (queue/audit.log, hash-chained) and the
+    /// app's own copy. Nothing turns this off. Don't call it with the store locked.
+    pub fn audit(&self, ws: &str, line: &str) {
+        let mut st = self.store.lock().unwrap();
+        let tip = st.notes(ws).map(|n| n.audit_tip.clone()).unwrap_or_default();
+        let new_tip = crate::queue::audit_append(ws, &tip, line);
+        st.notes_mut(ws).audit_tip = new_tip;
+        st.audit.push((now(), ws.to_string(), line.to_string()));
+        let over = st.audit.len().saturating_sub(5000);
+        st.audit.drain(..over);
+        st.save();
+    }
+
+    pub fn is_paused(&self, ws: &str) -> bool {
+        self.store.lock().unwrap().notes(ws).is_some_and(|n| n.kind == "business" && n.paused)
+    }
+
+    /// Kill switch for the shown workspace (from the window only).
+    pub fn set_outbound_paused(self: &Arc<Self>, paused: bool) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("only business workspaces have a kill switch".into());
+        }
+        {
+            let mut st = self.store.lock().unwrap();
+            st.notes_mut(&ws).outbound_paused = paused;
+            st.save();
+        }
+        self.audit(&ws, if paused { "OUTBOUND PAUSED by=user (kill switch on)" } else { "OUTBOUND RESUMED by=user" });
+        self.post_news(&orch_key(&ws), "@app", if paused {
+            "The user PAUSED OUTBOUND (kill switch). Nothing may be executed, sent or published until they resume it; list_approved returns nothing meanwhile. Internal work may continue."
+        } else {
+            "The user resumed outbound: approved items are available in list_approved again."
+        });
+        self.touch();
+        Ok(())
+    }
+
+    /// Kill switch for every business workspace (tray menu).
+    pub fn set_outbound_paused_all(&self, paused: bool) {
+        let business: Vec<String> = {
+            let mut st = self.store.lock().unwrap();
+            st.outbound_paused_all = paused;
+            st.save();
+            st.projects.iter().filter(|(_, n)| n.kind == "business").map(|(k, _)| k.clone()).collect()
+        };
+        for ws in business {
+            self.audit(&ws, if paused { "OUTBOUND PAUSED (all workspaces) by=user from the tray" } else { "OUTBOUND RESUMED (all workspaces) by=user from the tray" });
+        }
+        self.touch();
+    }
+
+    pub fn outbound_paused_all(&self) -> bool {
+        self.store.lock().unwrap().outbound_paused_all
+    }
+
+    /// Pause or resume the shown business workspace (from the window only). Pausing stops
+    /// every running turn in it; agent-started work waits until it's resumed.
+    pub fn set_workspace_paused(self: &Arc<Self>, paused: bool) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("only business workspaces can be paused".into());
+        }
+        {
+            let mut st = self.store.lock().unwrap();
+            st.notes_mut(&ws).paused = paused;
+            st.save();
+        }
+        self.audit(&ws, if paused { "WORKSPACE PAUSED by=user (all turns stopped)" } else { "WORKSPACE RESUMED by=user" });
+        let mut keys = self.thread_names_here(&ws);
+        keys.push(orch_key(&ws));
+        if paused {
+            for k in &keys {
+                self.resumes.lock().unwrap().remove(k);
+                self.stop(k);
+            }
+        } else {
+            // Messages that arrived while paused were kept; run them now.
+            for k in &keys {
+                self.kick(k);
+            }
+            self.post_news(&orch_key(&ws), "@app", "The user resumed this workspace after a pause. Check where things stood and carry on.");
+        }
+        self.touch();
+        Ok(())
+    }
+
     /// Business workspaces get the approval queue and the other business features.
     pub fn is_business(&self, ws: &str) -> bool {
         self.store.lock().unwrap().notes(ws).is_some_and(|n| n.kind == "business")
@@ -2565,11 +2671,12 @@ impl App {
             ..Default::default()
         };
         crate::queue::mirror(&item);
-        crate::queue::audit(&ws, &format!("QUEUED {id} {} line={} by={} :: {}", item.kind, item.line, item.created_by, item.summary));
+        let audit_line = format!("QUEUED {id} {} line={} by={} :: {}", item.kind, item.line, item.created_by, item.summary);
         let urgent = item.urgent;
         st.queue.push(item);
         st.save();
         drop(st);
+        self.audit(&ws, &audit_line);
         self.queue_changed();
         if urgent {
             crate::attention();
@@ -2586,19 +2693,27 @@ impl App {
         let mut st = self.store.lock().unwrap();
         // An approved item that changed since is void for good (logged once).
         let changed: Vec<String> = crate::queue::still_approved(st.queue.iter().filter(|i| same_path(&i.workspace, &ws))).1.iter().map(|i| i.id.clone()).collect();
+        let mut audit_lines = vec![];
         if !changed.is_empty() {
             for item in st.queue.iter_mut().filter(|i| changed.contains(&i.id) && same_path(&i.workspace, &ws)) {
                 item.status = "void".into();
                 crate::queue::mirror(item);
-                crate::queue::audit(&ws, &format!("VOID {} (payload or an attachment changed after approval; it won't be executed)", item.id));
+                audit_lines.push(format!("VOID {} (payload or an attachment changed after approval; it won't be executed)", item.id));
             }
             st.save();
         }
-        let (ok, _) = crate::queue::still_approved(st.queue.iter().filter(|i| same_path(&i.workspace, &ws)));
-        if ok.is_empty() {
-            return Ok("no approved items waiting".into());
-        }
-        Ok(ok
+        let paused = st.outbound_paused_all || st.notes(&ws).is_some_and(|n| n.outbound_paused);
+        let waiting = crate::queue::still_approved(st.queue.iter().filter(|i| same_path(&i.workspace, &ws))).0.len();
+        let ok = crate::queue::listable(st.queue.iter().filter(|i| same_path(&i.workspace, &ws)), paused);
+        let out = if paused {
+            format!(
+                "Outbound is PAUSED by the user (kill switch). Nothing may be executed, sent or published until they resume it; don't work around this.{}",
+                if waiting > 0 { format!(" {waiting} approved item(s) are on hold.") } else { String::new() }
+            )
+        } else if ok.is_empty() {
+            "no approved items waiting".to_string()
+        } else {
+            ok
             .iter()
             .map(|i| {
                 format!(
@@ -2614,7 +2729,13 @@ impl App {
                 )
             })
             .collect::<Vec<_>>()
-            .join("\n\n"))
+            .join("\n\n")
+        };
+        drop(st);
+        for l in audit_lines {
+            self.audit(&ws, &l);
+        }
+        Ok(out)
     }
 
     /// complete_item: record what happened when an approved item was executed.
@@ -2624,9 +2745,10 @@ impl App {
         let item = st.queue.iter_mut().find(|i| i.id == id && same_path(&i.workspace, &ws)).ok_or(format!("no queue item {id} in this workspace"))?;
         crate::queue::complete(item, result, now())?;
         crate::queue::mirror(item);
-        crate::queue::audit(&ws, &format!("EXECUTED {id} by={key} :: {}", item.result));
+        let audit_line = format!("EXECUTED {id} by={key} :: {}", item.result);
         st.save();
         drop(st);
+        self.audit(&ws, &audit_line);
         self.queue_changed();
         Ok(format!("{id} marked done"))
     }
@@ -2652,7 +2774,7 @@ impl App {
             _ if item.edited => "APPROVED after editing",
             _ => "APPROVED",
         };
-        crate::queue::audit(&item.workspace, &format!("{what} {} by=user{}", item.id, if item.note.is_empty() { String::new() } else { format!(" :: {}", item.note) }));
+        self.audit(&item.workspace, &format!("{what} {} by=user{}", item.id, if item.note.is_empty() { String::new() } else { format!(" :: {}", item.note) }));
         let ws = item.workspace.clone();
         self.queue_news(&ws, &[item]);
         self.queue_changed();
@@ -2667,11 +2789,13 @@ impl App {
         for item in st.queue.iter_mut().filter(|i| same_path(&i.workspace, &ws) && i.status == "pending" && i.risk == "low") {
             crate::queue::decide(item, crate::queue::Decision::Approve, "", now())?;
             crate::queue::mirror(item);
-            crate::queue::audit(&ws, &format!("APPROVED {} by=user (approve all low-risk)", item.id));
             done.push(item.clone());
         }
         st.save();
         drop(st);
+        for i in &done {
+            self.audit(&ws, &format!("APPROVED {} by=user (approve all low-risk)", i.id));
+        }
         if !done.is_empty() {
             self.queue_news(&ws, &done);
             self.queue_changed();

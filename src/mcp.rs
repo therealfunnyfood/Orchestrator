@@ -427,6 +427,9 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             }));
             Ok(format!("showing {} to the user", path.display()))
         }
+        "spawn_thread" | "send_to_thread" | "resume_past_session" if app.is_paused(&app.ws_of(key)) => {
+            Err("the user has paused this workspace: don't start or message threads until they resume it".into())
+        }
         "spawn_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
             let task = arg(args, "task").ok_or("task is required")?;
@@ -803,7 +806,7 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

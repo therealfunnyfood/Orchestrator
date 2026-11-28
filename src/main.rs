@@ -75,6 +75,22 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
                 }
             });
         }
+        "set_outbound_paused" => {
+            let paused = msg.get("paused").and_then(|v| v.as_bool()).unwrap_or(true);
+            rt().spawn(async move {
+                if let Err(e) = app.set_outbound_paused(paused) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
+        "set_workspace_paused" => {
+            let paused = msg.get("paused").and_then(|v| v.as_bool()).unwrap_or(true);
+            rt().spawn(async move {
+                if let Err(e) = app.set_workspace_paused(paused) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
         "queue_approve_low_risk" => {
             rt().spawn(async move {
                 match app.queue_approve_low_risk() {
@@ -297,11 +313,13 @@ fn run_windows(app: Arc<app::App>, url: String) {
     let main_id = main_window.id();
 
     // Tray icon: the app keeps running when the window is closed.
-    use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
     let menu = Menu::new();
     let open_item = MenuItem::with_id("open", "Open Orchestrator", true, None);
+    // Kill switch for every business workspace: approved items aren't handed out while on.
+    let pause_item = CheckMenuItem::with_id("pause_outbound", "Pause outbound (all business workspaces)", true, app.outbound_paused_all(), None);
     let quit_item = MenuItem::with_id("quit", "Quit Orchestrator", true, None);
-    let _ = menu.append_items(&[&open_item, &PredefinedMenuItem::separator(), &quit_item]);
+    let _ = menu.append_items(&[&open_item, &pause_item, &PredefinedMenuItem::separator(), &quit_item]);
     let tray_icon_img = tray_icon::Icon::from_rgba(include_bytes!("../assets/icon64.rgba").to_vec(), 64, 64).ok();
     let mut tray_builder = tray_icon::TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -343,6 +361,10 @@ fn run_windows(app: Arc<app::App>, url: String) {
             Event::UserEvent(UiEvent::Menu(e)) => {
                 if e.id == "open" {
                     show(&main_window);
+                } else if e.id == "pause_outbound" {
+                    let on = pause_item.is_checked();
+                    let a = app.clone();
+                    rt().spawn(async move { a.set_outbound_paused_all(on) });
                 } else if e.id == "quit" {
                     quit = true;
                 }

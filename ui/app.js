@@ -1258,6 +1258,28 @@ function renderQueuePane() {
     return;
   }
   page.append(h("div", "sub", `${S.state.workspace} · nothing leaves this computer until you approve it here`));
+  const pj = S.state.project || {};
+  {
+    const ctl = h("div", "row qbar");
+    if (pj.outbound_paused) page.append(h("div", "qbanner", pj.outbound_paused_all
+      ? "⏸ Outbound is paused for all business workspaces (tray menu). Agents get no approved items until you resume."
+      : "⏸ Outbound is paused. Agents get no approved items until you resume."));
+    if (pj.paused) page.append(h("div", "qbanner", "⏸ This workspace is paused. Nothing runs unless you message it; thread news and automatic turns wait until you resume."));
+    if (!pj.outbound_paused_all) {
+      const ob = h("button", "btn" + (pj.outbound_paused ? " primary" : ""), pj.outbound_paused ? "Resume outbound" : "⏸ Pause outbound");
+      ob.title = "Kill switch: while paused, agents can't get approved items to execute";
+      ob.onclick = () => { if (sendIpc({ op: "set_outbound_paused", paused: !pj.outbound_paused })) ob.disabled = true; };
+      ctl.append(ob);
+    }
+    const wb = h("button", "btn" + (pj.paused ? " primary" : " danger"), pj.paused ? "Resume workspace" : "Pause workspace");
+    wb.title = pj.paused ? "Let this workspace's orchestrator and threads run again" : "Stop every running turn here and hold automatic work until you resume";
+    wb.onclick = () => {
+      if (!pj.paused && !confirm("Pause this workspace? Every running turn here stops now, and thread news and automatic turns wait until you resume.")) return;
+      if (sendIpc({ op: "set_workspace_paused", paused: !pj.paused })) wb.disabled = true;
+    };
+    ctl.append(wb);
+    page.append(ctl);
+  }
   const low = q.pending.filter((i) => i.risk === "low");
   if (low.length > 1) {
     const b = h("button", "btn", `Approve all low-risk (${low.length})`);
@@ -1972,6 +1994,14 @@ function renderStatus() {
     const puItem = item("", "◔ plan usage", null, "Check your plan's usage limits");
     puItem.style.cursor = "pointer";
     puItem.onclick = () => usagePopover(puItem);
+  }
+  const pj = S.state.project || {};
+  if (pj.kind === "business") {
+    if (pj.paused) item("pu-full", "⏸ workspace paused", () => openQueue(), "This workspace is paused: nothing runs unless you send it a message. Resume it in the Queue tab.");
+    if (pj.outbound_paused_all) item("pu-full", "⏸ outbound paused (all)", null, "Outbound is paused for every business workspace from the tray menu. Untick it there to resume.");
+    else item(pj.outbound_paused ? "pu-full" : "", pj.outbound_paused ? "⏸ outbound paused" : "⏸ pause outbound",
+      () => sendIpc({ op: "set_outbound_paused", paused: !pj.outbound_paused }),
+      pj.outbound_paused ? "Kill switch is on: agents get no approved items. Click to resume." : "Kill switch: stop agents from executing or sending anything until you resume");
   }
   item(S.state.permission === "bypassPermissions" ? "perm-open" : "", `🛡 ${esc(permLabel(S.state.permission))}`, () => pickPermission(orchKey()), "Permission level for this project");
   const mixItem = item("", `⚖ <span class="mono">${esc(mixLabel(u.mix))}</span>`, null, "Plan/API mix for this project");
