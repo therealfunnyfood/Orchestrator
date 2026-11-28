@@ -9,6 +9,7 @@
 
 mod app;
 mod budget;
+mod business;
 mod capacity;
 mod claude_projects;
 mod config;
@@ -81,6 +82,14 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
             std::thread::spawn(move || {
                 if let Ok(mut cb) = arboard::Clipboard::new() {
                     let _ = cb.set_text(text);
+                }
+            });
+        }
+        "set_phone_feed" => {
+            let on = msg.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+            rt().spawn(async move {
+                if let Err(e) = app.set_phone_feed(on) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
                 }
             });
         }
@@ -309,6 +318,7 @@ async fn start(desktop: bool, port: u16) -> (Arc<app::App>, String) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             a.schedule_tick();
+            a.business_tick();
         }
     });
     // Update check: at startup, then twice a day.

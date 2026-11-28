@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0 (2026-11-28)
+
+- **Read-only business feed for your phone (business workspaces).** This is the first step
+  of the Atlas iPhone app's Business tab. It's off by default; turn it on per workspace in
+  **Settings → Phone access**. A companion on this PC (the Atlas relay) can then read, over
+  the local API, everything the tab shows:
+  - pending items with their exact payloads, hashes and attachment details;
+  - today's reservations, deadlines, waiting items and plan usage;
+  - budget and ledger totals (this week, last week, all time, per line);
+  - schedules with their next run.
+- **Live events.** A stream of changes: items created, decided or completed, pauses, usage
+  gates, budget alerts, and orders at risk. Push hints mark the events worth a
+  notification: a buyer waiting over 4 hours, an order at 50% or 75% of its time, usage
+  gates and budget.
+- **Thumbnails.** Attachments are available as 512 px JPEG thumbnails, or in full on request.
+- The feed can't approve or change anything. Decisions from the phone will need a Face ID
+  signature that Orchestrator checks itself (0.6.1). The API is documented for the Atlas
+  side in the business workspace's `integrations/orchestrator-api.md`.
+
 ## 0.5.10 (2026-11-28)
 
 - **Manual tasks with a file drop (business workspaces).** This is for queue items you do by

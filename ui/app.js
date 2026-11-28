@@ -2906,6 +2906,14 @@ async function renderSettings() {
       box.append(row);
       setting("Notifications", "Notifications", "Windows notifications for the events you tick, and optionally a push to your phone through <a href='https://ntfy.sh' target='_blank' rel='noopener'>ntfy.sh</a> or your own Telegram bot (add its topic or token under Secrets below, approved-actions-only scope is fine). Only a one-line summary is sent, with secrets redacted, never an item's payload.", box);
     }
+    {
+      const pj = S.state.project;
+      const lab = h("label"); lab.style.cssText = "display:flex;gap:6px;align-items:center";
+      const cb = h("input"); cb.type = "checkbox"; cb.checked = !!pj.phone_feed;
+      cb.onchange = () => { if (sendIpc({ op: "set_phone_feed", on: cb.checked })) setTimeout(loadState, 500); else cb.checked = !cb.checked; };
+      lab.append(cb, document.createTextNode(`Share this workspace's business feed with your paired phone (id ${pj.feed_id || ""})`));
+      setting("Phone", "Phone access (Atlas Business tab)", "Off by default. When on, the Atlas companion on this PC can read a <b>read-only</b> feed of this workspace over the local API: pending items with their exact payloads, today's deadlines and usage, money totals, schedules, attachment thumbnails, and live events. Nothing can be approved or changed through it.", lab);
+    }
     setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it with <code>run_approved</code>. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);
   }
 

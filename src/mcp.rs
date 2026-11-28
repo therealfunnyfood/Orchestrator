@@ -888,10 +888,21 @@ mod tests {
         }
     }
 
+    /// Phase 1's phone feed is read-only: every /api/business route is a GET.
+    #[test]
+    fn business_feed_routes_are_read_only() {
+        let web = include_str!("web.rs");
+        let routes: Vec<&str> = web.lines().filter(|l| l.contains(".route(\"/api/business")).collect();
+        assert!(routes.len() >= 4, "feed routes not found");
+        for r in routes {
+            assert!(r.contains(", get(") && !r.contains("post(") && !r.contains("patch(") && !r.contains("delete("), "not read-only: {r}");
+        }
+    }
+
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

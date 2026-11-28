@@ -133,6 +133,11 @@ weekly review, and learn from rejected items. The rest is the same text in both 
   with `who_executes: user`). Their card shows each prompt with a **Copy** button and has a
   drop zone that saves your files to `inbox/images/<item-id>/`. **Done** tells the
   orchestrator the files are in.
+- **Phone feed (read-only).** With **Settings → Phone access** on, a companion app on this
+  PC (such as the Atlas relay) can read a workspace's business feed over the local API.
+  The feed covers pending items with their exact payloads, today's deadlines and usage,
+  money totals, schedules, attachment thumbnails, and a live event stream with push hints.
+  Nothing can be approved or changed through it. It's off by default.
 - **Readable copies.** Each item is also written as a read-only Markdown file in
   `<workspace>/queue/pending|approved|rejected|done|void/`. Editing or moving those files
   changes nothing. Every queue event is appended to `<workspace>/queue/audit.log`.

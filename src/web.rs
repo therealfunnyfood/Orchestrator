@@ -107,6 +107,11 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/queue", post(queue))
         .route("/api/inbox", post(inbox_drop))
         .route("/api/queue/drop", post(queue_drop))
+        // Read-only business feed for a paired phone (off unless turned on per workspace).
+        .route("/api/business", get(|State(a): State<Shared>| async move { Json(json!({"v": 1, "workspaces": a.feed_list()})) }))
+        .route("/api/business/{ws}/snapshot", get(feed_snapshot))
+        .route("/api/business/{ws}/events", get(feed_events))
+        .route("/api/business/{ws}/attachment/{item}/{name}", get(feed_attachment))
         .route("/api/state", get(|State(a): State<Shared>| async move { Json(a.state_json()) }))
         .route("/api/all-threads", get(|State(a): State<Shared>| async move { Json(a.all_threads_json()) }))
         .route("/api/events/{key}", get(events))
@@ -512,6 +517,76 @@ async fn inbox_drop(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResul
     };
     let path = app.inbox_drop(text, file).map_err(ApiError)?;
     Ok(Json(json!({"ok": true, "path": path})))
+}
+
+/// The workspace behind a feed id, or 404 when there's none with the phone feed on.
+fn feed_ws(app: &App, id: &str) -> Result<String, Response> {
+    app.feed_ws(id).ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"error": "no_feed", "message": "no business workspace with that id has the phone feed on"}))).into_response())
+}
+
+async fn feed_snapshot(State(app): State<Shared>, Path(id): Path<String>) -> Response {
+    match feed_ws(&app, &id) {
+        Ok(ws) => Json(app.feed_snapshot(&ws)).into_response(),
+        Err(r) => r,
+    }
+}
+
+/// Server-sent events: the workspace's business changes, as they happen.
+async fn feed_events(State(app): State<Shared>, Path(id): Path<String>) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    if let Err(r) = feed_ws(&app, &id) {
+        return r;
+    }
+    let rx = app.hub.tx.subscribe();
+    let stream = futures_util::stream::unfold((rx, id), |(mut rx, id)| async move {
+        loop {
+            match rx.recv().await {
+                Ok(line) => {
+                    let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                    if v.get("kind").and_then(Value::as_str) == Some("business") && v.get("ws").and_then(Value::as_str) == Some(id.as_str()) {
+                        let ev = Event::default().event(v.get("event").and_then(Value::as_str).unwrap_or("change")).data(line);
+                        return Some((Ok::<Event, std::convert::Infallible>(ev), (rx, id)));
+                    }
+                }
+                // Missed events: tell the phone to reload the snapshot.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let ev = Event::default().event("resync").data(r#"{"event":"resync"}"#);
+                    return Some((Ok(ev), (rx, id)));
+                }
+                Err(_) => return None,
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}
+
+/// A pending item's attachment: `?size=thumb` (default; JPEG, at most 512 px) or `full`.
+async fn feed_attachment(State(app): State<Shared>, Path((id, item, name)): Path<(String, String, String)>, Query(q): Query<HashMap<String, String>>) -> Response {
+    let ws = match feed_ws(&app, &id) {
+        Ok(ws) => ws,
+        Err(r) => return r,
+    };
+    let Some(path) = app.feed_attachment(&ws, &item, &name) else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "no_attachment"}))).into_response();
+    };
+    let full = q.get("size").is_some_and(|s| s == "full");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let headers = |ct: &'static str| [
+        (header::CONTENT_TYPE, ct),
+        (header::CONTENT_SECURITY_POLICY, "sandbox; default-src 'none'"),
+        (header::CACHE_CONTROL, "private, max-age=300"),
+    ];
+    if !full {
+        let p = path.clone();
+        match tokio::task::spawn_blocking(move || crate::business::thumbnail(&p, 512)).await {
+            Ok(Ok(jpg)) => return (headers("image/jpeg"), jpg).into_response(),
+            _ => return (StatusCode::UNSUPPORTED_MEDIA_TYPE, Json(json!({"error": "no_thumbnail", "message": "not an image; ask for size=full"}))).into_response(),
+        }
+    }
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (headers(mime_for(&ext)), bytes).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "no_attachment"}))).into_response(),
+    }
 }
 
 /// A file dropped on a manual task's card (saved to inbox/images/<id>/).

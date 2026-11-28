@@ -391,6 +391,7 @@ impl App {
                 "gates": n.gates, "paid_api_fallback": n.paid_api_fallback, "paid_api_cap_usd": n.paid_api_cap_usd,
                 "notify_events": if n.notify_set { json!(n.notify_events) } else { json!(crate::notify::EVENTS.iter().map(|(e, _)| e).collect::<Vec<_>>()) },
                 "notify_phone": n.notify_phone,
+                "phone_feed": n.phone_feed, "feed_id": orch_key(&ws),
             })
         };
         let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
@@ -2789,6 +2790,7 @@ impl App {
         };
         for (_, msg) in &due {
             self.notify(ws, "budget", "Budget alert", msg);
+            self.business_event(ws, "budget", Some("budget"), json!({"text": msg}));
             self.audit(ws, &format!("BUDGET {msg}"));
             self.hub.broadcast(json!({"kind": "toast", "text": format!("{}: {msg}", ws.rsplit(['\\', '/']).next().unwrap_or(ws))}));
         }
@@ -3195,6 +3197,7 @@ impl App {
         }
         self.audit(ws, &format!("USAGE GATE week {:.0}%: asked {} to checkpoint and stop", s.week * 100.0, targets.join(", ")));
         self.notify(ws, "usage", &format!("Weekly plan usage at {:.0}%", s.week * 100.0), &format!("Non-paid threads asked to checkpoint and stop: {}", targets.join(", ")));
+        self.business_event(ws, "usage_gate", Some("usage_gate"), json!({"week": s.week, "text": format!("Weekly plan usage at {:.0}%: non-paid threads asked to stop", s.week * 100.0)}));
         self.post_news(&orch_key(ws), "@usage gate", &format!(
             "Weekly plan usage is at {:.0}%. The app asked these non-paid threads to checkpoint and stop: {}. Only paid-order threads may start now.",
             s.week * 100.0, targets.join(", ")
@@ -3239,6 +3242,7 @@ impl App {
             }
             for (id, why) in &fresh {
                 self.notify(&ws, "deadline", &format!("Order {id} may miss its deadline"), why);
+                self.business_event(&ws, "deadline_risk", Some("deadline_risk"), json!({"ref": id, "text": why, "level": "at_risk"}));
                 self.audit(&ws, &format!("DEADLINE AT RISK {id} :: {why}"));
                 self.hub.broadcast(json!({"kind": "toast", "text": format!("⚠ Order {id} may miss its deadline: {why}")}));
             }
@@ -3275,6 +3279,162 @@ impl App {
         ));
         self.touch();
         Ok(())
+    }
+
+    // ---- business feed for a paired phone (business.rs) ----
+
+    /// The business workspace behind a feed id (its orchestrator's key), if its phone feed
+    /// is on.
+    pub fn feed_ws(&self, id: &str) -> Option<String> {
+        let st = self.store.lock().unwrap();
+        st.projects.iter().find(|(ws, n)| n.kind == "business" && n.phone_feed && orch_key(ws) == id).map(|(ws, _)| ws.clone())
+    }
+
+    /// Business workspaces with the phone feed on: [{id, name, path}].
+    pub fn feed_list(&self) -> Value {
+        let st = self.store.lock().unwrap();
+        json!(st.projects.iter().filter(|(_, n)| n.kind == "business" && n.phone_feed).map(|(ws, _)| json!({
+            "id": orch_key(ws),
+            "name": std::path::Path::new(ws).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            "path": ws,
+        })).collect::<Vec<_>>())
+    }
+
+    /// Turn the phone feed on or off for the shown workspace (from the window only).
+    pub fn set_phone_feed(&self, on: bool) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("the phone feed is for business workspaces".into());
+        }
+        {
+            let mut st = self.store.lock().unwrap();
+            st.notes_mut(&ws).phone_feed = on;
+            st.save();
+        }
+        self.audit(&ws, if on { "PHONE FEED ON by=user (read-only business feed)" } else { "PHONE FEED OFF by=user" });
+        self.touch();
+        Ok(())
+    }
+
+    /// A change the phone should hear about (the feed's event stream). `push` marks the
+    /// ones worth a notification: urgent_buyer, deadline_risk, usage_gate, budget.
+    pub fn business_event(&self, ws: &str, event: &str, push: Option<&str>, extra: Value) {
+        let mut ev = json!({"kind": "business", "ws": orch_key(ws), "event": event, "ts": now()});
+        if let Some(p) = push {
+            ev["push"] = json!(p);
+        }
+        if let Value::Object(m) = extra {
+            for (k, v) in m {
+                ev[k] = v;
+            }
+        }
+        self.hub.broadcast(ev);
+    }
+
+    fn feed_item(i: &crate::queue::QueueItem) -> Value {
+        json!({
+            "id": i.id, "type": i.kind, "line": i.line, "summary": i.summary, "risk": i.risk, "urgent": i.urgent,
+            "expected_value_usd": i.expected_value_usd, "who_executes": i.who_executes, "payload": i.payload,
+            "payload_hash": crate::queue::content_hash(i), "status": i.status,
+            "attachments": i.attachments.iter().map(|a| crate::business::attachment_info(a)).collect::<Vec<_>>(),
+            "created_at": i.created_at, "order_id": if i.order_id.is_empty() { Value::Null } else { json!(i.order_id) },
+            "est_units": i.capacity.as_ref().map(|c| c.est_units), "deadline": i.capacity.as_ref().map(|c| c.deadline),
+            "capacity": i.capacity, "manual": crate::queue::is_manual(i), "command": if i.command.is_empty() { Value::Null } else { json!(i.command) },
+        })
+    }
+
+    /// Everything the phone's Business tab shows, in one read-only snapshot.
+    pub fn feed_snapshot(&self, ws: &str) -> Value {
+        let t = now();
+        let (items, n, reservations) = {
+            let st = self.store.lock().unwrap();
+            let items: Vec<crate::queue::QueueItem> = st.queue.iter().filter(|i| same_path(&i.workspace, ws) && i.status == "pending").cloned().collect();
+            let res: Vec<crate::capacity::Reservation> = st.reservations.iter().filter(|r| same_path(&r.workspace, ws)).cloned().collect();
+            (items, st.notes(ws).cloned().unwrap_or_default(), res)
+        };
+        let outbound_all = self.outbound_paused_all();
+        let sample = self.usage_sample(3600.0);
+        let samples = self.store.lock().unwrap().usage_samples.clone();
+        let (caps, spend) = self.budget(ws);
+        let waiting_4h: Vec<&String> = items.iter().filter(|i| t - i.created_at >= 4.0 * 3600.0).map(|i| &i.id).collect();
+        json!({
+            "v": 1,
+            "ws": {"id": orch_key(ws), "name": std::path::Path::new(ws).file_name().map(|x| x.to_string_lossy().to_string()), "path": ws},
+            "app_version": env!("CARGO_PKG_VERSION"),
+            "generated_at": t,
+            "paused": {"outbound": n.outbound_paused || outbound_all, "outbound_all": outbound_all, "workspace": n.paused},
+            "pending": items.iter().map(Self::feed_item).collect::<Vec<_>>(),
+            "today": {
+                "reservations": reservations.iter().map(|r| json!({
+                    "order_id": r.order_id, "est_units": r.est_units, "remaining_units": r.remaining_units,
+                    "deadline": r.deadline, "created_at": r.created_at,
+                    "elapsed": if r.deadline > r.created_at { ((t - r.created_at) / (r.deadline - r.created_at)).clamp(0.0, 1.0) } else { 1.0 },
+                })).collect::<Vec<_>>(),
+                "waiting_over_4h": waiting_4h,
+                "usage": match sample {
+                    None => json!({"known": false}),
+                    Some(s) => json!({
+                        "known": true, "five_hour": s.five, "week": s.week, "week_resets_at": s.week_resets_at, "as_of": s.ts,
+                        "burn_last_hour": crate::capacity::burn_last_hour(&samples, t),
+                        "gates": n.gates,
+                    }),
+                },
+            },
+            "budget": {"day_cap": caps.day, "week_cap": caps.week, "spent_day": spend.day, "spent_week": spend.week},
+            "ledger": crate::business::read_ledger(ws, t),
+            "schedules": n.schedules.iter().map(|s| json!({
+                "id": s.id, "time": s.time, "days": crate::schedule::describe_days(&s.days), "message": s.message,
+                "thread": if s.thread.is_empty() { Value::Null } else { json!(s.thread) },
+                "enabled": s.enabled, "confirmed": s.confirmed, "next_run": crate::schedule::next_run(s, t),
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// A pending item's attachment (by file name) for the feed.
+    pub fn feed_attachment(&self, ws: &str, item: &str, name: &str) -> Option<std::path::PathBuf> {
+        let st = self.store.lock().unwrap();
+        let i = st.queue.iter().find(|i| i.id == item && same_path(&i.workspace, ws))?;
+        let mut files: Vec<std::path::PathBuf> = i.attachments.iter().map(std::path::PathBuf::from).collect();
+        if crate::queue::is_manual(i) {
+            files.extend(std::fs::read_dir(crate::queue::drop_dir(i)).into_iter().flatten().filter_map(|e| e.ok()).map(|e| e.path()));
+        }
+        files.into_iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy() == name))
+    }
+
+    /// Every 30 s: push hints for buyers waiting over 4 h and orders at 50% / 75% of their
+    /// time (each once).
+    pub fn business_tick(&self) {
+        let wss: Vec<String> = {
+            let st = self.store.lock().unwrap();
+            st.projects.iter().filter(|(_, n)| n.kind == "business").map(|(w, _)| w.clone()).collect()
+        };
+        for ws in wss {
+            let (waiting, res) = {
+                let st = self.store.lock().unwrap();
+                let w: Vec<(String, f64, bool, String)> = st.queue.iter().filter(|i| same_path(&i.workspace, &ws) && i.status == "pending")
+                    .map(|i| (i.id.clone(), i.created_at, i.urgent, i.kind.clone())).collect();
+                let r: Vec<crate::capacity::Reservation> = st.reservations.iter().filter(|r| same_path(&r.workspace, &ws)).cloned().collect();
+                (w, r)
+            };
+            let due: Vec<(String, &str, String)> = {
+                let mut st = self.store.lock().unwrap();
+                let fresh: Vec<_> = crate::business::push_hints(&waiting, &res, now()).into_iter()
+                    .filter(|(k, ..)| !st.push_sent.contains(&format!("{}|{k}", orch_key(&ws)))).collect();
+                for (k, ..) in &fresh {
+                    st.push_sent.push(format!("{}|{k}", orch_key(&ws)));
+                }
+                let over = st.push_sent.len().saturating_sub(1000);
+                st.push_sent.drain(..over);
+                if !fresh.is_empty() {
+                    st.save();
+                }
+                fresh
+            };
+            for (key, hint, text) in due {
+                let item = key.split(':').nth(1).unwrap_or("");
+                self.business_event(&ws, hint, Some(hint), json!({"text": text, "ref": item}));
+            }
+        }
     }
 
     // ---- manual tasks (queue items the user does by hand) ----
@@ -3322,6 +3482,7 @@ impl App {
         };
         let files = Self::queue_dropped(&item);
         let rel = format!("inbox/images/{}/", item.id);
+        self.business_event(&item.workspace, "item_completed", None, json!({"item_id": item.id, "by": "user"}));
         self.audit(&item.workspace, &format!("DONE BY USER {}{}", item.id, if files.is_empty() { String::new() } else { format!(" ({} file(s) in {rel})", files.len()) }));
         self.post_news(&orch_key(&item.workspace), "@approval queue", &format!(
             "The user did {} ({}, line {}) by hand: {}{}",
@@ -3450,6 +3611,7 @@ impl App {
             st.save();
         }
         self.audit(&ws, if paused { "OUTBOUND PAUSED by=user (kill switch on)" } else { "OUTBOUND RESUMED by=user" });
+        self.business_event(&ws, "pause_changed", None, json!({"target": "outbound", "paused": paused}));
         self.post_news(&orch_key(&ws), "@app", if paused {
             "The user PAUSED OUTBOUND (kill switch). Nothing may be executed, sent or published until they resume it; list_approved returns nothing meanwhile. Internal work may continue."
         } else {
@@ -3490,6 +3652,7 @@ impl App {
             st.save();
         }
         self.audit(&ws, if paused { "WORKSPACE PAUSED by=user (all turns stopped)" } else { "WORKSPACE RESUMED by=user" });
+        self.business_event(&ws, "pause_changed", None, json!({"target": "workspace", "paused": paused}));
         let mut keys = self.thread_names_here(&ws);
         keys.push(orch_key(&ws));
         if paused {
@@ -3618,9 +3781,11 @@ impl App {
         let audit_line = format!("QUEUED {id} {} line={} by={} :: {}", item.kind, item.line, item.created_by, item.summary);
         let summary_for_notice = format!("{id} ({}, line {}): {}", item.kind, if item.line.is_empty() { "-" } else { &item.line }, item.summary);
         let urgent = item.urgent;
+        let created = Self::feed_item(&item);
         st.queue.push(item);
         st.save();
         drop(st);
+        self.business_event(&ws, "item_created", None, json!({"item": created}));
         self.audit(&ws, &audit_line);
         self.queue_changed();
         if urgent {
@@ -3701,6 +3866,7 @@ impl App {
         st.save();
         drop(st);
         self.audit(&ws, &audit_line);
+        self.business_event(&ws, "item_completed", None, json!({"item_id": id}));
         self.queue_changed();
         Ok(format!("{id} marked done"))
     }
@@ -3733,6 +3899,7 @@ impl App {
         };
         self.audit(&item.workspace, &format!("{what} {} by=user{}", item.id, if item.note.is_empty() { String::new() } else { format!(" :: {}", item.note) }));
         let ws = item.workspace.clone();
+        self.business_event(&ws, "item_decided", None, json!({"item_id": item.id, "status": item.status, "via": "window"}));
         self.queue_news(&ws, &[item]);
         self.queue_changed();
         Ok(())
@@ -3752,6 +3919,7 @@ impl App {
         drop(st);
         for i in &done {
             self.audit(&ws, &format!("APPROVED {} by=user (approve all low-risk)", i.id));
+            self.business_event(&ws, "item_decided", None, json!({"item_id": i.id, "status": i.status, "via": "window"}));
         }
         if !done.is_empty() {
             self.queue_news(&ws, &done);

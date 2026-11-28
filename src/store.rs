@@ -140,6 +140,8 @@ pub struct Store {
     pub usage_samples: Vec<crate::capacity::Sample>,
     /// Capacity reserved for accepted paid orders (business workspaces).
     pub reservations: Vec<crate::capacity::Reservation>,
+    /// Push hints already sent (keys), so each goes out once.
+    pub push_sent: Vec<String>,
     /// User messages to the orchestrator since it last reviewed its lessons.
     pub since_lessons: u32,
     #[serde(skip)]
@@ -251,6 +253,8 @@ pub struct ProjectNotes {
     pub notify_events: Vec<String>,
     /// Phone push channel: "" (none), "ntfy" or "telegram" (secrets in the vault).
     pub notify_phone: String,
+    /// The phone feed (Atlas Business tab): off unless the user turns it on.
+    pub phone_feed: bool,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }
