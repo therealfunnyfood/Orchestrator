@@ -58,6 +58,8 @@ pub struct Need {
     pub link: String,
     /// action: the step-by-step plan.
     pub plan: Option<Plan>,
+    /// message: the cross-workspace request (from/to workspace and session, message, why).
+    pub xws: Value,
 }
 
 /// The most steps one plan may have: longer tasks are split into parts.
@@ -190,6 +192,8 @@ pub struct View {
     pub closed_by: String,
     pub closed_at: f64,
     pub answer: String,
+    /// message: the cross-workspace request (see Need::xws).
+    pub xws: Value,
 }
 
 pub fn rank(priority: &str) -> u8 {
@@ -298,6 +302,7 @@ fn kind_label(kind: &str) -> &'static str {
         "decision" => "decision",
         "manual" => "do by hand",
         "action" => "to do",
+        "message" => "message to allow",
         _ => "heads-up",
     }
 }

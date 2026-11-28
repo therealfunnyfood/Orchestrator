@@ -15,6 +15,7 @@ use tokio::sync::{oneshot, watch, Notify};
 
 mod digest_app;
 mod needs_app;
+mod xws_app;
 
 pub const ORCHESTRATOR: &str = "orchestrator";
 
@@ -34,6 +35,7 @@ plug in, an approval), call it with for_user=true and say exactly what they need
 orchestrator is then made to pass it on to them straight away.
 Keep messages short and purposeful: one or two sentences, not a running commentary.
 The orchestrator may also message you mid-turn to redirect you or add information: follow it.
+To reach another workspace's session use message_session; the user must approve unless they've set a standing rule.
 Never try to message other Claude sessions any other way.
 
 Depending on the project's permission level, some actions may need the user's approval. If one is
@@ -78,6 +80,8 @@ the "app" MCP server.
   block: mid-turn, or as a new turn if you're idle. Act on each one: reply, move the work on, or tell
   the user. If nothing needs doing, say so in one line and stop. The user can also talk to any thread
   directly; what happened since their last message comes to you in a [thread updates] block.
+- To reach another workspace's session use message_session; the user must approve unless they've set
+  a standing rule. list_sessions shows the open workspaces and their sessions.
 
 # Don't wait in your turn
 Once threads are working and you have nothing else to do, tell the user what's running and roughly
@@ -245,6 +249,8 @@ pub struct App {
     inbox: Mutex<HashMap<String, Vec<(String, String)>>>,
     /// ask_user questions waiting for an answer, by question id.
     questions: Mutex<HashMap<String, PendingQuestion>>,
+    /// Cross-workspace message requests waiting for the user, by request id.
+    xws_pending: Mutex<HashMap<String, xws_app::XwsPending>>,
     answered_ids: Mutex<std::collections::HashSet<String>>,
     /// When the running turn on each key started (for the UI's timer).
     started: Mutex<HashMap<String, f64>>,
@@ -311,6 +317,7 @@ impl App {
             notices: Mutex::new(HashMap::new()),
             inbox: Mutex::new(HashMap::new()),
             questions: Mutex::new(HashMap::new()),
+            xws_pending: Mutex::new(HashMap::new()),
             answered_ids: Mutex::new(Default::default()),
             started: Mutex::new(HashMap::new()),
             estimates: Mutex::new(HashMap::new()),
@@ -476,6 +483,7 @@ impl App {
             "phones": phones,
             "needs": needs,
             "needs_all": needs_all,
+            "xws": self.xws_state_json(),
             "spend": if self.is_business(&ws) { let (_, s) = self.budget(&ws); json!({"day": s.day, "week": s.week}) } else { Value::Null },
             "defaults": {
                 "thread_backend": s.thread_backend, "thread_model": s.thread_model,
@@ -677,6 +685,7 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
 
     pub fn stop(&self, key: &str) -> bool {
         self.questions.lock().unwrap().retain(|_, q| q.key != key);
+        self.xws_drop_for(key);
         if self.resumes.lock().unwrap().remove(key).is_some() {
             self.hub.emit(key, json!({"kind": "notice", "text": "won't continue by itself after the usage limit resets"}));
         }
@@ -2173,7 +2182,7 @@ duplicates, tighten wording, and drop only what's outdated or already done. Keep
             return String::new();
         }
         format!("\n# Other workspaces\nThe user also has these workspaces open, each with its own orchestrator and \
-threads: {}. They're not yours: don't work in those folders or message their threads unless the user asks. \
+threads: {}. They're not yours: don't work in those folders. To reach another workspace's session use message_session; the user must approve unless they've set a standing rule. \
 The user may be looking at another workspace while you work; carry on regardless.\n", others.join(", "))
     }
 

@@ -282,6 +282,16 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
                 }
             });
         }
+        // Cross-workspace messages: allow once / always, deny, and the standing rules.
+        // Only the user's clicks reach this: never add an HTTP route for these.
+        "xws" => {
+            let action = s("action");
+            rt().spawn(async move {
+                if let Err(e) = app.xws_user(&action, &msg) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
         // "⧉ Pop out" on the Queue and Needs you panes: the new window loads the same page in
         // single-pane mode and talks to the app through this same handler.
         "pop_out_pane" => {

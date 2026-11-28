@@ -100,6 +100,16 @@ pub struct OrchRow {
     pub workspace: String,
 }
 
+/// A standing rule: sessions in `from_ws` may message sessions in `to_ws` without asking.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct XwsRule {
+    pub id: String,
+    pub from_ws: String,
+    pub to_ws: String,
+    pub created_at: f64,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Store {
@@ -179,6 +189,10 @@ pub struct Store {
     pub need_seq: u64,
     /// Per-entry marks (snooze, Today pin, step progress), by entry id; queue entries too.
     pub need_marks: BTreeMap<String, crate::needs::Mark>,
+    /// Standing rules for cross-workspace messages (one direction each). Only the user adds
+    /// or revokes them, in the window.
+    pub xws_rules: Vec<XwsRule>,
+    pub xws_seq: u64,
     #[serde(skip)]
     path: PathBuf,
 }

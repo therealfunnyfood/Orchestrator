@@ -52,7 +52,7 @@ fn view_of_need(n: &Need, mark: &Mark, waiting: bool, t: f64) -> View {
         msg_ts: n.msg_ts,
         status: if snoozed { "snoozed".into() } else { n.status.clone() },
         snoozed_until: if snoozed { mark.snooze_until } else { 0.0 },
-        waiting: n.kind == "question" && n.status == "open" && waiting,
+        waiting: (n.kind == "question" || n.kind == "message") && n.status == "open" && waiting,
         // A question nobody waits for any more (it timed out, or the app restarted) went
         // ahead with its default.
         timed_out: n.kind == "question" && n.status == "open" && (n.timed_out || !waiting),
@@ -71,6 +71,7 @@ fn view_of_need(n: &Need, mark: &Mark, waiting: bool, t: f64) -> View {
         closed_by: n.closed_by.clone(),
         closed_at: n.closed_at,
         answer: n.answer.clone(),
+        xws: n.xws.clone(),
     }
 }
 
@@ -130,7 +131,8 @@ impl App {
     fn needs_of_with(&self, ws: &str, pending: Option<&Value>) -> WsNeeds {
         let t = now();
         let today = chrono::Local::now();
-        let waiting: Vec<String> = self.questions.lock().unwrap().keys().cloned().collect();
+        let mut waiting: Vec<String> = self.questions.lock().unwrap().keys().cloned().collect();
+        waiting.extend(self.xws_waiting_ids());
         let (stored, items, marks) = {
             let st = self.store.lock().unwrap();
             let stored: Vec<Need> = st.needs.iter().filter(|n| same_path(&n.workspace, ws)).cloned().collect();
@@ -286,7 +288,7 @@ impl App {
         Some(c)
     }
 
-    fn close_need(&self, id: &str, status: &str, by: &str, note: &str) -> Option<Need> {
+    pub(super) fn close_need(&self, id: &str, status: &str, by: &str, note: &str) -> Option<Need> {
         let n = self.need_update(id, |n| {
             n.status = status.into();
             n.closed_by = by.into();
@@ -363,6 +365,12 @@ impl App {
             } else {
                 n.timed_out = true;
             }
+        }
+        for n in st.needs.iter_mut().filter(|n| n.kind == "message" && n.status == "open") {
+            n.status = "dismissed".into();
+            n.closed_by = "app".into();
+            n.closed_at = t;
+            n.note = "expired: the app restarted, nothing was sent".into();
         }
         st.needs.retain(|n| n.status == "open" || t - n.closed_at < KEEP_CLOSED_S);
     }
@@ -468,6 +476,9 @@ Help them: tell them what to try (tell_user), or send clearer steps with request
                 if n.kind == "question" {
                     return Err("answer the question instead".into());
                 }
+                if n.kind == "message" {
+                    return Err("use Allow once, Always allow or Deny".into());
+                }
                 self.close_need(id, "done", "user", &note).ok_or(format!("no entry {id}"))?;
                 if n.kind == "action" {
                     self.tell_agent(&n.source, &n.workspace, &format!(
@@ -484,6 +495,16 @@ Help them: tell them what to try (tell_user), or send clearer steps with request
                     return Err("queue items are rejected in the card (with a reason), not dismissed".into());
                 }
                 let n = self.need_get(id).ok_or(format!("no entry {id}"))?;
+                if n.kind == "message" {
+                    // Dismissing a message request denies it (nothing is sent).
+                    return match self.xws_decide(id, super::xws_app::XwsDecision::Deny { note }) {
+                        Ok(()) => Ok(()),
+                        Err(_) => {
+                            self.close_need(id, "dismissed", "user", "not sent");
+                            Ok(())
+                        }
+                    };
+                }
                 if n.kind == "question" && self.questions.lock().unwrap().contains_key(&n.ref_id) {
                     // The agent is still waiting: it gets the dismissal as its answer.
                     let msg = format!("The user dismissed this question{}", if note.is_empty() { String::new() } else { format!(": {note}") });

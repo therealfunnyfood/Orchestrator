@@ -62,6 +62,28 @@ decide something now (say exactly what): the orchestrator is then made to tell t
             }, "required": ["message"]},
         },
         {
+            "name": "list_sessions",
+            "description": "List the user's open workspaces and each one's sessions (orchestrator and threads) with \
+their status and a one-line topic, and whether your messages to that workspace need the user's OK. Read-only.",
+            "inputSchema": {"type": "object", "properties": {
+                "workspace": {"type": "string", "description": "only this workspace (folder name or path)"},
+            }},
+        },
+        {
+            "name": "message_session",
+            "description": "Send a message to a session (its orchestrator or a thread) in ANOTHER open workspace. \
+The user must approve each message unless they've set a standing rule for that direction; the call waits for \
+their answer, and if they deny it or don't answer, nothing is sent. Within your own workspace use \
+send_to_thread / message_orchestrator instead. The receiver sees \"[from workspace X / session Y]\" and can reply \
+the same way.",
+            "inputSchema": {"type": "object", "properties": {
+                "workspace": {"type": "string", "description": "the other workspace's folder name or path"},
+                "session": {"type": "string", "description": "'orchestrator' or a thread name (see list_sessions)"},
+                "message": {"type": "string", "description": "exactly what to send; the user sees it in full"},
+                "why": {"type": "string", "description": "one line for the user: why it needs to go"},
+            }, "required": ["workspace", "session", "message", "why"]},
+        },
+        {
             "name": "request_user_action",
             "description": "Put a task the user must do by hand (create an account, install something, sign in, a manual \
 upload) on their 📌 Needs you list, as precise steps they follow one at a time. Never put such a task in chat text. \
@@ -538,6 +560,8 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
             app.message_orchestrator(key, text, for_user)?;
             Ok(if for_user { "delivered to the orchestrator, which will pass it on to the user".into() } else { "delivered to the orchestrator".into() })
         }
+        "list_sessions" => app.list_sessions(key, arg(args, "workspace")),
+        "message_session" => app.message_session(key, args).await,
         "update_plan" => {
             let items = args.get("items").cloned().unwrap_or(json!([]));
             if !items.is_array() {
@@ -957,7 +981,7 @@ pub async fn handle(app: &Arc<App>, key: &str, msg: &Value) -> Option<Value> {
                 }}));
             }
             let allowed = key.starts_with(ORCHESTRATOR)
-                || ["update_plan", "ask_user", "show_media", "message_orchestrator", "request_user_action", "list_needs_you", "dismiss_need"].contains(&name)
+                || ["update_plan", "ask_user", "show_media", "message_orchestrator", "request_user_action", "list_needs_you", "dismiss_need", "list_sessions", "message_session"].contains(&name)
                 || QUEUE_TOOLS.contains(&name);
             let outcome = if allowed { call(app, key, name, &args).await } else { Err(format!("{name} is only available to the orchestrator")) };
             match outcome {
@@ -1029,10 +1053,25 @@ mod tests {
         }
     }
 
+    /// Only the user creates, widens or approves cross-workspace rules: no tool for it, and
+    /// the MCP handlers never call the window-only functions.
+    #[test]
+    fn no_agent_tool_can_allow_cross_workspace_messages() {
+        let all: Vec<String> = [ui_tools(), thread_tools(), queue_tools(), business_orch_tools()].into_iter().flat_map(names).collect();
+        for n in &all {
+            assert!(!n.contains("rule") && !n.contains("allow") && !n.contains("xws"), "tool {n} looks like it could set a message rule");
+        }
+        let me = include_str!("mcp.rs");
+        let body = &me[..me.find("#[cfg(test)]").unwrap()];
+        for f in ["xws_user", "xws_decide", "xws_rule_add", "xws_rule_revoke"] {
+            assert!(!body.contains(f), "mcp.rs must not call {f}");
+        }
+    }
+
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide", "line_user", "need_user", "need_answer", "set_busy", "set_digests", "digest_now"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide", "line_user", "need_user", "need_answer", "set_busy", "set_digests", "digest_now", "xws_user", "xws_decide", "xws_rule_add", "xws_rule_revoke"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

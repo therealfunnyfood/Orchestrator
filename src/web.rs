@@ -122,6 +122,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/business/{ws}/manual/{item}/file", post(phone_manual_file))
         .route("/api/business/{ws}/manual/{item}/done", post(phone_manual_done))
         .route("/api/needs", get(|State(a): State<Shared>| async move { let ws = a.workspace(); Json(json!({"needs": a.needs_json(&ws), "needs_all": a.needs_all_json()})) }))
+        .route("/api/xws/rules", get(|State(a): State<Shared>| async move { Json(json!({"rules": a.xws_rules_json()})) }))
         .route("/api/state", get(|State(a): State<Shared>| async move { Json(a.state_json()) }))
         .route("/api/all-threads", get(|State(a): State<Shared>| async move { Json(a.all_threads_json()) }))
         .route("/api/events/{key}", get(events))
