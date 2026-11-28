@@ -325,7 +325,7 @@ pub mod tests {
         assert_eq!(ph.fingerprint.chars().next().unwrap(), first);
         assert!(parse_bundle("atlas-mobile/v1|pair|x|y|z").is_err());
         assert!(parse_bundle(&format!("{PREFIX}|pair|dev|{}|n", base64::engine::general_purpose::STANDARD.encode([4u8; 65]))).is_err(), "not a point on the curve");
-        let json = format!(r#"{{"device":"iphone-9","name":"Jacob's iPhone","approve_key":"{}"}}"#, ph.key);
+        let json = format!(r#"{{"device":"iphone-9","name":"Test iPhone 2","approve_key":"{}"}}"#, ph.key);
         assert_eq!(parse_bundle(&json).unwrap().fingerprint, ph.fingerprint);
     }
 }
