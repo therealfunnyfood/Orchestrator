@@ -13,6 +13,7 @@ mod business;
 mod capacity;
 mod claude_projects;
 mod config;
+mod digest;
 mod events;
 mod inbox;
 mod lines;
@@ -165,14 +166,32 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
         "notify_test" => {
             rt().spawn(async move {
                 let ws = app.workspace();
-                let ev = crate::notify::EVENTS.iter().map(|(e, _)| e.to_string()).find(|e| {
-                    let st = app.store.lock().unwrap();
-                    st.notes(&ws).is_some_and(|n| !n.notify_set || n.notify_events.contains(e))
-                });
-                match ev {
-                    Some(e) => app.notify(&ws, &e, "Test notification", "If you see this, notifications work."),
-                    None => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": "no notification events are on"})),
+                // The test always goes out at once (even in busy mode or with digests on).
+                app.notify_at(&ws, "test", crate::digest::Level::Critical, "Test notification", "If you see this, notifications work.");
+            });
+        }
+        "busy_set" => {
+            let on = msg.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+            let minutes = msg.get("minutes").and_then(|v| v.as_f64()).unwrap_or(0.0).clamp(0.0, 24.0 * 60.0);
+            rt().spawn(async move {
+                let text = app.set_busy(on, minutes, "user");
+                app.hub.broadcast(serde_json::json!({"kind": "toast", "text": text}));
+            });
+        }
+        "set_digests" => {
+            let times: Vec<String> = msg.get("times").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            rt().spawn(async move {
+                match app.set_digests(times) {
+                    Ok(()) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": "digest times saved"})),
+                    Err(e) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e})),
                 }
+            });
+        }
+        "digest_now" => {
+            rt().spawn(async move {
+                let n = app.digest_now();
+                let text = if n == 0 { "nothing was held".to_string() } else { format!("sent a digest of {n}") };
+                app.hub.broadcast(serde_json::json!({"kind": "toast", "text": text}));
             });
         }
         "inbox_clipboard" => {
@@ -424,6 +443,7 @@ async fn start(desktop: bool, port: u16) -> (Arc<app::App>, String) {
             a.schedule_tick();
             a.business_tick();
             a.needs_tick();
+            a.digest_tick();
         }
     });
     // Update check: at startup, then twice a day.

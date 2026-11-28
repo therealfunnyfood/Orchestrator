@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::{oneshot, watch, Notify};
 
+mod digest_app;
 mod needs_app;
 
 pub const ORCHESTRATOR: &str = "orchestrator";
@@ -162,6 +163,37 @@ fn valid_name(name: &str) -> bool {
         && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         && !name.starts_with(ORCHESTRATOR)
+}
+
+/// A chat event for a message to an agent. Messages from the threads to an orchestrator
+/// carry `report: true` and `from` (the senders), so the window can fold them to a line.
+fn user_event(msg: &Queued, extra: Value) -> Value {
+    let mut ev = json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach});
+    if msg.sender == "threads" {
+        ev["report"] = json!(true);
+        ev["from"] = json!(crate::events::report_from(&msg.text));
+    }
+    if let Value::Object(m) = extra {
+        for (k, v) in m {
+            ev[k] = v;
+        }
+    }
+    ev
+}
+
+/// Search the workspace's chats (the orchestrator's and every thread's), newest first.
+pub fn search_chats(app: &App, ws: &str, q: &str, limit: usize) -> Value {
+    let limit = limit.clamp(1, 200);
+    let mut chats = vec![(orch_key(ws), "orchestrator".to_string())];
+    chats.extend(app.store.lock().unwrap().in_workspace(ws).into_iter().map(|t| (t.name.clone(), t.name)));
+    let mut hits: Vec<Value> = vec![];
+    for (key, name) in &chats {
+        hits.extend(app.hub.search(key, name, q, limit + 1));
+    }
+    hits.sort_by(|a, b| b["ts"].as_f64().unwrap_or(0.0).total_cmp(&a["ts"].as_f64().unwrap_or(0.0)));
+    let truncated = hits.len() > limit;
+    hits.truncate(limit);
+    json!({"q": q, "hits": hits, "truncated": truncated})
 }
 
 pub fn orch_key(workspace: &str) -> String {
@@ -401,7 +433,7 @@ impl App {
         let threads: Vec<Value> = rows.iter().map(|t| self.thread_json(t)).collect();
         let running = self.workers.lock().unwrap().len();
         let waiting = self.questions.lock().unwrap().len();
-        let project = {
+        let mut project = {
             let st = self.store.lock().unwrap();
             let n = st.notes(&ws).cloned().unwrap_or_default();
             json!({
@@ -419,6 +451,11 @@ impl App {
                 "phone_feed": n.phone_feed, "feed_id": orch_key(&ws), "phone_decide": n.phone_decide,
             })
         };
+        if let Value::Object(d) = self.digest_json(&ws) {
+            for (k, v) in d {
+                project[k] = v;
+            }
+        }
         let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
         let (needs, needs_all, needs_counts) = self.needs_push(queue.get("pending"));
         let phones = {
@@ -432,6 +469,7 @@ impl App {
         };
         json!({
             "workspace": ws, "recent_workspaces": recent, "open_workspaces": self.open_workspaces_json(&needs_counts), "orchestrator": self.orch_json(),
+            "busy_mode": self.busy_state_json(),
             "threads": threads, "running": running, "waiting": waiting,
             "project": project, "queue": queue, "secrets": secrets,
             "schedules": if self.is_business(&ws) { self.schedules_json(&ws) } else { json!([]) },
@@ -777,7 +815,7 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
             if waiting.contains(key) {
                 self.held.lock().unwrap().entry(key.to_string()).or_default().push(msg.clone());
                 drop(waiting);
-                self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach, "injected": true}));
+                self.hub.emit(key, user_event(msg, json!({"injected": true})));
                 self.nudged.lock().unwrap().insert(key.to_string(), true);
                 self.touch();
                 return true;
@@ -795,7 +833,7 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
         if tx.send(user_line(&prompt, &images)).is_err() {
             return false;
         }
-        self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach, "injected": true}));
+        self.hub.emit(key, user_event(msg, json!({"injected": true})));
         if key.starts_with(ORCHESTRATOR) {
             if msg.sender == "you" {
                 self.owe_reply(key, &msg.text);
@@ -1370,7 +1408,7 @@ wait for. Then act on it."
         if let Some(f) = &msg.fork {
             self.hub.emit(key, json!({"kind": "fork", "at": f.at_ts}));
         }
-        self.hub.emit(key, json!({"kind": "user", "text": msg.text, "sender": msg.sender, "attachments": msg.attach, "resume_at": start_point}));
+        self.hub.emit(key, user_event(&msg, json!({"resume_at": start_point})));
         self.touch();
         let (mut text, images) = with_attachments(&msg.text, &msg.attach);
         if msg.sender == "you" {
@@ -3024,8 +3062,10 @@ impl App {
             st.save();
             due
         };
-        for (_, msg) in &due {
-            self.notify(ws, "budget", "Budget alert", msg);
+        for (k, msg) in &due {
+            // Reaching a cap is a hard stop (urgent); 80 % waits for the digest.
+            let level = if k.ends_with(":100") { crate::digest::Level::Urgent } else { crate::digest::Level::Normal };
+            self.notify_at(ws, "budget", level, "Budget alert", msg);
             self.business_event(ws, "budget", Some("budget"), json!({"text": msg}));
             self.audit(ws, &format!("BUDGET {msg}"));
             self.hub.broadcast(json!({"kind": "toast", "text": format!("{}: {msg}", ws.rsplit(['\\', '/']).next().unwrap_or(ws))}));
@@ -3560,7 +3600,8 @@ impl App {
             ev["push"] = json!(p);
         }
         if let Value::Object(m) = extra {
-            for (k, v) in m {
+            // The envelope (kind, ws, event) is never overwritten: the stream filters on it.
+            for (k, v) in m.into_iter().filter(|(k, _)| !["kind", "ws", "event"].contains(&k.as_str())) {
                 ev[k] = v;
             }
         }
@@ -3603,6 +3644,8 @@ impl App {
             "app_version": env!("CARGO_PKG_VERSION"),
             "generated_at": t,
             "paused": {"outbound": n.outbound_paused || outbound_all, "outbound_all": outbound_all, "workspace": n.paused},
+            "busy": self.busy_json(),
+            "held": n.held.len(),
             "pending": items.iter().map(Self::feed_item).collect::<Vec<_>>(),
             "needs_you": self.needs_feed(ws),
             "today": {
@@ -3848,7 +3891,7 @@ impl App {
             if spent >= l.weekly_budget_usd {
                 let why = format!("spent ${spent:.2} of its ${:.2} weekly budget", l.weekly_budget_usd);
                 let _ = self.line_set_status(ws, &l.id, "paused", "app", &why);
-                self.notify(ws, "budget", &format!("Line {} paused", l.id), &why);
+                self.notify_at(ws, "budget", crate::digest::Level::Urgent, &format!("Line {} paused", l.id), &why);
                 self.business_event(ws, "budget", Some("budget"), json!({"text": format!("Line {} paused: {why}", l.id)}));
                 self.post_news(&orch_key(ws), "@budget", &format!(
                     "Line {} (\"{}\") was paused automatically: it {why}. Only paid-order threads start for it now. To resume it, propose update_line_status with the data, or ask the user.",
@@ -3957,6 +4000,7 @@ impl App {
             _ => return Err((400, "bad_request", "target must be outbound or workspace".into())),
         }
         self.business_event(&ws, "pause_changed", None, json!({"target": target, "paused": true, "via": "phone"}));
+        self.notify(&ws, "pause", if target == "outbound" { "Kill switch on (from the phone)" } else { "Workspace paused (from the phone)" }, "Paused from an enrolled phone.");
         self.touch();
         Ok(json!({"ok": true, "target": target, "paused": true}))
     }
@@ -4003,6 +4047,7 @@ impl App {
             self.post_news(&orch_key(&ws), "@app", "The user resumed this workspace from their phone after a pause. Check where things stood and carry on.");
         }
         self.business_event(&ws, "pause_changed", None, json!({"target": target, "paused": false, "via": via}));
+        self.notify(&ws, "pause", if target == "outbound" { "Outbound resumed (from the phone)" } else { "Workspace resumed (from the phone)" }, "Resumed from an enrolled phone.");
         self.touch();
         Ok(json!({"ok": true, "target": target, "paused": false, "via": via}))
     }
@@ -4292,29 +4337,6 @@ impl App {
     }
 
     // ---- notifications (notify.rs) ----
-
-    /// Notify the user about a business event: a Windows toast, and a phone push if they set
-    /// one up. Only events they chose; only a redacted summary line.
-    pub fn notify(&self, ws: &str, event: &str, title: &str, body: &str) {
-        let (on, phone) = {
-            let st = self.store.lock().unwrap();
-            let Some(n) = st.notes(ws).filter(|n| n.kind == "business") else { return };
-            (!n.notify_set || n.notify_events.iter().any(|e| e == event), n.notify_phone.clone())
-        };
-        if !on {
-            return;
-        }
-        let name = std::path::Path::new(ws).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let title = format!("{name}: {title}");
-        crate::notify::toast(&title, body);
-        if !phone.is_empty() {
-            let names: Vec<String> = crate::notify::phone_secrets(&phone).iter().map(|s| s.to_string()).collect();
-            match self.vault.get(ws, &names) {
-                Ok(secrets) => crate::notify::push(&phone, &secrets, &title, body),
-                Err(e) => self.hub.broadcast(json!({"kind": "toast", "text": format!("phone notification not sent: {e}")})),
-            }
-        }
-    }
 
     /// Notification settings for the shown workspace (from the window only).
     pub fn set_notify(&self, events: Vec<String>, phone: &str) -> Result<(), String> {
@@ -4914,6 +4936,24 @@ mod tests {
             back = back.replace(replacement, dev);
         }
         assert_eq!(back, ORCH_APPEND);
+    }
+}
+
+#[cfg(test)]
+mod report_flag_tests {
+    use super::*;
+
+    #[test]
+    fn thread_news_to_the_orchestrator_is_flagged_as_a_report() {
+        let q = |sender: &str, text: &str| Queued { id: String::new(), text: text.into(), sender: sender.into(), attach: vec![], fork: None };
+        let ev = user_event(&q("threads", "[from thread alpha]
+alpha finished."), json!({"injected": true}));
+        assert_eq!(ev["report"], true);
+        assert_eq!(ev["from"], json!(["alpha"]));
+        assert_eq!(ev["injected"], true);
+        assert_eq!(ev["sender"], "threads");
+        let ev = user_event(&q("you", "[from thread alpha] typed by the user"), json!({}));
+        assert!(ev.get("report").is_none() && ev.get("from").is_none());
     }
 }
 

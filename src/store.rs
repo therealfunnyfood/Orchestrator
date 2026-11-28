@@ -150,6 +150,11 @@ pub struct Store {
     pub queue: Vec<crate::queue::QueueItem>,
     /// Kill switch for every business workspace at once (tray menu).
     pub outbound_paused_all: bool,
+    /// Busy mode (the user is busy elsewhere): every notification but deadline risk is
+    /// held until it ends. busy_until 0 = until turned off.
+    pub busy_on: bool,
+    pub busy_since: f64,
+    pub busy_until: f64,
     /// App-side copy of the business audit logs: (time, workspace, line), newest last.
     pub audit: Vec<(f64, String, String)>,
     /// Plan usage readings over time (last 8 days), to learn burn rates.
@@ -294,6 +299,14 @@ pub struct ProjectNotes {
     pub lines: Vec<crate::lines::Line>,
     /// Day (YYYY-MM-DD) the daily "Needs you" summary last went out.
     pub needs_summary_day: String,
+    /// Digests: set once the user chose times (until then 09:00, 13:00, 19:00). Empty
+    /// times with digest_set = digests off (everything is sent right away).
+    pub digest_set: bool,
+    pub digest_times: Vec<String>,
+    /// When the last digest went out.
+    pub digest_last: f64,
+    /// Notifications waiting for the next digest (never dropped).
+    pub held: Vec<crate::digest::Held>,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }

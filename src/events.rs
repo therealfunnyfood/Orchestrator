@@ -58,6 +58,12 @@ impl Hub {
         lines[start..].iter().filter_map(|l| serde_json::from_str(l).ok()).collect()
     }
 
+    /// Search one chat's transcript (case-insensitive) for `q`; hits newest first.
+    pub fn search(&self, key: &str, thread: &str, q: &str, limit: usize) -> Vec<Value> {
+        let Ok(text) = std::fs::read_to_string(self.path(key)) else { return vec![] };
+        search_lines(&text, key, thread, q, limit)
+    }
+
     pub fn remove(&self, key: &str) {
         let _ = std::fs::remove_file(self.path(key));
     }
@@ -197,5 +203,125 @@ impl Hub {
             let key = path.file_stem().unwrap().to_string_lossy().into_owned();
             self.emit(&key, json!({"kind": "notice", "text": "interrupted: the app closed in the middle of this turn", "interrupted": true}));
         }
+    }
+}
+
+/// The searchable words of a saved chat event: what the user, an agent or a question said.
+fn event_text(ev: &Value) -> Option<String> {
+    match ev.get("kind").and_then(Value::as_str)? {
+        "user" | "text" => ev.get("text").and_then(Value::as_str).map(str::to_string),
+        "question" => Some(
+            ev.get("questions").and_then(Value::as_array)?.iter()
+                .filter_map(|q| q.get("question").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        "answer" => ev.get("answers").filter(|a| !a.is_null()).map(|a| match a {
+            Value::Object(m) => m.iter().map(|(k, v)| format!("{k} {}", v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect::<Vec<_>>().join(" "),
+            v => v.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// About 60 characters either side of the first match, on one line.
+fn snippet(text: &str, lower: &str, q: &str) -> String {
+    let one = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(at) = lower.find(q) else { return one(&text.chars().take(120).collect::<String>()) };
+    // Lowercasing can change byte lengths; go through char counts to stay on boundaries.
+    let at_chars = lower[..at].chars().count();
+    let q_chars = q.chars().count();
+    let chars: Vec<char> = text.chars().collect();
+    let start = at_chars.saturating_sub(60).min(chars.len());
+    let end = (at_chars + q_chars + 60).min(chars.len());
+    let mut s = one(&chars[start..end].iter().collect::<String>());
+    if start > 0 {
+        s = format!("…{s}");
+    }
+    if end < chars.len() {
+        s.push('…');
+    }
+    s
+}
+
+/// Search JSONL transcript text; newest hits first, at most `limit`.
+pub fn search_lines(text: &str, key: &str, thread: &str, q: &str, limit: usize) -> Vec<Value> {
+    let q = q.trim().to_lowercase();
+    if q.chars().count() < 2 {
+        return vec![];
+    }
+    let mut out = vec![];
+    for line in text.lines().rev() {
+        if out.len() >= limit {
+            break;
+        }
+        let Ok(ev) = serde_json::from_str::<Value>(line) else { continue };
+        let Some(t) = event_text(&ev) else { continue };
+        let lower = t.to_lowercase();
+        if !lower.contains(&q) {
+            continue;
+        }
+        out.push(json!({
+            "key": key, "thread": thread, "ts": ev.get("ts").cloned().unwrap_or(Value::Null),
+            "kind": ev.get("kind"), "sender": ev.get("sender").cloned().unwrap_or(Value::Null),
+            "snippet": snippet(&t, &lower, &q),
+        }));
+    }
+    out
+}
+
+/// Thread report flags for an orchestrator chat message the threads sent: the names in
+/// its "[from thread X]" / "[from the X]" headers ("@X" for the app's own news).
+pub fn report_from(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for l in text.lines() {
+        let Some(inner) = l.trim().strip_prefix("[from ").and_then(|r| r.strip_suffix(']')) else { continue };
+        let name = match inner.strip_prefix("thread ") {
+            Some(n) => n.to_string(),
+            None => format!("@{}", inner.strip_prefix("the ").unwrap_or(inner)),
+        };
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn search_finds_chat_words_newest_first() {
+        let lines = [
+            json!({"kind": "user", "text": "Please post the Fiverr gig", "sender": "you", "ts": 1.0}),
+            json!({"kind": "tool_use", "name": "x", "input": "fiverr in a tool call is not chat", "ts": 2.0}),
+            json!({"kind": "text", "text": "Done: the FIVERR gig is live. ".repeat(10), "ts": 3.0}),
+            json!({"kind": "question", "questions": [{"question": "Which Fiverr tier?"}], "ts": 4.0}),
+            json!({"kind": "answer", "answers": {"Which Fiverr tier?": "Basic"}, "ts": 5.0}),
+            json!({"kind": "notice", "text": "fiverr notice", "ts": 6.0}),
+        ];
+        let text = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n") + "\nnot json fiverr";
+        let hits = search_lines(&text, "k1", "orchestrator", "fiverr", 50);
+        let ts: Vec<f64> = hits.iter().map(|h| h["ts"].as_f64().unwrap()).collect();
+        assert_eq!(ts, vec![5.0, 4.0, 3.0, 1.0]);
+        assert_eq!(hits[3]["sender"], "you");
+        assert_eq!(hits[3]["key"], "k1");
+        let long = hits[2]["snippet"].as_str().unwrap();
+        assert!(long.to_lowercase().contains("fiverr") && long.ends_with('…') && long.chars().count() < 140, "{long}");
+        // Capped, and too-short queries find nothing.
+        assert_eq!(search_lines(&text, "k1", "o", "fiverr", 2).len(), 2);
+        assert!(search_lines(&text, "k1", "o", "f", 50).is_empty());
+        assert!(search_lines(&text, "k1", "o", "nothing here", 50).is_empty());
+        // Non-ASCII text near the match doesn't break the snippet.
+        let t = json!({"kind": "text", "text": "ÄÖÜ café straße — Größe gig", "ts": 9.0}).to_string();
+        assert_eq!(search_lines(&t, "k", "o", "größe", 5)[0]["snippet"], "ÄÖÜ café straße — Größe gig");
+    }
+
+    #[test]
+    fn report_headers_name_their_threads() {
+        let t = "[from thread alpha]\nalpha finished.\n\n[from the approval queue]\nq1 approved\n\n[from thread beta]\nhi";
+        assert_eq!(report_from(t), vec!["alpha", "@approval queue", "beta"]);
+        assert!(report_from("plain text").is_empty());
     }
 }

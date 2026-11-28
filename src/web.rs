@@ -125,6 +125,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/state", get(|State(a): State<Shared>| async move { Json(a.state_json()) }))
         .route("/api/all-threads", get(|State(a): State<Shared>| async move { Json(a.all_threads_json()) }))
         .route("/api/events/{key}", get(events))
+        .route("/api/search", get(search))
         .route("/api/send", post(send))
         .route("/api/stop", post(stop))
         .route("/api/threads", post(create_thread))
@@ -178,6 +179,15 @@ async fn mcp(State(app): State<Shared>, Path(key): Path<String>, headers: axum::
 async fn events(State(app): State<Shared>, Path(key): Path<String>, Query(q): Query<HashMap<String, String>>) -> Json<Value> {
     let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(3000);
     Json(Value::Array(app.hub.history(&key, limit)))
+}
+
+/// Read-only search of the shown workspace's chats: `?q=...&limit=...` (default 50, max 200).
+async fn search(State(app): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Json<Value> {
+    let text = q.get("q").cloned().unwrap_or_default();
+    let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(50);
+    let ws = app.workspace();
+    let out = tokio::task::spawn_blocking(move || crate::app::search_chats(&app, &ws, &text, limit)).await;
+    Json(out.unwrap_or_else(|_| json!({"hits": [], "truncated": false})))
 }
 
 async fn send(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {

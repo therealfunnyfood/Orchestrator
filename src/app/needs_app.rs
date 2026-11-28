@@ -685,7 +685,7 @@ Help them: tell them what to try (tell_user), or send clearer steps with request
                 fresh
             };
             for v in fresh {
-                self.business_event(ws, "needs_you", Some("needs_you"), json!({"text": v.tldr, "ref": v.id, "kind": v.kind}));
+                self.business_event(ws, "needs_you", Some("needs_you"), json!({"text": v.tldr, "ref": v.id, "entry_kind": v.kind}));
                 self.notify(ws, "needs_you", "Needs you now", &v.tldr);
             }
         }

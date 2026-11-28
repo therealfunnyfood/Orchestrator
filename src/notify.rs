@@ -33,6 +33,10 @@ pub fn summary_line(title: &str, body: &str) -> (String, String) {
 }
 
 fn powershell(script: &str, env: &[(&str, String)]) {
+    // Tests never pop real toasts or push to a phone.
+    if cfg!(test) {
+        return;
+    }
     let mut c = Command::new("powershell.exe");
     c.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
         .stdin(Stdio::null())
