@@ -376,6 +376,7 @@ impl App {
                 "kind": if n.kind == "business" { "business" } else { "development" },
                 "outbound_paused": n.outbound_paused || st.outbound_paused_all, "outbound_paused_all": st.outbound_paused_all,
                 "paused": n.kind == "business" && n.paused,
+                "budget_day": n.budget_day, "budget_week": n.budget_week,
             })
         };
         let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
@@ -388,6 +389,7 @@ impl App {
             "workspace": ws, "recent_workspaces": recent, "open_workspaces": self.open_workspaces_json(), "orchestrator": self.orch_json(),
             "threads": threads, "running": running, "waiting": waiting,
             "project": project, "queue": queue, "secrets": secrets,
+            "spend": if self.is_business(&ws) { let (_, s) = self.budget(&ws); json!({"day": s.day, "week": s.week}) } else { Value::Null },
             "defaults": {
                 "thread_backend": s.thread_backend, "thread_model": s.thread_model,
                 "thread_effort": s.thread_effort, "api_key_set": !s.api_key.trim().is_empty(),
@@ -648,6 +650,7 @@ Your last turn was cut off by a usage limit, which has now reset. Pick up where 
                     } else {
                         app.thread_turn(&key, &msg).await;
                     }
+                    app.check_budget(&app.ws_of(&key));
                     app.touch();
                 }
                 app.finish_jobs();
@@ -2618,6 +2621,78 @@ impl App {
         let text: String = if text.chars().count() > 12000 { text.chars().take(12000).collect::<String>() + "\n(cut short)" } else { text };
         self.audit(&ws, &format!("RAN {id} exit={}", code.map_or("none".to_string(), |c| c.to_string())));
         Ok(format!("{id} ran (exit code {}).\n{text}\n\nNow record what happened with complete_item.", code.map_or("none".to_string(), |c| c.to_string())))
+    }
+
+    /// The workspace's budget caps and what it has spent today and this week.
+    pub fn budget(&self, ws: &str) -> (crate::budget::Caps, crate::budget::Spend) {
+        let st = self.store.lock().unwrap();
+        let n = st.notes(ws).cloned().unwrap_or_default();
+        let caps = if n.kind == "business" { crate::budget::Caps { day: n.budget_day, week: n.budget_week } } else { Default::default() };
+        let spend = crate::budget::spend(st.usage.iter().filter(|u| same_path(&u.3, ws)).map(|u| (u.0, u.2)), now());
+        (caps, spend)
+    }
+
+    /// May a new thread start here? Refused when a cap is reached, unless it's a paid order.
+    pub fn budget_gate(&self, ws: &str, priority: &str) -> Result<(), String> {
+        let (caps, spend) = self.budget(ws);
+        crate::budget::spawn_allowed(caps, spend, priority)
+    }
+
+    /// After a turn: send budget alerts that are due (80% and 100%, once per period).
+    pub fn check_budget(self: &Arc<Self>, ws: &str) {
+        let (caps, spend) = self.budget(ws);
+        let due: Vec<(String, String)> = {
+            let mut st = self.store.lock().unwrap();
+            let n = st.notes_mut(ws);
+            let due: Vec<_> = crate::budget::alerts(caps, spend, now()).into_iter().filter(|(k, _)| !n.budget_alerts.contains(k)).collect();
+            if due.is_empty() {
+                return;
+            }
+            n.budget_alerts.extend(due.iter().map(|(k, _)| k.clone()));
+            let over = n.budget_alerts.len().saturating_sub(20);
+            n.budget_alerts.drain(..over);
+            st.save();
+            due
+        };
+        for (_, msg) in &due {
+            self.audit(ws, &format!("BUDGET {msg}"));
+            self.hub.broadcast(json!({"kind": "toast", "text": format!("{}: {msg}", ws.rsplit(['\\', '/']).next().unwrap_or(ws))}));
+        }
+        crate::attention();
+        let blocked = crate::budget::exceeded(caps, spend).map(|why| format!(
+            "\n{why}: new threads are refused unless their task is a paid order (spawn_thread priority \"{}\"). Running work continues.",
+            crate::budget::PAID_ORDER
+        ));
+        self.post_news(&orch_key(ws), "@budget", &format!("{}{}", due.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>().join("\n"), blocked.unwrap_or_default()));
+    }
+
+    /// Budget caps for the shown workspace (from the window only).
+    pub fn set_budget(&self, day: f64, week: f64) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("budget caps are for business workspaces".into());
+        }
+        if !(day >= 0.0 && week >= 0.0 && day.is_finite() && week.is_finite()) {
+            return Err("caps must be 0 or more".into());
+        }
+        {
+            let mut st = self.store.lock().unwrap();
+            let n = st.notes_mut(&ws);
+            n.budget_day = day;
+            n.budget_week = week;
+            st.save();
+        }
+        self.audit(&ws, &format!("BUDGET CAPS SET day=${day:.2} week=${week:.2} by=user (0 = none)"));
+        self.touch();
+        Ok(())
+    }
+
+    pub fn set_thread_priority(&self, name: &str, priority: &str) {
+        let mut st = self.store.lock().unwrap();
+        if let Some(r) = st.get_mut(name) {
+            r.priority = priority.to_string();
+        }
+        st.save();
     }
 
     pub fn is_paused(&self, ws: &str) -> bool {

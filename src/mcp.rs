@@ -141,6 +141,7 @@ optional: low, medium, high, xhigh or max.",
                 "estimate_minutes": {"type": "number", "description": "how long you expect this task to take, in minutes (low end if you give a range)"},
                 "estimate_max_minutes": {"type": "number", "description": "high end of the range"},
                 "kind": {"type": "string", "description": "kind of work, e.g. small-fix, bugfix, feature, refactor, tests, research, docs, review, setup"},
+                "priority": {"type": "string", "description": "business workspaces: \"paid-order\" for work on a paid order (always allowed, even over budget); otherwise leave it out"},
             }, "required": ["name", "task"]},
         },
         {
@@ -441,10 +442,15 @@ async fn call(app: &Arc<App>, key: &str, name: &str, args: &Value) -> Result<Str
         }
         "spawn_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
+            let priority = arg(args, "priority").unwrap_or("");
+            app.budget_gate(&app.ws_of(key), priority)?;
             let task = arg(args, "task").ok_or("task is required")?;
             let effort = approved_effort(app, key, n, arg(args, "effort"), arg(args, "effort_reason").unwrap_or("")).await?;
             let row = app.create_thread(&app.ws_of(key), n, arg(args, "cwd"), None, arg(args, "model"), effort.as_deref())?;
             app.note_thread_estimate(n, task_estimate(args, task));
+            if !priority.is_empty() {
+                app.set_thread_priority(n, priority);
+            }
             app.send_to_thread(n, task, "orchestrator", vec![], false)?;
             Ok(format!(
                 "started thread {} in {} (model {}, effort {})",
@@ -816,7 +822,7 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

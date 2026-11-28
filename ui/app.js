@@ -2000,6 +2000,13 @@ function renderStatus() {
   }
   const pj = S.state.project || {};
   if (pj.kind === "business") {
+    const sp = S.state.spend || { day: 0, week: 0 };
+    const capD = pj.budget_day || 0, capW = pj.budget_week || 0;
+    const ratio = Math.max(capD ? sp.day / capD : 0, capW ? sp.week / capW : 0);
+    const amt = (v) => (v < 10 ? v.toFixed(2) : v.toFixed(0));
+    const money = capD ? `$${sp.day.toFixed(2)} / $${amt(capD)} today` : capW ? `$${sp.week.toFixed(2)} / $${amt(capW)} this week` : `$${sp.day.toFixed(2)} today`;
+    item(ratio >= 1 ? "pu-full" : ratio >= 0.8 ? "pu-warn" : "", `$ <span class="mono">${esc(money)}</span>`, () => openSettings(),
+      `Spend at API rates (plan and API turns): $${sp.day.toFixed(2)} today, $${sp.week.toFixed(2)} this week.` + (capD || capW ? ` Caps: ${capD ? "$" + capD + "/day" : "no daily cap"}, ${capW ? "$" + capW + "/week" : "no weekly cap"}. Over a cap, only paid-order threads start.` : " No caps set (Settings → Budget)."));
     if (pj.paused) item("pu-full", "⏸ workspace paused", () => openQueue(), "This workspace is paused: nothing runs unless you send it a message. Resume it in the Queue tab.");
     if (pj.outbound_paused_all) item("pu-full", "⏸ outbound paused (all)", null, "Outbound is paused for every business workspace from the tray menu. Untick it there to resume.");
     else item(pj.outbound_paused ? "pu-full" : "", pj.outbound_paused ? "⏸ outbound paused" : "⏸ pause outbound",
@@ -2695,6 +2702,16 @@ async function renderSettings() {
     };
     add.append(name, val, scope, b);
     box.append(add);
+    {
+      const row = h("div", "row");
+      const day = h("input"); day.type = "number"; day.min = "0"; day.step = "0.5"; day.value = S.state.project.budget_day || ""; day.placeholder = "per day ($)";
+      const week = h("input"); week.type = "number"; week.min = "0"; week.step = "1"; week.value = S.state.project.budget_week || ""; week.placeholder = "per week ($)";
+      const b = h("button", "btn primary", "Save caps");
+      b.onclick = () => { if (sendIpc({ op: "set_budget", day: +day.value || 0, week: +week.value || 0 })) { toast("budget caps saved"); setTimeout(loadState, 500); } };
+      row.append(day, week, b);
+      const sp = S.state.spend || { day: 0, week: 0 };
+      setting("Budget", "Budget caps", `Daily and weekly caps on this workspace's cost at API rates (plan and API turns both count; blank or 0 = no cap). Spent so far: <b>$${sp.day.toFixed(2)}</b> today, <b>$${sp.week.toFixed(2)}</b> this week. At 80% you're notified; at 100% new threads only start for paid orders (<code>priority: "paid-order"</code>), and the orchestrator is told why. Can only be changed in this window.`, row);
+    }
     setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it with <code>run_approved</code>. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);
   }
 

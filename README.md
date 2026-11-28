@@ -139,6 +139,10 @@ workspaces are unaffected.
 
   Claude Code's own session files (`~/.claude/projects`) are outside the app, so they
   aren't redacted.
+- **Budget caps.** Set daily and weekly dollar caps in **Settings → Budget**. They count the
+  work's cost at API rates, on the plan or the API. The status bar shows today's spend
+  against the cap. At 80% you're notified. At 100%, new threads only start for paid orders
+  (`spawn_thread` with `priority: "paid-order"`), and the orchestrator is told why.
 - **Audit log.** `<workspace>/queue/audit.log` records every item queued, approved,
   rejected, executed or voided, and every pause and resume. Each line ends with a hash
   that chains it to the line before. The file is read-only, and if anything edits it

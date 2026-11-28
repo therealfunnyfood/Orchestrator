@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.3 (2026-11-28)
+
+- **Budget caps (business workspaces).** Set daily and weekly dollar caps in **Settings →
+  Budget**. They count each turn's cost at API rates, on the plan or the API, from the costs
+  the app already records. Caps can only be changed in the app window.
+- At **80%** of a cap you get a notification, the taskbar flashes, and the orchestrator is
+  told. At **100%**, new threads are refused unless their task is tagged as a paid order
+  (`spawn_thread` with `priority: "paid-order"`). The orchestrator is told why, and running
+  work carries on. Each alert is sent once per day or week, and written to the audit log.
+- The status bar shows today's spend against the cap.
+
 ## 0.5.2 (2026-11-28)
 
 - **Secrets vault (business workspaces).** Add API keys and tokens in **Settings →

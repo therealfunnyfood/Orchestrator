@@ -8,6 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod budget;
 mod claude_projects;
 mod config;
 mod events;
@@ -88,6 +89,15 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
         "vault_remove" => {
             let name = s("name");
             rt().spawn(async move { app.vault_remove(&name) });
+        }
+        "set_budget" => {
+            let n = |k: &str| msg.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let (day, week) = (n("day"), n("week"));
+            rt().spawn(async move {
+                if let Err(e) = app.set_budget(day, week) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
         }
         "set_outbound_paused" => {
             let paused = msg.get("paused").and_then(|v| v.as_bool()).unwrap_or(true);

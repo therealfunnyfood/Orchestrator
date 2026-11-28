@@ -41,6 +41,8 @@ pub struct ThreadRow {
     pub resolved: bool,
     pub resolved_at: f64,
     pub resolved_note: String,
+    /// "paid-order" threads always run, whatever the budget or usage gates say.
+    pub priority: String,
 }
 
 impl Default for ThreadRow {
@@ -67,6 +69,7 @@ impl Default for ThreadRow {
             resolved: false,
             resolved_at: 0.0,
             resolved_note: String::new(),
+            priority: String::new(),
         }
     }
 }
@@ -217,6 +220,11 @@ pub struct ProjectNotes {
     pub paused: bool,
     /// Hash at the end of the last line the app wrote to queue/audit.log.
     pub audit_tip: String,
+    /// Business budget caps in dollars of API-rate cost (0 = none).
+    pub budget_day: f64,
+    pub budget_week: f64,
+    /// Budget alerts already sent (period:threshold keys), so each goes out once.
+    pub budget_alerts: Vec<String>,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }
