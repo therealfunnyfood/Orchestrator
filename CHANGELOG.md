@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.7 (2026-11-28)
+
+- **Focus sweep:** "▶ Start a 10-min sweep" shows one card at a time. Enter does the
+  recommended action, but never on careful items (high risk, spending, commands, secrets,
+  money kinds), and it ignores key repeat.
+- **Digests:** non-urgent notifications are held for up to 3 summaries a day (09:00 / 13:00 /
+  19:00, set per workspace in Settings).
+- **Busy mode** (status bar): holds everything except deadline risk, then sends one summary of
+  what was held. Atlas sees `busy`, `held`, `busy_changed` and `digest`.
+- **Quieter chat:** thread reports collapse to one line; filter All / Needs you / Messages to
+  me; search across a workspace's chat. Plain words in the UI.
+- **Messages between workspaces:** `list_sessions` and `message_session`. Every message needs
+  your OK (Allow once / Always allow / Deny) unless you set a standing one-direction rule in
+  Settings. Agents can't create rules. Fails closed, fully audited.
+- **Security:** user actions, spending and destructive actions moved from HTTP to window-only
+  IPC (send, edit, answer, new thread, permission, backend/mix/effort cap/API key, per-thread
+  model/effort/backend, update install, orchestrator reset, thread delete, queue
+  remove/clear/run-now, resolve, lessons, notes, import, workspace close). Per-turn MCP
+  secret per session, config file deleted on first connect. Thread tools limited to the
+  caller's workspace. `--serve` browser mode can no longer send or answer. Still open over
+  HTTP: inbox, handoff, switch workspace, stop.
+
 ## 0.6.6 (2026-11-28)
 
 - **New "📌 Needs you (N)" tab and sidebar badges.** Everything waiting on you (questions,
