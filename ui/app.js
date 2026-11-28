@@ -1285,7 +1285,7 @@ function renderQueuePane() {
     ctl.append(wb);
     page.append(ctl);
   }
-  const low = q.pending.filter((i) => i.risk === "low");
+  const low = q.pending.filter((i) => i.risk === "low" && !i.manual && !(i.capacity && !i.capacity.ok));
   if (low.length > 1) {
     const b = h("button", "btn", `Approve all low-risk (${low.length})`);
     b.onclick = () => {
@@ -1313,6 +1313,63 @@ function renderQueuePane() {
     }
   }
   pane.append(page);
+}
+
+// Put text on the clipboard: in the app window the app writes it (the browser clipboard
+// API is refused when the page isn't focused); in a browser, the clipboard API.
+async function copyText(text) {
+  if (window.ipc?.postMessage) { window.ipc.postMessage(JSON.stringify({ op: "copy", text })); return true; }
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) { fail(e); return false; }
+}
+
+// A manual task (done by the user in another app): each prompt with a Copy button, and a
+// drop zone that saves files to inbox/images/<item-id>/.
+function manualTask(i) {
+  const box = h("div", "manual");
+  const text = i.payload || "";
+  const fenced = [...text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].map((m) => m[1].trim());
+  const prompts = (fenced.length ? fenced : text.split(/\n\s*\n/).map((p) => p.trim())).filter(Boolean);
+  if (prompts.length > 1 || fenced.length) {
+    prompts.forEach((p, n) => {
+      const row = h("div", "prompt-row");
+      const copy = h("button", "btn", "Copy");
+      copy.onclick = async () => { if (await copyText(p)) { copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1200); } };
+      row.append(h("span", "qid", `#${n + 1}`), h("pre", "prompt", p), copy);
+      box.append(row);
+    });
+  } else {
+    const copy = h("button", "btn", "Copy payload");
+    copy.onclick = async () => { if (await copyText(text)) { copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy payload"), 1200); } };
+    box.append(copy);
+  }
+  const drop = h("div", "drop");
+  const list = () => {
+    drop.textContent = "";
+    drop.append(h("div", "sub", `Drop the files here: they're saved to inbox/images/${i.id}/`));
+    for (const f of i.dropped || []) {
+      if (/\.(png|jpe?g|gif|webp)$/i.test(f)) {
+        const img = h("img");
+        img.src = fileUrl(`${i.drop_dir}\\${f}`);
+        img.title = f;
+        img.onclick = () => lightbox(img.src);
+        drop.append(img);
+      } else drop.append(h("span", "qchip", f));
+    }
+  };
+  list();
+  drop.ondragover = (e) => { e.preventDefault(); e.stopPropagation(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = async (e) => {
+    e.preventDefault(); e.stopPropagation(); drop.classList.remove("over");
+    for (const f of e.dataTransfer.files) {
+      const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
+      try { await api("/api/queue/drop", { body: { id: i.id, name: f.name, data } }); } catch (err) { fail(err); }
+    }
+    lastSig.queue = null;
+    await loadState();
+  };
+  box.append(drop);
+  return box;
 }
 
 // The Inbox: paste text or drop files here (or press Ctrl+Alt+I anywhere to save the
@@ -1362,6 +1419,7 @@ function queueCard(i) {
   }
   const pre = h("pre", "qpayload", i.payload);
   c.append(pre);
+  if (i.manual) c.append(manualTask(i));
   if (i.command) {
     c.append(h("div", "qmeta", `runs with run_approved${i.secrets?.length ? ` · gets secrets: ${i.secrets.join(", ")}` : ""}`), h("pre", "qpayload qcmd", i.command));
   }
@@ -1429,7 +1487,13 @@ function queueCard(i) {
     acts.append(why, ok, cancel);
     why.focus();
   };
-  acts.append(approve, edit, reject);
+  if (i.manual) {
+    // A task the user does by hand: Done (with the dropped files) instead of approve/edit.
+    const done = h("button", "btn primary", `Done${i.dropped?.length ? ` (${i.dropped.length} file${i.dropped.length > 1 ? "s" : ""})` : ""}`);
+    done.title = "Tell the orchestrator you did it, and that the files you dropped are in";
+    done.onclick = () => { if (sendIpc({ op: "queue_done", id: i.id })) busy(done); };
+    acts.append(done, reject);
+  } else acts.append(approve, edit, reject);
   c.append(acts);
   return c;
 }

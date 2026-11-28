@@ -154,6 +154,40 @@ pub fn complete(item: &mut QueueItem, result: &str, now: f64) -> Result<(), Stri
     Ok(())
 }
 
+/// Items the user carries out by hand (in another app, with no API): the card gets copy
+/// buttons, a file drop and a Done button.
+pub fn is_manual(item: &QueueItem) -> bool {
+    item.who_executes == "user" || item.kind == "manual_image"
+}
+
+/// The user did a manual item by hand: it's done, with the files they dropped in.
+pub fn done_by_user(item: &mut QueueItem, files: &[String], now: f64) -> Result<(), String> {
+    if !is_manual(item) {
+        return Err(format!("{} isn't a manual task", item.id));
+    }
+    if item.status != "pending" && item.status != "approved" {
+        return Err(format!("{} is already {}", item.id, item.status));
+    }
+    item.status = "done".into();
+    item.result = if files.is_empty() { "Done by the user.".into() } else { format!("Done by the user. Files: {}", files.join(", ")) };
+    item.decided_at = if item.decided_at > 0.0 { item.decided_at } else { now };
+    item.done_at = now;
+    Ok(())
+}
+
+/// Where a manual item's dropped files go: <workspace>/inbox/images/<item-id>/.
+pub fn drop_dir(item: &QueueItem) -> PathBuf {
+    Path::new(&item.workspace).join("inbox").join("images").join(&item.id)
+}
+
+/// A safe file name for a dropped file (no folders, no odd characters).
+pub fn safe_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("file");
+    let cleaned: String = base.chars().map(|c| if c.is_ascii_alphanumeric() || "._- ".contains(c) { c } else { '_' }).collect();
+    let cleaned = cleaned.trim().trim_start_matches('.').to_string();
+    if cleaned.is_empty() { "file".into() } else { cleaned }
+}
+
 pub fn slug(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
@@ -459,6 +493,23 @@ mod tests {
         // From here on the chain holds.
         let _ = audit_append(&ws, &tip, "APPROVED q2 by=user");
         assert!(!std::fs::read_to_string(d.join("queue/audit.log")).unwrap().contains("TAMPER"));
+    }
+
+    #[test]
+    fn manual_tasks_are_done_by_the_user_with_their_files() {
+        let d = tmp("manual");
+        let mut i = item(&d);
+        assert!(done_by_user(&mut i, &[], 1.0).is_err(), "only manual tasks");
+        i.kind = "manual_image".into();
+        i.who_executes = "user".into();
+        done_by_user(&mut i, &["a.png".into(), "b.png".into()], 2.0).unwrap();
+        assert_eq!(i.status, "done");
+        assert!(i.result.contains("a.png, b.png"));
+        assert!(done_by_user(&mut i, &[], 3.0).is_err(), "only once");
+        assert!(drop_dir(&i).ends_with("inbox/images/q1") || drop_dir(&i).ends_with("inbox\\images\\q1"));
+        assert_eq!(safe_file_name("..\\..\\evil/../x.png"), "x.png");
+        assert_eq!(safe_file_name("my design (v2).png"), "my design _v2_.png");
+        assert_eq!(safe_file_name("..."), "file");
     }
 
     #[test]

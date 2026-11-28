@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.10 (2026-11-28)
+
+- **Manual tasks with a file drop (business workspaces).** This is for queue items you do by
+  hand in another app (`manual_image`, or anything with `who_executes: user`), for example
+  generating images in ChatGPT.
+- Their card shows each prompt (each code block, or each paragraph) with a **Copy** button.
+- A drop zone on the card saves the files you drag in to `inbox/images/<item-id>/`, and
+  shows image previews.
+- **Done** marks the item done and tells the orchestrator which files are in, so it can pick
+  them up. Manual tasks are left out of "Approve all low-risk".
+
 ## 0.5.9 (2026-11-28)
 
 - **Notifications (business workspaces).** Windows notifications for urgent queue items,

@@ -76,6 +76,22 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
                 }
             });
         }
+        "copy" => {
+            let text = s("text");
+            std::thread::spawn(move || {
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    let _ = cb.set_text(text);
+                }
+            });
+        }
+        "queue_done" => {
+            let id = s("id");
+            rt().spawn(async move {
+                if let Err(e) = app.queue_user_done(&id) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
         "set_notify" => {
             let events: Vec<String> = msg.get("events").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
             let phone = s("phone");

@@ -3277,6 +3277,61 @@ impl App {
         Ok(())
     }
 
+    // ---- manual tasks (queue items the user does by hand) ----
+
+    /// Save a file the user dropped on a manual task's card to inbox/images/<id>/.
+    pub fn queue_drop_file(&self, id: &str, name: &str, b64: &str) -> Result<String, String> {
+        use base64::Engine;
+        let item = self.store.lock().unwrap().queue.iter().find(|i| i.id == id).cloned().ok_or(format!("no queue item {id}"))?;
+        if !crate::queue::is_manual(&item) || !["pending", "approved"].contains(&item.status.as_str()) {
+            return Err(format!("{id} isn't an open manual task"));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| format!("bad file data: {e}"))?;
+        if bytes.len() > 50 * 1024 * 1024 {
+            return Err("files over 50 MB aren't taken".into());
+        }
+        let dir = crate::queue::drop_dir(&item);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join(crate::queue::safe_file_name(name));
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        self.touch();
+        Ok(path.display().to_string())
+    }
+
+    /// Files dropped on a manual task so far (names).
+    pub fn queue_dropped(item: &crate::queue::QueueItem) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(crate::queue::drop_dir(item))
+            .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).map(|e| e.file_name().to_string_lossy().to_string()).collect())
+            .unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    /// The user's Done on a manual task (from the window only): it's done, and the
+    /// orchestrator is told which files are in.
+    pub fn queue_user_done(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        let item = {
+            let mut st = self.store.lock().unwrap();
+            let item = st.queue.iter_mut().find(|i| i.id == id).ok_or(format!("no queue item {id}"))?;
+            let files: Vec<String> = Self::queue_dropped(item);
+            crate::queue::done_by_user(item, &files, now())?;
+            crate::queue::mirror(item);
+            let c = item.clone();
+            st.save();
+            c
+        };
+        let files = Self::queue_dropped(&item);
+        let rel = format!("inbox/images/{}/", item.id);
+        self.audit(&item.workspace, &format!("DONE BY USER {}{}", item.id, if files.is_empty() { String::new() } else { format!(" ({} file(s) in {rel})", files.len()) }));
+        self.post_news(&orch_key(&item.workspace), "@approval queue", &format!(
+            "The user did {} ({}, line {}) by hand: {}{}",
+            item.id, item.kind, if item.line.is_empty() { "-" } else { &item.line }, item.summary,
+            if files.is_empty() { "\nNo files were dropped in.".to_string() } else { format!("\nTheir files are in {rel}: {}. Pick them up from there.", files.join(", ")) }
+        ));
+        self.queue_changed();
+        Ok(())
+    }
+
     // ---- inbox capture (inbox.rs) ----
 
     /// Where captures go: the shown workspace if it's a business one, else the first open
@@ -3688,7 +3743,7 @@ impl App {
         let ws = self.workspace();
         let mut st = self.store.lock().unwrap();
         let mut done = vec![];
-        for item in st.queue.iter_mut().filter(|i| same_path(&i.workspace, &ws) && i.status == "pending" && i.risk == "low" && !i.capacity.as_ref().is_some_and(|c| !c.ok)) {
+        for item in st.queue.iter_mut().filter(|i| same_path(&i.workspace, &ws) && i.status == "pending" && i.risk == "low" && !i.capacity.as_ref().is_some_and(|c| !c.ok) && !crate::queue::is_manual(i)) {
             crate::queue::decide(item, crate::queue::Decision::Approve, "", now())?;
             crate::queue::mirror(item);
             done.push(item.clone());
@@ -3735,6 +3790,18 @@ impl App {
         let mut items: Vec<&crate::queue::QueueItem> = st.queue.iter().filter(|i| same_path(&i.workspace, ws)).collect();
         items.sort_by(|a, b| b.created_at.total_cmp(&a.created_at));
         let (pending, decided): (Vec<_>, Vec<_>) = items.into_iter().partition(|i| i.status == "pending");
+        let pending: Vec<Value> = pending
+            .into_iter()
+            .map(|i| {
+                let mut v = json!(i);
+                if crate::queue::is_manual(i) {
+                    v["manual"] = json!(true);
+                    v["dropped"] = json!(Self::queue_dropped(i));
+                    v["drop_dir"] = json!(crate::queue::drop_dir(i));
+                }
+                v
+            })
+            .collect();
         let mut decided = decided;
         decided.sort_by(|a, b| b.decided_at.max(b.done_at).total_cmp(&a.decided_at.max(a.done_at)));
         decided.truncate(40);

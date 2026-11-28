@@ -636,3 +636,10 @@ code.tlink { background: none; padding: 0; }
 .inbox-box.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .inbox-text { width: 100%; background: transparent; border: 0; outline: 0; color: var(--text); font-family: var(--mono); font-size: 12.5px; resize: vertical; }
 .inbox-box .row { display: flex; gap: 8px; margin-top: 4px; }
+.manual { margin: 0 0 8px; }
+.prompt-row { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0; }
+.prompt-row .prompt { flex: 1; margin: 0; white-space: pre-wrap; word-break: break-word; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font-size: 12.5px; }
+.manual .drop { border: 1px dashed var(--border); border-radius: 6px; padding: 8px; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 48px; }
+.manual .drop .sub { flex-basis: 100%; margin: 0; }
+.manual .drop.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.manual .drop img { max-height: 90px; border-radius: 4px; cursor: zoom-in; }

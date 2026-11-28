@@ -106,6 +106,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/plan-usage/refresh", post(refresh_plan_usage))
         .route("/api/queue", post(queue))
         .route("/api/inbox", post(inbox_drop))
+        .route("/api/queue/drop", post(queue_drop))
         .route("/api/state", get(|State(a): State<Shared>| async move { Json(a.state_json()) }))
         .route("/api/all-threads", get(|State(a): State<Shared>| async move { Json(a.all_threads_json()) }))
         .route("/api/events/{key}", get(events))
@@ -510,6 +511,13 @@ async fn inbox_drop(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResul
         _ => None,
     };
     let path = app.inbox_drop(text, file).map_err(ApiError)?;
+    Ok(Json(json!({"ok": true, "path": path})))
+}
+
+/// A file dropped on a manual task's card (saved to inbox/images/<id>/).
+async fn queue_drop(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
+    let (id, name, data) = (s(&b, "id").unwrap_or(""), s(&b, "name").unwrap_or("file"), s(&b, "data").unwrap_or(""));
+    let path = app.queue_drop_file(id, name, data).map_err(ApiError)?;
     Ok(Json(json!({"ok": true, "path": path})))
 }
 
