@@ -838,6 +838,10 @@ function renderEventInner(ev, log) {
     const e = h("div", "ev text md" + (ev.sub ? " sub" : ""));
     decorateText(e, ev.text);
     log.append(e);
+  } else if (k === "xws_request") {
+    log.append(xwsRequestCard(ev));
+  } else if (k === "xws_result") {
+    xwsResult(ev, log);
   } else if (k === "question") {
     log.append(questionCard(ev));
   } else if (k === "answer") {
@@ -1485,7 +1489,7 @@ function manualTask(i) {
 // entry's workspace (`ws`) so other open workspaces can be acted on in place; decisions
 // (queue_decide) only work in the shown workspace, so those cards open the workspace first.
 const ND = { all: false, later: false, done: false, more: new Set(), menu: null, dismiss: null, reject: null, player: null, draft: {} };
-const ND_KIND = { question: "Question", decision: "Decision", manual: "Do by hand", action: "To do", heads_up: "Heads-up" };
+const ND_KIND = { question: "Question", decision: "Decision", manual: "Do by hand", action: "To do", heads_up: "Heads-up", message: "Message" };
 const ndSameWs = (v) => !v.ws || v.ws.toLowerCase() === (S.state.workspace || "").toLowerCase();
 const ndCan = (v) => ndSameWs(v) || v.kind !== "decision";
 function needIpc(v, msg) { return sendIpc(ndSameWs(v) ? { op: "need", ...msg } : { op: "need", ws: v.ws, ...msg }); }
@@ -1637,6 +1641,12 @@ function needCard(v, o = {}) {
     const r = h("div", "nd-rec");
     r.append(document.createTextNode("I'd suggest: "), h("b", null, ({ approve: "approve it", reject: "reject it", edit: "edit it first", do: "do it", skip: "skip it" })[v.recommend] || v.recommend));
     c.append(r);
+  }
+  if (v.kind === "message" && v.xws) {
+    if (!ndSameWs(v)) { const b = h("button", "btn primary", "Open " + baseName(v.ws) + " to decide"); b.onclick = () => switchWorkspace(v.ws).then(() => openNeeds()); c.append(b); return c; }
+    c.append(xwsBlock(v.xws, v.id));
+    if (v.msg_ts) { const j = h("button", "btn quiet", "💬 Chat"); j.onclick = () => ndJump(v); c.append(j); }
+    return c;
   }
   if (v.why) c.append(h("div", "nd-why", v.why));
   if (!ndCan(v)) {
@@ -1942,6 +1952,8 @@ function renderSweep(pane) {
     nav.append(doneBtn("I did it", { action: "done", id: v.id }, v.plan ? "btn" : "btn primary"));
   } else if (v.kind === "heads_up") {
     nav.append(doneBtn("Got it", { action: "done", id: v.id }));
+  } else if (v.kind === "message" && v.xws) {
+    box.append(xwsBlock(v.xws, v.id, () => swDid(v, true)));
   }
   if (nav.children.length) box.append(nav);
   if (SW.reject && v.kind === "decision") {
@@ -2859,6 +2871,57 @@ function renderChips() {
   const keys = h("span", "keys");
   keys.innerHTML = "<kbd>⏎</kbd> send · <kbd>⇧⏎</kbd> newline · <kbd>/</kbd> commands · <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>P</kbd>";
   c.append(keys);
+}
+
+// ---------------------------------------------------------------- messages between workspaces
+// An agent asked to message a session in another workspace. Allow / Always allow / Deny go only
+// over IPC. `x` has from_name, from_session, to_name, to_session, message, why; `id` is the
+// need id or the request id (the backend takes either).
+function xwsBlock(x, id, onSent) {
+  const box = h("div", "xws");
+  const route = h("div", "xws-route");
+  route.append(document.createTextNode("From "), h("b", null, `${x.from_name} / ${x.from_session}`), document.createTextNode("  →  To "), h("b", null, `${x.to_name} / ${x.to_session}`));
+  box.append(route, h("pre", "xws-msg", x.message || ""));
+  if (x.why) box.append(h("div", "nd-why", "Why: " + x.why));
+  const acts = h("div", "nd-acts");
+  const go = (msg) => { if (sendIpc({ op: "xws", id, ...msg })) { $$("button", box).forEach((b) => { b.disabled = true; }); onSent?.(); } };
+  const once = h("button", "btn primary", "Allow once");
+  once.onclick = () => go({ action: "allow_once" });
+  const always = h("button", "btn", `Always allow ${x.from_name} → ${x.to_name}`);
+  always.title = "Also lets every session in " + x.from_name + " message " + x.to_name + " without asking again. You can undo it in Settings.";
+  always.onclick = () => { if (confirm(`From now on, any session in ${x.from_name} can message any session in ${x.to_name} without asking you. Continue?`)) go({ action: "allow_always" }); };
+  const deny = h("button", "btn danger", "Deny");
+  const denyRow = h("div", "nd-menu hidden");
+  const note = h("input", "nd-in");
+  note.placeholder = "Why not? (optional, the agent sees it)";
+  const dok = h("button", "btn danger", "Deny it");
+  dok.onclick = () => go({ action: "deny", note: note.value.trim() });
+  note.onkeydown = (e) => { if (e.key === "Enter") dok.onclick(); if (e.key === "Escape") denyRow.classList.add("hidden"); };
+  denyRow.append(note, dok);
+  deny.onclick = () => { denyRow.classList.toggle("hidden"); note.focus(); };
+  acts.append(once, always, deny);
+  box.append(acts, denyRow);
+  return box;
+}
+
+const XWS_OUT = { allowed: "Sent (once).", always: "Sent. Always allowed from now on.", denied: "Denied.", expired: "The agent stopped waiting, so nothing was sent.", cancelled: "Cancelled.", rule: "Sent (standing rule)." };
+function xwsRequestCard(ev) {
+  const e = h("div", "ev xws-card");
+  e.dataset.id = ev.id;
+  e.append(h("div", "xws-head", "✉ Message to another workspace: needs your OK"));
+  e.append(xwsBlock(ev, ev.id));
+  return e;
+}
+function xwsResult(ev, log) {
+  const card = log.querySelector(`.ev.xws-card[data-id="${ev.id}"]`);
+  const text = (XWS_OUT[ev.outcome] || ev.outcome) + (ev.note ? " " + ev.note : "");
+  if (!card) {
+    log.append(h("div", "ev notice", ev.outcome === "rule" ? `→ ${text.replace(/\.$/, "")}` : text));
+    return;
+  }
+  card.classList.add("done");
+  $$("button, input", card).forEach((b) => { b.disabled = true; });
+  card.append(h("div", "xws-out", text));
 }
 
 // ---------------------------------------------------------------- quieter chat: filter + search
@@ -3863,6 +3926,37 @@ async function renderSettings() {
       setting("Phone", "Phone access (Atlas Business tab)", "Off by default. When on, the Atlas companion on this PC can read a <b>read-only</b> feed of this workspace over the local API: pending items with their exact payloads, today's deadlines and usage, money totals, schedules, attachment thumbnails, and live events. Nothing can be approved or changed through it.", lab);
     }
     setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it with <code>run_approved</code>. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);
+  }
+
+  section("Messages between workspaces");
+  {
+    const x = S.state.xws || { rules: [], pending: 0 };
+    const box = h("div");
+    for (const ru of x.rules || []) {
+      const row = h("div", "row");
+      row.append(h("span", null, `${ru.from_name} → ${ru.to_name}`));
+      const rv = h("button", "btn danger sm", "Revoke");
+      rv.onclick = () => { if (sendIpc({ op: "xws", action: "rule_revoke", id: ru.id })) { rv.disabled = true; setTimeout(() => loadState().then(renderSettings), 500); } };
+      row.append(rv);
+      box.append(row);
+    }
+    if (!(x.rules || []).length) box.append(h("div", "sub", "No standing rules. Every message to another workspace asks you first."));
+    const wss = (S.state.open_workspaces || []).map((w) => [w.path, baseName(w.path)]);
+    if (wss.length > 1) {
+      const add = h("div", "row");
+      const mk = () => { const el = h("select"); for (const [v, l] of wss) { const o = h("option", null, l); o.value = v; el.append(o); } return el; };
+      const from = mk(), to = mk();
+      to.selectedIndex = 1;
+      const b = h("button", "btn primary", "Add");
+      b.onclick = () => {
+        if (from.value === to.value) return toast("Pick two different workspaces", true);
+        if (!confirm(`Let any session in ${baseName(from.value)} message any session in ${baseName(to.value)} without asking you each time?`)) return;
+        if (sendIpc({ op: "xws", action: "rule_add", from: from.value, to: to.value })) setTimeout(() => loadState().then(renderSettings), 500);
+      };
+      add.append(h("span", "sub", "Allow"), from, h("span", null, "→"), to, b);
+      box.append(add);
+    }
+    setting("Messages", "Messages between workspaces", "An agent in one workspace can ask to message a session in another. By default you approve each one (it shows up in Needs you and in the chat). A rule lets one direction through without asking. It works one way only: allowing dev → biz does not allow biz → dev.", box);
   }
 
   section("Billing");

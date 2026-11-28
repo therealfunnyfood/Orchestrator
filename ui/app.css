@@ -736,3 +736,16 @@ code.tlink { background: none; padding: 0; }
 #log.f-me > :not(.text):not(.question):not(.media):not(#working):not(#draft):not(.welcome) { display: none; }
 #log.f-me > .text.sub { display: none; }
 .ev.user.setup.thread-report { padding-top: 2px; padding-bottom: 2px; }
+
+/* ---------- messages between workspaces ---------- */
+.xws .xws-route { font-size: 15px; margin: 6px 0; }
+.xws .xws-route b { color: var(--accent); }
+.xws pre.xws-msg { white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 8px 0; font-size: 13px; }
+.xws .nd-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.xws .nd-menu { display: flex; gap: 8px; margin-top: 8px; }
+.xws .nd-menu input { flex: 1; }
+.ev.xws-card { border-left: 3px solid var(--accent); padding: 8px 14px; margin: 8px 0; background: var(--input); border-radius: 6px; font-family: var(--sans, inherit); }
+.ev.xws-card .xws-head { font-weight: 600; color: var(--strong); }
+.ev.xws-card.done { opacity: .6; border-left-color: var(--border); }
+.ev.xws-card.done .nd-acts, .ev.xws-card.done .nd-menu { display: none; }
+.ev.xws-card .xws-out { margin-top: 6px; color: var(--muted); font-size: 13px; }
