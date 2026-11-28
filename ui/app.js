@@ -267,6 +267,34 @@ function renderChrome() {
 function stClass(t) { return t.busy ? (t.status === "queued" ? "queued" : "running") : t.status; }
 
 const lastSig = {};
+// A pane rebuilt from a state push must not lose the reader's place: remember the first
+// card in view ([data-anchor]) and how far down it sat, then put it back there, so cards
+// added or removed above don't move what they're reading. Falls back to scrollTop.
+function scrollState(pane) {
+  const page = $(".page", pane);
+  if (!page) return null;
+  const box = page.getBoundingClientRect();
+  const a = [...page.querySelectorAll("[data-anchor]")].find((e) => e.getBoundingClientRect().bottom > box.top + 1);
+  return { top: page.scrollTop, anchor: a?.dataset.anchor, offset: a ? a.getBoundingClientRect().top - box.top : 0 };
+}
+
+function restoreScroll(pane, s) {
+  const page = $(".page", pane);
+  if (!s || !page) return;
+  const a = s.anchor && [...page.querySelectorAll("[data-anchor]")].find((e) => e.dataset.anchor === s.anchor);
+  if (!a) { page.scrollTop = s.top; return; }
+  // Parts that fill in later (thumbnails, file lists) grow the cards above: keep the card
+  // pinned as they do, for a few seconds or until the user scrolls themselves.
+  let mine = false;
+  for (const ev of ["wheel", "mousedown", "keydown", "touchstart"]) page.addEventListener(ev, () => { mine = true; }, { once: true });
+  const pin = () => { if (!mine && a.isConnected) page.scrollTop += a.getBoundingClientRect().top - page.getBoundingClientRect().top - s.offset; };
+  pin();
+  const ro = new ResizeObserver(pin);
+  for (const el of page.children) ro.observe(el);
+  for (const el of page.querySelectorAll("[data-anchor]")) ro.observe(el);
+  setTimeout(() => ro.disconnect(), 3000);
+}
+
 function changed(part, data) {
   const sig = JSON.stringify(data);
   if (lastSig[part] === sig) return false;
@@ -1281,7 +1309,8 @@ function renderQueuePane() {
   const q = S.state.queue;
   // Don't wipe a card the user is editing or rejecting.
   if ($(".qcard.editing", pane)) return;
-  if (!changed("queue", [q, S.state.workspace]) && $(".page", pane)) return;
+  if (!changed("queue", [q, S.state.workspace, S.state.project?.outbound_paused, S.state.project?.paused]) && $(".page", pane)) return;
+  const keep = scrollState(pane);
   pane.textContent = "";
   const page = h("div", "page queue-page");
   page.append(h("h1", null, "Approval queue"));
@@ -1337,10 +1366,12 @@ function renderQueuePane() {
       const more = i.status === "rejected" ? i.note : i.status === "done" ? i.result : i.note;
       if (more) r.append(h("div", "qmore", more));
       r.title = `${i.id} · ${i.type} · line ${i.line || "-"}\nby ${i.created_by}`;
+      r.dataset.anchor = i.id;
       page.append(r);
     }
   }
   pane.append(page);
+  restoreScroll(pane, keep);
 }
 
 // Put text on the clipboard: in the app window the app writes it (the browser clipboard
@@ -1507,6 +1538,7 @@ function inboxBox() {
 
 function queueCard(i) {
   const c = h("div", "qcard" + (i.urgent ? " urgent" : ""));
+  c.dataset.anchor = i.id;
   const head = h("div", "qhead");
   head.append(h("span", "qchip", i.type));
   if (i.line) head.append(h("span", "qchip", "line " + i.line));

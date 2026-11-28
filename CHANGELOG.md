@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.5 (2026-11-28)
+
+- **The Queue page no longer jumps back to the top while you scroll.** When a new item
+  arrives or something changes, the page still refreshes, but it keeps the card you were
+  reading in the same place, even when cards are added above it or thumbnails finish
+  loading. Your own scrolling always wins.
+- The Queue page now also refreshes when outbound or the workspace is paused or resumed.
+
 ## 0.6.4 (2026-11-28)
 
 - **Shared lessons are scoped by workspace type.** There are now three shared lists, plus each
