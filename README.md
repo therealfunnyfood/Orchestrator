@@ -124,6 +124,11 @@ weekly review, and learn from rejected items. The rest is the same text in both 
   press **Ctrl+Alt+I** anywhere to save what's on the clipboard (text or an image). Each
   capture is saved as `<workspace>/inbox/YYYYMMDD-HHMM-<slug>.md`, with images and files
   next to it, and the orchestrator is told so it can triage it.
+- **Notifications.** Windows notifications for urgent queue items, finished scheduled runs,
+  budget alerts, orders at risk and usage gates. Choose which in **Settings →
+  Notifications**. Optionally push them to your phone through ntfy.sh or your own Telegram
+  bot (its topic or token goes in the vault). Only a one-line summary is sent, never an
+  item's payload.
 - **Readable copies.** Each item is also written as a read-only Markdown file in
   `<workspace>/queue/pending|approved|rejected|done|void/`. Editing or moving those files
   changes nothing. Every queue event is appended to `<workspace>/queue/audit.log`.

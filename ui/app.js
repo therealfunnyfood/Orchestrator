@@ -2820,6 +2820,28 @@ async function renderSettings() {
       const box = h("div"); box.append(row, row2);
       setting("Usage", "Usage gates (this workspace runs on your plan)", `Keeps paid work deliverable. At the first two percentages only <code>priority: "paid-order"</code> threads start; at the third, running non-paid threads are asked to checkpoint and stop. Offers, accepted orders and new gigs carry an app-made capacity check: reserved orders plus the new one must fit in the share of weekly usage projected to be left before its deadline, or the card shows it in red and needs a second click. The API fallback (needs an API key) only ever applies to paid-order threads, up to the cap per order.`, box);
     }
+    {
+      const pj = S.state.project;
+      const EV = [["urgent", "Urgent queue items"], ["schedule", "Finished scheduled runs"], ["budget", "Budget alerts"], ["deadline", "Orders at risk of missing their deadline"], ["usage", "Usage gates"]];
+      const on = new Set(pj.notify_events || []);
+      const box = h("div");
+      const cbs = EV.map(([id, label]) => {
+        const l = h("label"); l.style.cssText = "display:flex;gap:6px;align-items:center";
+        const c = h("input"); c.type = "checkbox"; c.checked = on.has(id); c.dataset.ev = id;
+        l.append(c, document.createTextNode(label)); box.append(l); return c;
+      });
+      const row = h("div", "row");
+      const phone = h("select");
+      for (const [v, l] of [["", "no phone push"], ["ntfy", "ntfy.sh (secret NTFY_TOPIC)"], ["telegram", "Telegram bot (secrets TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)"]]) { const o = h("option", null, l); o.value = v; phone.append(o); }
+      phone.value = pj.notify_phone || "";
+      const save = h("button", "btn primary", "Save");
+      save.onclick = () => { if (sendIpc({ op: "set_notify", events: cbs.filter((c) => c.checked).map((c) => c.dataset.ev), phone: phone.value })) setTimeout(loadState, 500); };
+      const test = h("button", "btn", "Send a test");
+      test.onclick = () => sendIpc({ op: "notify_test" });
+      row.append(phone, save, test);
+      box.append(row);
+      setting("Notifications", "Notifications", "Windows notifications for the events you tick, and optionally a push to your phone through <a href='https://ntfy.sh' target='_blank' rel='noopener'>ntfy.sh</a> or your own Telegram bot (add its topic or token under Secrets below, approved-actions-only scope is fine). Only a one-line summary is sent, with secrets redacted, never an item's payload.", box);
+    }
     setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it with <code>run_approved</code>. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);
   }
 

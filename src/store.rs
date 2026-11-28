@@ -246,6 +246,11 @@ pub struct ProjectNotes {
     pub paid_api_fallback: bool,
     /// Dollar cap of API use per paid order (0 = none).
     pub paid_api_cap_usd: f64,
+    /// Notifications: set once the user has chosen (until then every event toasts).
+    pub notify_set: bool,
+    pub notify_events: Vec<String>,
+    /// Phone push channel: "" (none), "ntfy" or "telegram" (secrets in the vault).
+    pub notify_phone: String,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }

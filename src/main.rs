@@ -16,6 +16,7 @@ mod events;
 mod inbox;
 mod mcp;
 mod migrate;
+mod notify;
 mod queue;
 mod runner;
 mod schedule;
@@ -72,6 +73,29 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
             rt().spawn(async move {
                 if let Err(e) = app.queue_decide(&id, &action, &reason, payload.as_deref(), force) {
                     app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
+        "set_notify" => {
+            let events: Vec<String> = msg.get("events").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+            let phone = s("phone");
+            rt().spawn(async move {
+                match app.set_notify(events, &phone) {
+                    Ok(()) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": "notification settings saved"})),
+                    Err(e) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e})),
+                }
+            });
+        }
+        "notify_test" => {
+            rt().spawn(async move {
+                let ws = app.workspace();
+                let ev = crate::notify::EVENTS.iter().map(|(e, _)| e.to_string()).find(|e| {
+                    let st = app.store.lock().unwrap();
+                    st.notes(&ws).is_some_and(|n| !n.notify_set || n.notify_events.contains(e))
+                });
+                match ev {
+                    Some(e) => app.notify(&ws, &e, "Test notification", "If you see this, notifications work."),
+                    None => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": "no notification events are on"})),
                 }
             });
         }

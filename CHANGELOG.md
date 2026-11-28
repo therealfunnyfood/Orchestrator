@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.9 (2026-11-28)
+
+- **Notifications (business workspaces).** Windows notifications for urgent queue items,
+  finished scheduled runs (including standing threads), budget alerts, orders at risk of
+  missing their deadline, and usage gates.
+- Choose which events notify you in **Settings → Notifications**, and use **Send a test** to
+  check it works.
+- **Phone push (optional).** Get the same notifications on your phone through ntfy.sh or your
+  own Telegram bot. Add `NTFY_TOPIC`, or `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, under
+  Secrets.
+- Only a one-line summary is sent, with secrets redacted, never an item's payload.
+
 ## 0.5.8 (2026-11-28)
 
 - **Inbox capture (business workspaces).** Paste text or drop files into the new Inbox box

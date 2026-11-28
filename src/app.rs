@@ -389,6 +389,8 @@ impl App {
                 "paused": n.kind == "business" && n.paused,
                 "budget_day": n.budget_day, "budget_week": n.budget_week,
                 "gates": n.gates, "paid_api_fallback": n.paid_api_fallback, "paid_api_cap_usd": n.paid_api_cap_usd,
+                "notify_events": if n.notify_set { json!(n.notify_events) } else { json!(crate::notify::EVENTS.iter().map(|(e, _)| e).collect::<Vec<_>>()) },
+                "notify_phone": n.notify_phone,
             })
         };
         let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
@@ -1068,6 +1070,9 @@ Pick up where it left off. Check the current state before relying on anything ab
             let report: String = result.chars().take(1500).collect();
             let more = if result.chars().count() > 1500 { "\n(cut short; read_thread for the rest)" } else { "" };
             let _ = self.post_to_orchestrator(name, &format!("{n}. Its final report:\n{report}{more}"));
+            if msg.sender == "schedule" {
+                self.notify(&row.workspace, "schedule", &format!("Scheduled run of {name} finished"), result.lines().find(|l| !l.trim().is_empty()).unwrap_or("done"));
+            }
         } else {
             self.notices.lock().unwrap().entry(orch_key(&row.workspace)).or_default().push(n);
         }
@@ -1440,6 +1445,11 @@ wait for. Then act on it."
                 o.turns += 1;
                 st.save();
                 drop(st);
+                if msg.sender == "schedule" {
+                    let first = r.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("done").to_string();
+                    let what = msg.text.lines().nth(1).unwrap_or("routine").to_string();
+                    self.notify(&ws, "schedule", &format!("Scheduled run finished: {what}"), &first);
+                }
                 let mut notes = r.notes.clone();
                 notes.extend(self.resume_after_limit(key, &r));
                 let extra = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
@@ -2778,6 +2788,7 @@ impl App {
             due
         };
         for (_, msg) in &due {
+            self.notify(ws, "budget", "Budget alert", msg);
             self.audit(ws, &format!("BUDGET {msg}"));
             self.hub.broadcast(json!({"kind": "toast", "text": format!("{}: {msg}", ws.rsplit(['\\', '/']).next().unwrap_or(ws))}));
         }
@@ -3183,6 +3194,7 @@ impl App {
             let _ = self.send_to_thread(n, &msg, "app", vec![], true);
         }
         self.audit(ws, &format!("USAGE GATE week {:.0}%: asked {} to checkpoint and stop", s.week * 100.0, targets.join(", ")));
+        self.notify(ws, "usage", &format!("Weekly plan usage at {:.0}%", s.week * 100.0), &format!("Non-paid threads asked to checkpoint and stop: {}", targets.join(", ")));
         self.post_news(&orch_key(ws), "@usage gate", &format!(
             "Weekly plan usage is at {:.0}%. The app asked these non-paid threads to checkpoint and stop: {}. Only paid-order threads may start now.",
             s.week * 100.0, targets.join(", ")
@@ -3226,6 +3238,7 @@ impl App {
                 continue;
             }
             for (id, why) in &fresh {
+                self.notify(&ws, "deadline", &format!("Order {id} may miss its deadline"), why);
                 self.audit(&ws, &format!("DEADLINE AT RISK {id} :: {why}"));
                 self.hub.broadcast(json!({"kind": "toast", "text": format!("⚠ Order {id} may miss its deadline: {why}")}));
             }
@@ -3315,6 +3328,55 @@ impl App {
         };
         self.inbox_saved(&ws, &path, &what);
         Ok(path.display().to_string())
+    }
+
+    // ---- notifications (notify.rs) ----
+
+    /// Notify the user about a business event: a Windows toast, and a phone push if they set
+    /// one up. Only events they chose; only a redacted summary line.
+    pub fn notify(&self, ws: &str, event: &str, title: &str, body: &str) {
+        let (on, phone) = {
+            let st = self.store.lock().unwrap();
+            let Some(n) = st.notes(ws).filter(|n| n.kind == "business") else { return };
+            (!n.notify_set || n.notify_events.iter().any(|e| e == event), n.notify_phone.clone())
+        };
+        if !on {
+            return;
+        }
+        let name = std::path::Path::new(ws).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let title = format!("{name}: {title}");
+        crate::notify::toast(&title, body);
+        if !phone.is_empty() {
+            let names: Vec<String> = crate::notify::phone_secrets(&phone).iter().map(|s| s.to_string()).collect();
+            match self.vault.get(ws, &names) {
+                Ok(secrets) => crate::notify::push(&phone, &secrets, &title, body),
+                Err(e) => self.hub.broadcast(json!({"kind": "toast", "text": format!("phone notification not sent: {e}")})),
+            }
+        }
+    }
+
+    /// Notification settings for the shown workspace (from the window only).
+    pub fn set_notify(&self, events: Vec<String>, phone: &str) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("notifications are for business workspaces".into());
+        }
+        if !["", "ntfy", "telegram"].contains(&phone) {
+            return Err("phone must be none, ntfy or telegram".into());
+        }
+        let known: Vec<&str> = crate::notify::EVENTS.iter().map(|(e, _)| *e).collect();
+        let events: Vec<String> = events.into_iter().filter(|e| known.contains(&e.as_str())).collect();
+        {
+            let mut st = self.store.lock().unwrap();
+            let n = st.notes_mut(&ws);
+            n.notify_set = true;
+            n.notify_events = events.clone();
+            n.notify_phone = phone.to_string();
+            st.save();
+        }
+        self.audit(&ws, &format!("NOTIFICATIONS SET events=[{}] phone={} by=user", events.join(","), if phone.is_empty() { "none" } else { phone }));
+        self.touch();
+        Ok(())
     }
 
     pub fn is_paused(&self, ws: &str) -> bool {
@@ -3499,6 +3561,7 @@ impl App {
         };
         crate::queue::mirror(&item);
         let audit_line = format!("QUEUED {id} {} line={} by={} :: {}", item.kind, item.line, item.created_by, item.summary);
+        let summary_for_notice = format!("{id} ({}, line {}): {}", item.kind, if item.line.is_empty() { "-" } else { &item.line }, item.summary);
         let urgent = item.urgent;
         st.queue.push(item);
         st.save();
@@ -3507,6 +3570,7 @@ impl App {
         self.queue_changed();
         if urgent {
             crate::attention();
+            self.notify(&ws, "urgent", "Urgent: waiting for your approval", &summary_for_notice);
         }
         let cap_note = match &capacity {
             Some(c) if c.ok => format!(" Capacity check passed: {}.", c.note),
