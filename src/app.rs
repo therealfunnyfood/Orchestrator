@@ -3264,6 +3264,59 @@ impl App {
         Ok(())
     }
 
+    // ---- inbox capture (inbox.rs) ----
+
+    /// Where captures go: the shown workspace if it's a business one, else the first open
+    /// business workspace.
+    pub fn inbox_target(&self) -> Option<String> {
+        let ws = self.workspace();
+        if self.is_business(&ws) {
+            return Some(ws);
+        }
+        let open = self.store.lock().unwrap().open_workspaces.clone();
+        open.into_iter().find(|w| self.is_business(w))
+    }
+
+    /// After a capture: tell the user and the workspace's orchestrator.
+    pub fn inbox_saved(self: &Arc<Self>, ws: &str, path: &std::path::Path, what: &str) {
+        let rel = path.strip_prefix(ws).map(|p| p.display().to_string()).unwrap_or_else(|_| path.display().to_string());
+        let rel = rel.trim_start_matches(['\\', '/']).replace('\\', "/");
+        self.hub.broadcast(json!({"kind": "toast", "text": format!("saved to {rel}")}));
+        self.post_news(&orch_key(ws), "@inbox", &format!(
+            "The user put {what} in the inbox: {rel}. Read it and triage it (reply drafts and offers go through the queue)."
+        ));
+    }
+
+    /// Ctrl+Alt+I or the Inbox box's clipboard button: save what's on the clipboard.
+    pub fn inbox_from_clipboard(self: &Arc<Self>) -> Result<(), String> {
+        let ws = self.inbox_target().ok_or("no business workspace is open to capture into")?;
+        let (path, what) = match crate::inbox::read_clipboard()? {
+            crate::inbox::Clip::Text(t) => (crate::inbox::save_text(&ws, &t, "the clipboard")?, "clipboard text"),
+            crate::inbox::Clip::Png(bytes) => (crate::inbox::save_file(&ws, "clipboard image.png", &bytes, "the clipboard")?, "a clipboard image"),
+        };
+        self.inbox_saved(&ws, &path, what);
+        Ok(())
+    }
+
+    /// The Inbox drop zone: text, or a file (base64).
+    pub fn inbox_drop(self: &Arc<Self>, text: Option<&str>, file: Option<(&str, &str)>) -> Result<String, String> {
+        use base64::Engine;
+        let ws = self.inbox_target().ok_or("no business workspace is open")?;
+        let (path, what) = match (text, file) {
+            (Some(t), _) => (crate::inbox::save_text(&ws, t, "the inbox box")?, "pasted text".to_string()),
+            (None, Some((name, b64))) => {
+                let bytes = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| format!("bad file data: {e}"))?;
+                if bytes.len() > 50 * 1024 * 1024 {
+                    return Err("files over 50 MB aren't taken".into());
+                }
+                (crate::inbox::save_file(&ws, name, &bytes, "the inbox box")?, format!("a file ({name})"))
+            }
+            _ => return Err("nothing to save".into()),
+        };
+        self.inbox_saved(&ws, &path, &what);
+        Ok(path.display().to_string())
+    }
+
     pub fn is_paused(&self, ws: &str) -> bool {
         self.store.lock().unwrap().notes(ws).is_some_and(|n| n.kind == "business" && n.paused)
     }

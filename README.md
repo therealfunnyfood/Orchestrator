@@ -120,6 +120,10 @@ weekly review, and learn from rejected items. The rest is the same text in both 
   private channel. That channel can't be reached over the local API, which agents can use.
   Approving stores a hash of the payload and of every attachment's contents. If anything
   changes after that, the approval is void and the item is never executed.
+- **Inbox.** Paste text or drop files into the Inbox box at the top of the Queue tab, or
+  press **Ctrl+Alt+I** anywhere to save what's on the clipboard (text or an image). Each
+  capture is saved as `<workspace>/inbox/YYYYMMDD-HHMM-<slug>.md`, with images and files
+  next to it, and the orchestrator is told so it can triage it.
 - **Readable copies.** Each item is also written as a read-only Markdown file in
   `<workspace>/queue/pending|approved|rejected|done|void/`. Editing or moving those files
   changes nothing. Every queue event is appended to `<workspace>/queue/audit.log`.

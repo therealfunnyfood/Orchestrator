@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.8 (2026-11-28)
+
+- **Inbox capture (business workspaces).** Paste text or drop files into the new Inbox box
+  at the top of the Queue tab, or click **📋 From clipboard**.
+- **Ctrl+Alt+I** works anywhere, even with the window in the tray. It saves what's on the
+  clipboard, text or an image, to the business workspace you're looking at, or else to the
+  first open one.
+- Each capture is saved as `<workspace>/inbox/YYYYMMDD-HHMM-<slug>.md`, with images and
+  files saved next to it, and the orchestrator is told so it can triage it.
+- The clipboard is only read when you press the hotkey or click the button, never through
+  the app's local API.
+
 ## 0.5.7 (2026-11-28)
 
 - **Business mode for the orchestrator's instructions.** In a business workspace, the

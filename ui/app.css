@@ -632,3 +632,7 @@ code.tlink { background: none; padding: 0; }
 .qcap { font-size: 12px; padding: 4px 8px; border-radius: 4px; margin: 0 0 8px; }
 .qcap.ok { color: #16a34a; border: 1px solid color-mix(in srgb, #16a34a 40%, transparent); }
 .qcap.bad { color: #fff; background: #dc2626; }
+.inbox-box { max-width: 900px; border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px; margin: 8px 0 4px; }
+.inbox-box.over { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.inbox-text { width: 100%; background: transparent; border: 0; outline: 0; color: var(--text); font-family: var(--mono); font-size: 12.5px; resize: vertical; }
+.inbox-box .row { display: flex; gap: 8px; margin-top: 4px; }

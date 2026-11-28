@@ -13,6 +13,7 @@ mod capacity;
 mod claude_projects;
 mod config;
 mod events;
+mod inbox;
 mod mcp;
 mod migrate;
 mod queue;
@@ -44,6 +45,8 @@ enum UiEvent {
     Menu(tray_icon::menu::MenuEvent),
     /// Queue items waiting for approval (all workspaces): shown on the tray icon.
     Badge(usize),
+    /// Ctrl+Alt+I: save the clipboard to the business inbox.
+    Hotkey(global_hotkey::GlobalHotKeyEvent),
 }
 
 static PROXY: OnceLock<Mutex<tao::event_loop::EventLoopProxy<UiEvent>>> = OnceLock::new();
@@ -68,6 +71,13 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
             let force = msg.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
             rt().spawn(async move {
                 if let Err(e) = app.queue_decide(&id, &action, &reason, payload.as_deref(), force) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
+        "inbox_clipboard" => {
+            rt().spawn(async move {
+                if let Err(e) = app.inbox_from_clipboard() {
                     app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
                 }
             });
@@ -345,6 +355,17 @@ fn run_windows(app: Arc<app::App>, url: String, minimized: bool) {
     tray_icon::menu::MenuEvent::set_event_handler(Some(move |e| {
         let _ = proxy.lock().unwrap().send_event(UiEvent::Menu(e));
     }));
+    // Ctrl+Alt+I anywhere: save the clipboard to the business inbox. If another program
+    // already owns the shortcut, the app runs without it.
+    let hotkeys = global_hotkey::GlobalHotKeyManager::new().ok();
+    if let Some(m) = &hotkeys {
+        use global_hotkey::hotkey::{Code, HotKey, Modifiers};
+        let _ = m.register(HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyI));
+    }
+    let proxy = Mutex::new(event_loop.create_proxy());
+    global_hotkey::GlobalHotKeyEvent::set_event_handler(Some(move |e| {
+        let _ = proxy.lock().unwrap().send_event(UiEvent::Hotkey(e));
+    }));
 
     let light = app.settings().theme == "light";
     let bg = if light { (255, 255, 255, 255) } else { (24, 24, 24, 255) };
@@ -419,6 +440,17 @@ fn run_windows(app: Arc<app::App>, url: String, minimized: bool) {
                 ..
             })) => show(&main_window),
             Event::UserEvent(UiEvent::Tray(_)) => {}
+            Event::UserEvent(UiEvent::Hotkey(e)) => {
+                let _ = &hotkeys;
+                if e.state == global_hotkey::HotKeyState::Pressed {
+                    let a = app.clone();
+                    rt().spawn(async move {
+                        if let Err(err) = a.inbox_from_clipboard() {
+                            a.hub.broadcast(serde_json::json!({"kind": "toast", "text": err}));
+                        }
+                    });
+                }
+            }
             Event::UserEvent(UiEvent::Badge(n)) => {
                 if let Some(t) = &tray {
                     let _ = t.set_icon(tray_icon_with_dot(n > 0));

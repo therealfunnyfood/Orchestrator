@@ -1296,6 +1296,7 @@ function renderQueuePane() {
     bar.append(b);
     page.append(bar);
   }
+  page.append(inboxBox());
   page.append(h("div", "set-section", `Waiting for you · ${q.pending.length}`));
   if (!q.pending.length) page.append(h("div", "sub", "Nothing waiting."));
   for (const i of q.pending) page.append(queueCard(i));
@@ -1312,6 +1313,36 @@ function renderQueuePane() {
     }
   }
   pane.append(page);
+}
+
+// The Inbox: paste text or drop files here (or press Ctrl+Alt+I anywhere to save the
+// clipboard); each lands in <workspace>/inbox/ and the orchestrator is told.
+function inboxBox() {
+  const box = h("div", "inbox-box");
+  const ta = h("textarea", "inbox-text");
+  ta.rows = 2;
+  ta.placeholder = "Inbox: paste a buyer message, order or stats here, or drop files. Ctrl+Alt+I saves the clipboard from anywhere.";
+  const row = h("div", "row");
+  const save = h("button", "btn primary", "Save to inbox");
+  save.onclick = async () => {
+    if (!ta.value.trim()) return;
+    try { await api("/api/inbox", { body: { text: ta.value } }); ta.value = ""; } catch (e) { fail(e); }
+  };
+  const clip = h("button", "btn", "📋 From clipboard");
+  clip.title = "Save what's on the clipboard (text or image). Same as Ctrl+Alt+I.";
+  clip.onclick = () => sendIpc({ op: "inbox_clipboard" });
+  row.append(save, clip);
+  box.append(ta, row);
+  const drop = async (files) => {
+    for (const f of files) {
+      const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1] || ""); r.onerror = rej; r.readAsDataURL(f); });
+      try { await api("/api/inbox", { body: { name: f.name, data } }); } catch (e) { fail(e); }
+    }
+  };
+  box.ondragover = (e) => { e.preventDefault(); e.stopPropagation(); box.classList.add("over"); };
+  box.ondragleave = () => box.classList.remove("over");
+  box.ondrop = (e) => { e.preventDefault(); e.stopPropagation(); box.classList.remove("over"); drop([...e.dataTransfer.files]); };
+  return box;
 }
 
 function queueCard(i) {

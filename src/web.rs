@@ -105,6 +105,7 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/show", post(|| async { Json(json!({"shown": crate::show_main()})) }))
         .route("/api/plan-usage/refresh", post(refresh_plan_usage))
         .route("/api/queue", post(queue))
+        .route("/api/inbox", post(inbox_drop))
         .route("/api/state", get(|State(a): State<Shared>| async move { Json(a.state_json()) }))
         .route("/api/all-threads", get(|State(a): State<Shared>| async move { Json(a.all_threads_json()) }))
         .route("/api/events/{key}", get(events))
@@ -498,6 +499,18 @@ async fn lessons(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     let ws = app.workspace();
     app.save_lessons("", s(&b, "lessons"), s(&b, "project_lessons").map(|l| (ws.as_str(), l))).map_err(ApiError)?;
     Ok(Json(json!({"ok": true})))
+}
+
+/// The Inbox drop zone (text or one file as base64). Clipboard capture isn't here: it only
+/// runs from the window's IPC channel or the hotkey, so agents can't read the clipboard.
+async fn inbox_drop(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
+    let text = s(&b, "text");
+    let file = match (s(&b, "name"), s(&b, "data")) {
+        (Some(n), Some(d)) => Some((n, d)),
+        _ => None,
+    };
+    let path = app.inbox_drop(text, file).map_err(ApiError)?;
+    Ok(Json(json!({"ok": true, "path": path})))
 }
 
 async fn tuning(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
