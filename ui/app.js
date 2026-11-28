@@ -225,6 +225,7 @@ async function loadState() {
   renderChrome();
   if (cur().type === "manage") renderManage();
   if (cur().type === "queue") renderQueuePane();
+  renderNeedsPane();
 }
 
 function theme(t) {
@@ -240,6 +241,7 @@ function renderChrome() {
   renderChips();
   renderPlan();
   renderQueue();
+  renderNeedsStrip();
   updateWorking();
   const busy = curKey() && info(curKey())?.busy;
   $("#stop").classList.toggle("hidden", !busy);
@@ -260,6 +262,10 @@ function renderChrome() {
   const qn = S.state.queue?.pending?.length || 0;
   if (business && qn) qb.append(h("span", "badge warn", String(qn)));
   $('.act[data-act="money"]').classList.toggle("hidden", !business);
+  const nb = $('.act[data-act="needs"]');
+  nb.querySelector(".badge")?.remove();
+  const nn = S.state.needs?.count || 0;
+  if (nn) nb.append(h("span", "badge" + (S.state.needs.urgent ? " urgent" : ""), String(nn)));
 }
 
 // ================================================================ sidebar tree
@@ -365,6 +371,7 @@ function renderWorkspaces() {
     r.append(h("span", "st " + (working ? "running" : "idle")), h("span", "nm", baseName(w.path)));
     if (w.needs_input) { const q = h("span", "q-badge", "?"); q.title = "Waiting for your answer"; r.append(q); }
     if (w.queue_pending) { const q = h("span", "qn-badge", String(w.queue_pending)); q.title = `${w.queue_pending} waiting for your approval`; r.append(q); }
+    if (w.needs_count) { const q = h("span", "nd-badge" + (w.needs_urgent ? " urgent" : ""), String(w.needs_count)); q.title = `${w.needs_count} need you${w.needs_urgent ? ", " + w.needs_urgent + " urgent" : ""}`; r.append(q); }
     if (w.running_threads) r.append(h("span", "meta", `${w.running_threads} running`));
     if (open.length > 1) {
       const x = h("button", "ib ws-close", "×");
@@ -456,6 +463,7 @@ function tabTitle(t) {
   if (t.type === "settings") return ["⚙", "Settings"];
   if (t.type === "brief") return ["📋", "Project brief"];
   if (t.type === "queue") return ["✓", "Queue"];
+  if (t.type === "needs") return ["📌", "Needs you" + (S.state?.needs?.count ? ` (${S.state.needs.count})` : "")];
   if (t.type === "money") return ["$", "Money"];
   if (t.type === "doc") return ["▤", t.name];
   if (isOrch(t.key)) return ["◈", "orchestrator"];
@@ -463,7 +471,7 @@ function tabTitle(t) {
 }
 
 function renderTabs() {
-  if (!changed("tabs", [S.tabs, S.active, S.tabs.map((t) => t.type === "chat" && !!info(t.key)?.busy)])) return;
+  if (!changed("tabs", [S.tabs, S.active, S.state?.needs?.count, S.tabs.map((t) => t.type === "chat" && !!info(t.key)?.busy)])) return;
   const bar = $("#tabs");
   bar.textContent = "";
   S.tabs.forEach((t, i) => {
@@ -512,6 +520,7 @@ async function activate(i) {
   $("#pane-settings").classList.toggle("hidden", t.type !== "settings");
   $("#pane-brief").classList.toggle("hidden", t.type !== "brief");
   $("#pane-queue").classList.toggle("hidden", t.type !== "queue");
+  $("#pane-needs").classList.toggle("hidden", t.type !== "needs");
   $("#pane-money").classList.toggle("hidden", t.type !== "money");
   $("#pane-doc").classList.toggle("hidden", t.type !== "doc");
   if (t.type === "chat") { S.unread.delete(t.key); await loadLog(t.key); }
@@ -519,6 +528,7 @@ async function activate(i) {
   if (t.type === "settings") renderSettings();
   if (t.type === "brief") renderBrief();
   if (t.type === "queue") { lastSig.queue = null; renderQueuePane(); }
+  if (t.type === "needs") { lastSig.needs = null; renderNeedsPane(); }
   if (t.type === "money") renderMoney();
   if (t.type === "doc") renderDoc();
   renderChrome();
@@ -1429,6 +1439,436 @@ function manualTask(i) {
   };
   box.append(drop);
   return box;
+}
+
+// ---------------------------------------------------------------- needs you
+// Every change goes over the window's private IPC (sendIpc), never HTTP. `need` takes the
+// entry's workspace (`ws`) so other open workspaces can be acted on in place; decisions
+// (queue_decide) only work in the shown workspace, so those cards open the workspace first.
+const ND = { all: false, later: false, done: false, more: new Set(), menu: null, dismiss: null, reject: null, player: null, draft: {} };
+const ND_KIND = { question: "Question", decision: "Decision", manual: "Do by hand", action: "To do", heads_up: "Heads-up" };
+const ndSameWs = (v) => !v.ws || v.ws.toLowerCase() === (S.state.workspace || "").toLowerCase();
+const ndCan = (v) => ndSameWs(v) || v.kind !== "decision";
+function needIpc(v, msg) { return sendIpc(ndSameWs(v) ? { op: "need", ...msg } : { op: "need", ws: v.ws, ...msg }); }
+function ndFind(id) {
+  const groups = [S.state.needs, ...(S.state.needs_all?.workspaces || [])];
+  for (const g of groups) for (const v of [...(g?.open || []), ...(g?.snoozed || [])]) if (v.id === id) return v;
+  return null;
+}
+const ndRefresh = () => { lastSig.needs = null; renderNeedsPane(true); };
+
+function ndSteps(v) { return v.plan?.steps || []; }
+function ndPaused(v) { const n = ndSteps(v).length; return n && v.step > 0 && v.step < n ? `paused at step ${v.step + 1} of ${n}` : ""; }
+
+function ndJump(v) {
+  const go = async () => {
+    openChat(v.source && !isOrch(v.source) ? v.source : orchKey());
+    for (let n = 0; n < 20 && !$("#log")?.children.length; n++) await new Promise((r) => setTimeout(r, 100));
+    const nodes = $$("#log [data-ts]");
+    const t = nodes.find((x) => +x.dataset.ts >= v.msg_ts - 1e-6) || nodes[nodes.length - 1];
+    if (t) { t.scrollIntoView({ block: "center" }); t.classList.add("flash"); setTimeout(() => t.classList.remove("flash"), 2000); }
+  };
+  if (!ndSameWs(v)) switchWorkspace(v.ws).then(go); else go();
+}
+
+function ndChips(v, showWs) {
+  const row = h("div", "nd-chips");
+  row.append(h("span", "qchip", ND_KIND[v.kind] || v.kind));
+  if (v.priority === "urgent") row.append(h("span", "qchip urgent", "urgent"));
+  else if (v.priority === "today") row.append(h("span", "qchip you", "today"));
+  if (v.minutes) row.append(h("span", "qchip", `~${v.minutes} min`));
+  if (v.pin === 1) row.append(h("span", "qchip you", "📌 pinned"));
+  if (v.careful) row.append(h("span", "qchip risk-high", "check carefully"));
+  if (v.kind === "question" && v.waiting) row.append(h("span", "qchip you", "agent is waiting"));
+  const p = ndPaused(v);
+  if (p) row.append(h("span", "qchip", p));
+  if (showWs) row.append(h("span", "qchip", baseName(v.ws)));
+  return row;
+}
+
+function ndQuestion(v) {
+  const box = h("div", "nd-q");
+  const qs = Array.isArray(v.questions) ? v.questions : [];
+  const wrap = h("div", "question");
+  const send = () => {
+    const answers = $$(".q", wrap).map((b) => ({ selected: $$(".q-opt.sel", b).map((x) => x.dataset.label), other: $(".q-other", b).value.trim() }));
+    if (answers.some((a) => !a.selected.length && !a.other)) return toast("Answer each question first", true);
+    if (needIpc(v, { action: "answer", id: v.id, answers })) $$("button", wrap).forEach((b) => { b.disabled = true; });
+  };
+  qs.forEach((q) => {
+    const multi = !!q.multi_select;
+    const b = h("div", "q" + (multi ? " multi" : ""));
+    const title = h("div", "q-title");
+    if (q.header) title.append(h("span", "q-tag", q.header));
+    title.append(document.createTextNode(q.question || ""));
+    b.append(title);
+    const opts = h("div", "q-opts");
+    (q.options || []).forEach((o) => {
+      const btn = h("button", "q-opt");
+      btn.dataset.label = o.label;
+      const t = h("span");
+      t.append(h("div", "ol", o.label));
+      if (o.description) t.append(h("div", "od", o.description));
+      btn.append(h("span", "box"), t);
+      btn.onclick = () => {
+        if (multi) btn.classList.toggle("sel");
+        else { $$(".q-opt", opts).forEach((x) => x.classList.toggle("sel", x === btn)); $(".q-other", b).value = ""; if (qs.length === 1) send(); }
+      };
+      opts.append(btn);
+    });
+    b.append(opts);
+    const other = h("input", "q-other");
+    other.placeholder = "Or type your own answer…";
+    other.onkeydown = (e) => { if (e.key === "Enter") send(); };
+    b.append(other);
+    wrap.append(b);
+  });
+  const sb = h("button", "btn primary", "Send answer");
+  sb.onclick = send;
+  const row = h("div", "nd-acts");
+  row.append(sb);
+  wrap.append(row);
+  box.append(wrap);
+  return box;
+}
+
+function ndDecision(v, acts, c) {
+  const q = v.queue || {};
+  const overCap = q.capacity && !q.capacity.ok;
+  if (q.capacity) c.append(h("div", "nd-note", (q.capacity.ok ? "✓ " : "✗ ") + q.capacity.note));
+  if (v.careful || ND.more.has(v.id)) c.append(h("pre", "qpayload", q.payload || ""));
+  if (v.kind === "manual") {
+    const cp = h("button", "btn", "Copy the text");
+    cp.onclick = async () => { if (await copyText(q.payload || "")) toast("Copied"); };
+    const done = h("button", "btn primary", "I did it");
+    done.onclick = () => { if (needIpc(v, { action: "done", id: v.id })) done.disabled = true; };
+    acts.append(done, cp);
+    return;
+  }
+  const rec = v.recommend;
+  const approve = h("button", "btn" + (rec === "approve" && !v.careful ? " primary" : ""), overCap ? "Approve anyway…" : "Approve");
+  approve.onclick = () => {
+    if (overCap && !confirm(`This failed the capacity check:\n\n${q.capacity.note}\n\nApprove anyway?`)) return;
+    if (v.careful && !confirm("You are approving exactly what is shown above. Go ahead?")) return;
+    if (sendIpc({ op: "queue_decide", id: v.queue_item, action: "approve", force: !!overCap, hash: q.payload_hash })) $$("button", acts).forEach((b) => { b.disabled = true; });
+  };
+  const reject = h("button", "btn" + (rec === "reject" ? " primary" : " danger"), "Reject…");
+  reject.onclick = () => { ND.reject = v.id; ndRefresh(); };
+  const edit = h("button", "btn", "Edit…");
+  edit.title = "Edit it in the Queue";
+  edit.onclick = openQueue;
+  acts.append(approve, reject, edit);
+}
+
+function ndSnoozeMenu(v) {
+  const m = h("div", "nd-menu");
+  m.append(h("span", "sub", "Ask me again:"));
+  for (const [l, u] of [["in 1 hour", "1h"], ["tonight", "tonight"], ["tomorrow", "tomorrow"]]) {
+    const b = h("button", "btn", l);
+    b.onclick = () => { ND.menu = null; needIpc(v, { action: "snooze", id: v.id, until: u }); ndRefresh(); };
+    m.append(b);
+  }
+  const x = h("button", "btn quiet", "cancel");
+  x.onclick = () => { ND.menu = null; ndRefresh(); };
+  m.append(x);
+  return m;
+}
+
+function ndInputRow(v, key, ph, label, onGo, required) {
+  const m = h("div", "nd-menu");
+  const inp = h("input", "nd-in");
+  inp.placeholder = ph;
+  inp.value = ND.draft[key + v.id] || "";
+  inp.oninput = () => { ND.draft[key + v.id] = inp.value; };
+  const ok = h("button", "btn danger", label);
+  const cancel = h("button", "btn quiet", "cancel");
+  const go = () => { if (required && !inp.value.trim()) return toast("Add a short reason", true); onGo(inp.value.trim()); delete ND.draft[key + v.id]; };
+  ok.onclick = go;
+  inp.onkeydown = (e) => { if (e.key === "Enter") go(); if (e.key === "Escape") cancel.onclick(); };
+  cancel.onclick = () => { ND.dismiss = ND.reject = null; ndRefresh(); };
+  m.append(inp, ok, cancel);
+  setTimeout(() => inp.focus());
+  return m;
+}
+
+function needCard(v, o = {}) {
+  const c = h("div", "ndcard" + (v.priority === "urgent" ? " urgent" : "") + (v.careful ? " careful" : ""));
+  c.dataset.anchor = v.id;
+  c.append(ndChips(v, o.showWs));
+  c.append(h("div", "nd-tldr", v.tldr || v.title));
+  if (v.recommend && v.kind !== "question") {
+    const r = h("div", "nd-rec");
+    r.append(document.createTextNode("I'd suggest: "), h("b", null, ({ approve: "approve it", reject: "reject it", edit: "edit it first", do: "do it", skip: "skip it" })[v.recommend] || v.recommend));
+    c.append(r);
+  }
+  if (v.why) c.append(h("div", "nd-why", v.why));
+  if (!ndCan(v)) {
+    const acts = h("div", "nd-acts");
+    const b = h("button", "btn primary", "Open " + baseName(v.ws) + " to decide");
+    b.onclick = () => switchWorkspace(v.ws).then(() => openNeeds());
+    acts.append(b);
+    c.append(acts);
+    return c;
+  }
+  if (v.kind === "question" && v.timed_out) c.append(h("div", "nd-note", `The agent didn't wait and went ahead with “${v.default_answer}”. Answer to tell it what you really want.`));
+  const acts = h("div", "nd-acts");
+  if (v.kind === "question") c.append(ndQuestion(v));
+  else if (v.kind === "decision" || v.kind === "manual") ndDecision(v, acts, c);
+  else if (v.kind === "action") {
+    if (v.plan) {
+      const n = ndSteps(v).length;
+      const b = h("button", "btn primary", v.step > 0 ? `Continue at step ${Math.min(v.step, n - 1) + 1} of ${n}` : `Start · ${n} step${n === 1 ? "" : "s"}`);
+      b.onclick = () => ndStart(v);
+      acts.append(b);
+    } else {
+      if (v.steps) c.append(h("div", "nd-more", v.steps));
+      if (v.link) { const lb = h("button", "btn", "Open"); lb.onclick = () => (/^https?:/i.test(v.link) ? openUrl(v.link) : openPath(v.link, "default")); acts.append(lb); }
+    }
+    const d = h("button", "btn" + (v.plan ? "" : " primary"), "I did it");
+    d.onclick = () => { if (needIpc(v, { action: "done", id: v.id })) d.disabled = true; };
+    acts.append(d);
+  } else if (v.kind === "heads_up") {
+    const g = h("button", "btn primary", "Got it");
+    g.onclick = () => { if (needIpc(v, { action: "done", id: v.id })) g.disabled = true; };
+    acts.append(g);
+  }
+  acts.append(h("span", "sp"));
+  const sn = h("button", "btn quiet", "💤 Later");
+  sn.onclick = () => { ND.menu = ND.menu === v.id ? null : v.id; ndRefresh(); };
+  acts.append(sn);
+  const pin = h("button", "btn quiet", v.pin === 1 ? "📌 Unpin" : "📌 Pin to Today");
+  pin.onclick = () => needIpc(v, { action: "pin", id: v.id, pin: v.pin === 1 ? 0 : 1 });
+  acts.append(pin);
+  if (o.today && v.pin !== 1) {
+    const nt = h("button", "btn quiet", "Not today");
+    nt.onclick = () => needIpc(v, { action: "pin", id: v.id, pin: -1 });
+    acts.append(nt);
+  } else if (v.pin === -1) {
+    const bk = h("button", "btn quiet", "Put back");
+    bk.onclick = () => needIpc(v, { action: "pin", id: v.id, pin: 0 });
+    acts.append(bk);
+  }
+  if (v.kind !== "decision" && v.kind !== "manual") {
+    const ds = h("button", "btn quiet", "Dismiss…");
+    ds.onclick = () => { ND.dismiss = v.id; ndRefresh(); };
+    acts.append(ds);
+  }
+  if (v.msg_ts) { const j = h("button", "btn quiet", "💬 Chat"); j.title = "Jump to where this came up"; j.onclick = () => ndJump(v); acts.append(j); }
+  const mb = h("button", "btn quiet", ND.more.has(v.id) ? "Less" : "More");
+  mb.onclick = () => { ND.more.has(v.id) ? ND.more.delete(v.id) : ND.more.add(v.id); ndRefresh(); };
+  acts.append(mb);
+  c.append(acts);
+  if (ND.menu === v.id) c.append(ndSnoozeMenu(v));
+  if (ND.dismiss === v.id) c.append(ndInputRow(v, "d", "Why? (optional, the agent sees it)", "Dismiss", (note) => { ND.dismiss = null; needIpc(v, { action: "dismiss", id: v.id, note }); ndRefresh(); }, false));
+  if (ND.reject === v.id) c.append(ndInputRow(v, "r", "Why? (one line: how the agents learn your taste)", "Reject", (reason) => { ND.reject = null; sendIpc({ op: "queue_decide", id: v.queue_item, action: "reject", reason }); ndRefresh(); }, true));
+  if (ND.more.has(v.id)) {
+    const parts = [];
+    if (v.details) parts.push(v.details);
+    if (v.steps && v.plan) parts.push(v.steps);
+    if (v.created_at) parts.push(`Came up ${relTime(v.created_at) === "now" ? "just now" : relTime(v.created_at) + " ago"}${v.source ? " in " + (isOrch(v.source) ? "the orchestrator" : v.source) : ""}.`);
+    c.append(h("div", "nd-more", parts.join("\n\n")));
+  }
+  return c;
+}
+
+// ---- step player
+function ndStart(v) {
+  const n = ndSteps(v).length;
+  ND.player = { id: v.id, i: Math.min(v.step || 0, Math.max(0, n - 1)), intro: !(v.step > 0), stuck: false, finish: false };
+  ndRefresh();
+}
+
+function renderNeedsPlayer(pane) {
+  const P = ND.player;
+  const v = ndFind(P.id);
+  if (!v || !v.plan) { ND.player = null; return renderNeedsPane(true); }
+  pane.textContent = "";
+  const page = h("div", "page");
+  const box = h("div", "nd-player");
+  page.append(box);
+  pane.append(page);
+  const steps = ndSteps(v), n = steps.length, plan = v.plan;
+  const exit = () => { ND.player = null; ndRefresh(); };
+  box.append(h("div", "nd-pstep", v.tldr || v.title));
+  const bar = h("div", "nd-bar");
+  const fill = h("i");
+  fill.style.width = (P.intro ? 0 : Math.min(100, ((P.finish ? n : P.i) / n) * 100)) + "%";
+  bar.append(fill);
+  box.append(bar);
+  if (P.intro) {
+    box.append(h("div", "nd-pdo", plan.goal || v.title));
+    if (plan.before_you_start) box.append(h("div", "nd-pexp", "Before you start: " + plan.before_you_start));
+    box.append(h("div", "nd-pstep", `${n} step${n === 1 ? "" : "s"}${v.minutes ? " · about " + v.minutes + " min" : ""}. You can stop any time and pick up again.`));
+    const nav = h("div", "nd-pnav");
+    const go = h("button", "btn primary", "Start");
+    go.onclick = () => { P.intro = false; ndRefresh(); };
+    const x = h("button", "btn quiet", "Not now");
+    x.onclick = exit;
+    nav.append(go, x);
+    box.append(nav);
+  } else if (P.stuck) {
+    const step = Math.min(P.i, n - 1);
+    box.append(h("div", "nd-pdo", `Stuck at step ${step + 1}`));
+    box.append(h("div", "nd-stuck", plan.if_stuck ? `Try this: ${plan.if_stuck}` : "No problem. Tell the agent what happened and it will help."));
+    const note = h("textarea");
+    note.placeholder = "What happened? (this goes to the agent)";
+    note.value = ND.draft["s" + v.id] || "";
+    note.oninput = () => { ND.draft["s" + v.id] = note.value; };
+    box.append(note);
+    const nav = h("div", "nd-pnav");
+    const send = h("button", "btn primary", "Tell the agent");
+    send.onclick = () => {
+      if (needIpc(v, { action: "stuck", id: v.id, step, note: note.value.trim() })) { toast("Sent. The agent will help."); delete ND.draft["s" + v.id]; ND.player = null; ndRefresh(); }
+    };
+    const back = h("button", "btn", "Back to the step");
+    back.onclick = () => { P.stuck = false; ndRefresh(); };
+    nav.append(send, back);
+    box.append(nav);
+  } else if (P.finish) {
+    box.append(h("div", "nd-pdo", "That's all the steps."));
+    if (plan.done_when) box.append(h("div", "nd-pexp", "You're done when: " + plan.done_when));
+    box.append(h("div", "nd-pdo", "Did you see that?"));
+    const nav = h("div", "nd-pnav");
+    const yes = h("button", "btn primary", "Yes, it worked");
+    yes.onclick = () => { if (needIpc(v, { action: "done", id: v.id })) { ND.player = null; toast("Done. The agent knows."); ndRefresh(); } };
+    const no = h("button", "btn", "No");
+    no.onclick = () => { P.stuck = true; P.finish = false; P.i = n - 1; ndRefresh(); };
+    const back = h("button", "btn quiet", "← Back");
+    back.onclick = () => { P.finish = false; P.i = n - 1; ndRefresh(); };
+    nav.append(yes, no, back);
+    box.append(nav);
+  } else {
+    const s = steps[P.i];
+    const per = Math.max(1, Math.round((v.minutes || n) / n));
+    box.append(h("div", "nd-pstep", `Step ${P.i + 1} of ${n} · ~${per} min`));
+    box.append(h("div", "nd-pdo", s.do));
+    const btns = h("div", "nd-pbtns");
+    if (s.copy) { const cb = h("button", "btn", "📋 Copy"); cb.onclick = async () => { if (await copyText(s.copy)) toast("Copied"); }; btns.append(cb); }
+    if (s.url) { const ob = h("button", "btn", "↗ Open"); ob.onclick = () => (/^https?:/i.test(s.url) ? openUrl(s.url) : openPath(s.url, "default")); btns.append(ob); }
+    if (btns.children.length) box.append(btns);
+    if (s.user_types_this) box.append(h("div", "nd-pstep", "You type this part yourself. It is never saved or sent."));
+    if (s.expect) { const e = h("div", "nd-pexp"); e.append(h("b", null, "You should see: "), document.createTextNode(s.expect)); box.append(e); }
+    const nav = h("div", "nd-pnav");
+    const next = h("button", "btn primary", P.i === n - 1 ? "Finish" : "Next →");
+    next.onclick = () => {
+      if (P.i === n - 1) { P.finish = true; needIpc(v, { action: "step", id: v.id, step: n - 1 }); }
+      else { P.i++; needIpc(v, { action: "step", id: v.id, step: P.i }); }
+      ndRefresh();
+    };
+    nav.append(next);
+    if (P.i > 0) { const bk = h("button", "btn", "← Back"); bk.onclick = () => { P.i--; ndRefresh(); }; nav.append(bk); }
+    nav.append(h("span", "sp"));
+    const st = h("button", "btn", "I'm stuck");
+    st.onclick = () => { P.stuck = true; ndRefresh(); };
+    const stop = h("button", "btn quiet", "Stop here");
+    stop.title = "Save where you are and come back later";
+    stop.onclick = () => { needIpc(v, { action: "step", id: v.id, step: P.i }); toast(`Saved. You're at step ${P.i + 1} of ${n}.`); ND.player = null; ndRefresh(); };
+    nav.append(st, stop);
+    box.append(nav);
+  }
+}
+
+// ---- the tab
+function ndGroups() {
+  if (ND.all && S.state.needs_all) return S.state.needs_all.workspaces.filter((w) => w.count || w.current);
+  const n = S.state.needs;
+  return n ? [{ path: n.ws, name: baseName(n.ws), open: n.open, today: n.today, count: n.count, minutes: n.minutes }] : [];
+}
+
+function renderNeedsPane(force) {
+  const pane = $("#pane-needs");
+  if (cur()?.type !== "needs") return;
+  const n = S.state.needs;
+  const act = document.activeElement;
+  // Don't wipe an answer or note the user is typing.
+  if (!force && act && pane.contains(act) && /^(INPUT|TEXTAREA)$/.test(act.tagName) && act.value) return;
+  if (!changed("needs", [n, S.state.needs_all, ND.all, ND.later, ND.done, [...ND.more], ND.menu, ND.dismiss, ND.reject, ND.player, S.state.workspace]) && $(".page", pane)) return;
+  const keep = scrollState(pane);
+  if (ND.player) { renderNeedsPlayer(pane); restoreScroll(pane, keep); return; }
+  pane.textContent = "";
+  const page = h("div", "page nd-page");
+  page.append(h("h1", null, "📌 Needs you"));
+  if (!n) { page.append(h("div", "sub", "Loading…")); pane.append(page); return; }
+  const tot = ND.all && S.state.needs_all ? S.state.needs_all : n;
+  page.append(h("div", "nd-total", tot.count ? `${tot.count} waiting · about ${tot.minutes || 0} min in all` : "Nothing is waiting for you. Nice."));
+  const multi = (S.state.needs_all?.workspaces || []).length > 1;
+  if (multi) {
+    const tools = h("div", "nd-tools");
+    const tb = h("button", "btn", ND.all ? "Show only this workspace" : `Show all workspaces (${S.state.needs_all.count})`);
+    tb.onclick = () => { ND.all = !ND.all; ndRefresh(); };
+    tools.append(tb);
+    page.append(tools);
+  }
+  const groups = ndGroups();
+  const grouped = ND.all && groups.length > 1;
+  const later = [];
+  if (!grouped) page.append(h("div", "nd-h", "Today"));
+  for (const g of groups) {
+    if (grouped) page.append(h("div", "nd-h", `${g.name} · ${g.count}`));
+    const ids = new Set(g.today || []);
+    const today = (g.today || []).map((id) => g.open.find((x) => x.id === id)).filter(Boolean);
+    if (!today.length && !grouped && n.count) page.append(h("div", "nd-empty", "Nothing picked for today."));
+    for (const v of today) page.append(needCard(v, { today: true }));
+    for (const v of g.open) if (!ids.has(v.id)) later.push(v);
+  }
+  if (later.length) {
+    const lh = h("div", "nd-h fold", `${ND.later ? "▾" : "▸"} Later (${later.length})`);
+    lh.onclick = () => { ND.later = !ND.later; ndRefresh(); };
+    page.append(lh);
+    if (ND.later) for (const v of later) page.append(needCard(v, { showWs: grouped }));
+  }
+  const sn = n.snoozed || [];
+  if (sn.length) {
+    page.append(h("div", "nd-h", `Snoozed (${sn.length})`));
+    for (const v of sn) {
+      const r = h("div", "nd-done");
+      r.dataset.anchor = v.id;
+      r.append(document.createTextNode(`💤 ${v.tldr || v.title} · back ${v.snoozed_until ? new Date(v.snoozed_until * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "later"}  `));
+      const b = h("button", "btn sm", "Bring back");
+      b.onclick = () => needIpc(v, { action: "unsnooze", id: v.id });
+      r.append(b);
+      page.append(r);
+    }
+  }
+  const dn = n.done_today || [];
+  if (dn.length) {
+    const dh = h("div", "nd-h fold", `${ND.done ? "▾" : "▸"} Done today (${dn.length})`);
+    dh.onclick = () => { ND.done = !ND.done; ndRefresh(); };
+    page.append(dh);
+    if (ND.done) for (const v of dn) {
+      const r = h("div", "nd-done", `${v.status === "dismissed" ? "✕" : "✓"} ${v.tldr || v.title}${v.note ? " · " + v.note : ""}`);
+      r.dataset.anchor = v.id;
+      page.append(r);
+    }
+  }
+  pane.append(page);
+  restoreScroll(pane, keep);
+}
+
+const openNeeds = () => { lastSig.needs = null; openTab({ type: "needs" }); };
+
+// Top 3 for today, above the orchestrator's chat.
+function renderNeedsStrip() {
+  const el = $("#needs-strip");
+  const n = S.state.needs;
+  const show = !!(isOrch(curKey()) && n && n.count > 0);
+  const rows = show ? (n.today || []).map((id) => n.open.find((x) => x.id === id)).filter(Boolean) : [];
+  if (!changed("needsstrip", [show, rows.map((v) => [v.id, v.tldr, v.title, v.step, v.kind, v.priority]), n?.count])) return;
+  el.classList.toggle("hidden", !show);
+  el.textContent = "";
+  if (!show) return;
+  const head = h("div", "nd-sh");
+  head.append(h("span", null, `📌 Needs you (${n.count})`), h("span", "sp"), h("span", "sub", "open"));
+  head.onclick = openNeeds;
+  el.append(head);
+  for (const v of rows) {
+    const r = h("div", "nd-sr");
+    r.append(h("span", "qchip" + (v.priority === "urgent" ? " urgent" : ""), ND_KIND[v.kind] || v.kind), h("span", "t", v.tldr || v.title));
+    const p = ndPaused(v);
+    if (p) r.append(h("span", "sub", p));
+    r.onclick = openNeeds;
+    el.append(r);
+  }
 }
 
 // ---------------------------------------------------------------- money (business lines, P&L)
@@ -3296,6 +3736,7 @@ function wire() {
     if (act === "explorer") toggleSide();
     if (act === "manage") openManage();
     if (act === "queue") openQueue();
+    if (act === "needs") openNeeds();
     if (act === "money") openMoney();
     if (act === "settings") openSettings();
     if (act === "palette") palette();

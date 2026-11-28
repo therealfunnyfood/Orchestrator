@@ -22,6 +22,9 @@
     <button class="act hidden" data-act="queue" title="Approval queue (business workspace)">
       <svg viewBox="0 0 24 24"><rect x="4.5" y="3.5" width="15" height="17" rx="1.5"/><path d="M8.5 9.5l2.2 2.2 4.8-4.8M8.5 16h7"/></svg>
     </button>
+    <button class="act" data-act="needs" title="Needs you: what is waiting for you">
+      <svg viewBox="0 0 24 24"><path d="M12 3l2.6 5.6 6.1.7-4.5 4.2 1.2 6L12 16.5 6.6 19.5l1.2-6L3.3 9.3l6.1-.7z"/></svg>
+    </button>
     <button class="act hidden" data-act="money" title="Money: business lines and P&amp;L">
       <svg viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg>
     </button>
@@ -51,6 +54,7 @@
     <div id="panes">
       <section id="pane-chat" class="pane">
         <div id="crumbs" class="crumbs"></div>
+        <div id="needs-strip" class="nd-strip hidden"></div>
         <div id="scroller"><div id="log"></div></div>
         <div id="composer-wrap">
           <div id="plan" class="plan hidden"></div>
@@ -71,6 +75,7 @@
       <section id="pane-settings" class="pane hidden"></section>
       <section id="pane-brief" class="pane hidden"></section>
       <section id="pane-queue" class="pane hidden"></section>
+      <section id="pane-needs" class="pane hidden"></section>
       <section id="pane-money" class="pane hidden"></section>
       <section id="pane-doc" class="pane hidden"></section>
       <div id="splitter" class="splitter hidden" title="Drag to resize"></div>
