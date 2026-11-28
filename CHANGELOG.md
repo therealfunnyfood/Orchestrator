@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.6 (2026-11-28)
+
+- **New "📌 Needs you (N)" tab and sidebar badges.** Everything waiting on you (questions,
+  decisions, manual tasks, step-by-step action requests, heads-ups) in one list: Today (top 3),
+  Later, Snoozed and Done today. Snooze, pin, dismiss and answer inline. A step-by-step player
+  has I'm stuck and Stop here. There is an all-workspaces view and a top-3 strip in the
+  orchestrator chat.
+- **`ask_user` questions that time out stay open** with their default answer, and a late answer
+  still reaches the agent.
+- **Pop-out windows** for the Queue and Needs you (⧉ Pop out). They remember size and position;
+  approvals go through the same safe window path.
+- **For agents (breaking):** `queue_item` now requires `tldr`, `recommend` and `why`, and
+  `who_executes: user` needs a step plan. New items use `hash_v` 3 (phone recipe updated in
+  `orchestrator-api.md`); old items keep their version. New tools: `request_user_action`,
+  `list_needs_you`, `dismiss_need`; `tell_user` takes `important: true`.
+- `TODO-FOR-YOU.md` mirror for business workspaces; feed `needs_you` plus `needs_you_changed` /
+  `needs_you` / `needs_you_daily` events; a 09:00 daily summary.
+
 ## 0.6.5 (2026-11-28)
 
 - **The Queue page no longer jumps back to the top while you scroll.** When a new item
