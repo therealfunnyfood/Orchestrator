@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.7 (2026-11-28)
+
+- **Business mode for the orchestrator's instructions.** In a business workspace, the
+  development-specific parts of its built-in instructions are swapped for business ones.
+  - It picks a mode per task as the workspace's `pipelines/models.md` describes: a script,
+    Haiku, Sonnet (the default), Opus planning with Sonnet building, Opus alone, or Fable only
+    to rescue a paid order.
+  - It uses business kinds of work and examples.
+  - A new "Running the business" section has it follow the playbooks, judge work by expected
+    profit, put paid orders first, send everything outbound through the queue, run the
+    weekly review, and turn rejected items into lessons.
+  - Everything else is the same text in both modes, and a test checks that it stays that
+    way. Development workspaces get exactly the same instructions as before.
+- Fixed a capacity note that could read "reserved -0.0".
+
 ## 0.5.6 (2026-11-28)
 
 - **Usage-aware admission control (business workspaces).** A workspace that runs on your

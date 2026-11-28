@@ -131,7 +131,8 @@ pub struct Check {
 }
 
 pub fn check_offer(sample: Option<Sample>, reservations: &[Reservation], est_units: f64, deadline: f64, now: f64, gates: Gates) -> Check {
-    let reserved: f64 = reservations.iter().map(|r| r.remaining_units).sum();
+    // (+ 0.0: an empty f64 sum is -0.0, which prints as "-0.0".)
+    let reserved: f64 = reservations.iter().map(|r| r.remaining_units).sum::<f64>() + 0.0;
     let mut c = Check { est_units, deadline, reserved, ..Default::default() };
     if est_units <= 0.0 {
         c.note = "no usage estimate given".into();

@@ -1922,7 +1922,9 @@ Mention it only if the user asks about cost or usage.{}\n",
         let timing = self.timing_summary(ws);
         let others = self.other_workspaces_note(ws);
         let st = self.store.lock().unwrap();
-        let mut p = ORCH_APPEND.to_string() + &mix + &cap + &timing + &others;
+        let business = st.notes(ws).is_some_and(|n| n.kind == "business");
+        let base = if business { business_append() } else { ORCH_APPEND.to_string() };
+        let mut p = base + &mix + &cap + &timing + &others;
         p += &format!("\n# Your workspace\nYou are the orchestrator for {ws}. Your threads work there unless you give them another folder.\n");
         if st.notes(ws).is_some_and(|n| n.kind == "business") {
             p += BUSINESS_QUEUE_NOTE;
@@ -2573,6 +2575,60 @@ pub fn now_note() -> String {
 }
 
 // ---------------------------------------------------------------- approval queue
+
+/// Development-only lines of ORCH_APPEND and what a business workspace gets instead. The
+/// rest of the instructions is shared word for word, so the two modes can't drift apart.
+const BUSINESS_SWAPS: [(&str, &str); 3] = [
+    (
+        "- claude-haiku-5-5 for trivial or mechanical work (polling, small text edits, renames, lookups,
+  summaries); claude-sonnet-5-5 for routine coding, tests and small reviews; claude-opus-5-5 (the
+  default) for hard, ambiguous, cross-cutting or high-stakes work.",
+        "- Pick a mode for every task as pipelines/models.md describes: a script in tools/ for repeat mechanical
+  work; claude-haiku-5-5 (low) for short formulaic work (listing copy, tags, filing, sorting);
+  claude-sonnet-5-5 (medium) as the default for clear work of a known kind; Opus plans and Sonnet builds
+  for new, unclear or long work; claude-opus-5-5 alone for small but tricky tasks; Fable only to rescue
+  a paid order Opus already failed. When unsure, Sonnet, then escalate one step if it fails.",
+    ),
+    (
+        "(e.g. \"docs edits: haiku, low\"; \"bugfixes
+  here take 2x my guess\")",
+        "(e.g. \"listing copy: haiku, low\"; \"custom
+  gigs take 2x my guess\")",
+    ),
+    (
+        "- Kinds: small-fix, bugfix, feature, refactor, tests, research, docs, review, setup, ops, or another
+  short word.",
+        "- Kinds: gig, listing, design, copy, research, venture, outreach, bookkeeping, tool, review, or another
+  short word. Keep them stable: usage per kind is learned from them.",
+    ),
+];
+
+/// What a business orchestrator does differently (added after the shared instructions).
+const BUSINESS_MODE: &str = "
+# Running the business
+This workspace runs a small business. Read its brief and rules (below) and follow them.
+- Each business line has a playbook in pipelines/ (ventures being tested have theirs in ventures/<slug>/).
+  Brief threads by pointing them at their playbook, and keep work in the folders it names.
+- Judge work by expected profit: per hour of the user's time and per unit of plan usage. Do the most
+  valuable work first, and drop work that doesn't pay.
+- Paid orders come first: their deadlines, QA and capacity (see Capacity below) beat everything else.
+- Internal work (research, drafts, designs, tools) needs no approval. Anything that leaves the computer
+  does: it goes through queue_item (see Approval queue below).
+- Weekly (or when the user says \"weekly review\"): review the ledger, decide what to stop, keep or scale,
+  and propose up to two new ventures as new_venture items.
+- When the user rejects an item, read the reason and save the pattern as a project lesson, so the next
+  item already meets it.
+";
+
+/// The orchestrator's built-in instructions for a business workspace: the shared text with
+/// the development-only lines swapped, plus how to run the business.
+fn business_append() -> String {
+    let mut s = ORCH_APPEND.to_string();
+    for (dev, biz) in BUSINESS_SWAPS {
+        s = s.replace(dev, biz);
+    }
+    s + BUSINESS_MODE
+}
 
 /// Added to the orchestrator's and threads' instructions in business workspaces.
 const BUSINESS_QUEUE_NOTE: &str = "
@@ -3679,4 +3735,28 @@ fn looks_like_correction(text: &str) -> bool {
     ];
     t.starts_with("no ") || t.starts_with("no,") || t.starts_with("nope") || t == "no"
         || PHRASES.iter().any(|p| t.contains(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every development-only line must exist in the shared text (or the swap would silently
+    /// do nothing), and a business workspace must get none of them.
+    #[test]
+    fn business_instructions_swap_every_dev_line() {
+        let biz = business_append();
+        for (dev, replacement) in BUSINESS_SWAPS {
+            assert_eq!(ORCH_APPEND.matches(dev).count(), 1, "not found in ORCH_APPEND: {dev}");
+            assert!(!biz.contains(dev), "business text still has: {dev}");
+            assert!(biz.contains(replacement));
+        }
+        assert!(biz.contains("# Running the business"));
+        // The shared parts are identical: the business text is the dev text with only the swaps.
+        let mut back = biz.trim_end_matches(BUSINESS_MODE).to_string();
+        for (dev, replacement) in BUSINESS_SWAPS {
+            back = back.replace(replacement, dev);
+        }
+        assert_eq!(back, ORCH_APPEND);
+    }
 }

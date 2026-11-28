@@ -104,7 +104,10 @@ Type `/` for commands, or press Ctrl+Shift+P for the command palette.
 
 A workspace can also run work that reaches the outside world, like publishing listings,
 answering buyers or spending money. Set **Settings → Workspace type → Business**. Development
-workspaces are unaffected.
+workspaces are unaffected. In a business workspace, the orchestrator's instructions swap
+the development-specific parts (model choice, kinds of work) for business ones: follow the
+playbooks in `pipelines/`, judge work by expected profit, put paid orders first, run the
+weekly review, and learn from rejected items. The rest is the same text in both modes.
 
 - **Approval queue.** Agents can't send, publish or spend anything themselves. They propose
   each action with `queue_item`: its type, business line, expected value, risk, the exact
