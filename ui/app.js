@@ -502,7 +502,7 @@ function renderTabs() {
 function openTab(tab) {
   let i = S.tabs.findIndex((t) => t.type === tab.type && (!["chat", "doc"].includes(t.type) || t.key.toLowerCase() === tab.key.toLowerCase()));
   if (i === -1) { S.tabs.push(tab); i = S.tabs.length - 1; }
-  activate(i);
+  return activate(i);
 }
 
 function closeTab(i) {
@@ -1462,8 +1462,7 @@ function ndPaused(v) { const n = ndSteps(v).length; return n && v.step > 0 && v.
 
 function ndJump(v) {
   const go = async () => {
-    openChat(v.source && !isOrch(v.source) ? v.source : orchKey());
-    for (let n = 0; n < 20 && !$("#log")?.children.length; n++) await new Promise((r) => setTimeout(r, 100));
+    await openChat(v.source && !isOrch(v.source) ? v.source : orchKey());
     const nodes = $$("#log [data-ts]");
     const t = nodes.find((x) => +x.dataset.ts >= v.msg_ts - 1e-6) || nodes[nodes.length - 1];
     if (t) { t.scrollIntoView({ block: "center" }); t.classList.add("flash"); setTimeout(() => t.classList.remove("flash"), 2000); }
@@ -1475,7 +1474,6 @@ function ndChips(v, showWs) {
   const row = h("div", "nd-chips");
   row.append(h("span", "qchip", ND_KIND[v.kind] || v.kind));
   if (v.priority === "urgent") row.append(h("span", "qchip urgent", "urgent"));
-  else if (v.priority === "today") row.append(h("span", "qchip you", "today"));
   if (v.minutes) row.append(h("span", "qchip", `~${v.minutes} min`));
   if (v.pin === 1) row.append(h("span", "qchip you", "📌 pinned"));
   if (v.careful) row.append(h("span", "qchip risk-high", "check carefully"));
@@ -1636,28 +1634,30 @@ function needCard(v, o = {}) {
   const sn = h("button", "btn quiet", "💤 Later");
   sn.onclick = () => { ND.menu = ND.menu === v.id ? null : v.id; ndRefresh(); };
   acts.append(sn);
+  const more = h("div", "nd-acts");
   const pin = h("button", "btn quiet", v.pin === 1 ? "📌 Unpin" : "📌 Pin to Today");
   pin.onclick = () => needIpc(v, { action: "pin", id: v.id, pin: v.pin === 1 ? 0 : 1 });
-  acts.append(pin);
+  more.append(pin);
   if (o.today && v.pin !== 1) {
     const nt = h("button", "btn quiet", "Not today");
     nt.onclick = () => needIpc(v, { action: "pin", id: v.id, pin: -1 });
-    acts.append(nt);
+    more.append(nt);
   } else if (v.pin === -1) {
     const bk = h("button", "btn quiet", "Put back");
     bk.onclick = () => needIpc(v, { action: "pin", id: v.id, pin: 0 });
-    acts.append(bk);
+    more.append(bk);
   }
   if (v.kind !== "decision" && v.kind !== "manual") {
     const ds = h("button", "btn quiet", "Dismiss…");
     ds.onclick = () => { ND.dismiss = v.id; ndRefresh(); };
-    acts.append(ds);
+    more.append(ds);
   }
-  if (v.msg_ts) { const j = h("button", "btn quiet", "💬 Chat"); j.title = "Jump to where this came up"; j.onclick = () => ndJump(v); acts.append(j); }
+  if (v.msg_ts) { const j = h("button", "btn quiet", "💬 Chat"); j.title = "Jump to where this came up"; j.onclick = () => ndJump(v); more.append(j); }
   const mb = h("button", "btn quiet", ND.more.has(v.id) ? "Less" : "More");
   mb.onclick = () => { ND.more.has(v.id) ? ND.more.delete(v.id) : ND.more.add(v.id); ndRefresh(); };
   acts.append(mb);
   c.append(acts);
+  if (ND.more.has(v.id)) c.append(more);
   if (ND.menu === v.id) c.append(ndSnoozeMenu(v));
   if (ND.dismiss === v.id) c.append(ndInputRow(v, "d", "Why? (optional, the agent sees it)", "Dismiss", (note) => { ND.dismiss = null; needIpc(v, { action: "dismiss", id: v.id, note }); ndRefresh(); }, false));
   if (ND.reject === v.id) c.append(ndInputRow(v, "r", "Why? (one line: how the agents learn your taste)", "Reject", (reason) => { ND.reject = null; sendIpc({ op: "queue_decide", id: v.queue_item, action: "reject", reason }); ndRefresh(); }, true));
