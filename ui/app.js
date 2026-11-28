@@ -1321,6 +1321,9 @@ function queueCard(i) {
   c.append(head, h("div", "qsummary", i.summary), h("div", "qmeta", `${i.id} · from ${i.created_by} · ${relTime(i.created_at) === "now" ? "just now" : relTime(i.created_at) + " ago"}`));
   const pre = h("pre", "qpayload", i.payload);
   c.append(pre);
+  if (i.command) {
+    c.append(h("div", "qmeta", `runs with run_approved${i.secrets?.length ? ` · gets secrets: ${i.secrets.join(", ")}` : ""}`), h("pre", "qpayload qcmd", i.command));
+  }
   if (i.attachments?.length) {
     const g = h("div", "qatt");
     for (const p of i.attachments) {
@@ -2665,6 +2668,34 @@ async function renderSettings() {
     el.value = S.state.project?.kind || "development";
     el.onchange = () => { if (sendIpc({ op: "set_workspace_kind", kind: el.value })) { toast(`this workspace is now a ${el.value} workspace`); setTimeout(loadState, 400); } else el.value = S.state.project?.kind || "development"; };
     setting("Workspace", "Workspace type", "<b>Business</b> turns on the business features for this workspace: the approval queue (agents propose anything outbound with <code>queue_item</code>, and only you approve it, in the ✓ Queue tab). <b>Development</b> (the default) works as before. Can only be changed in this window.", el);
+  }
+
+  if (S.state.project?.kind === "business") {
+    section("Secrets");
+    const box = h("div", "secrets");
+    for (const sc of S.state.secrets || []) {
+      const r = h("div", "row secret-row");
+      r.append(h("span", "mono", sc.name), h("span", "qchip", sc.scope === "all" ? "all sessions (env var)" : "approved actions only"));
+      const del = h("button", "btn danger", "Remove");
+      del.onclick = () => { if (confirm(`Remove secret ${sc.name}?`) && sendIpc({ op: "vault_remove", name: sc.name })) setTimeout(() => loadState().then(renderSettings), 500); };
+      r.append(del);
+      box.append(r);
+    }
+    if (!(S.state.secrets || []).length) box.append(h("div", "sub", "No secrets yet."));
+    const add = h("div", "row");
+    const name = h("input"); name.placeholder = "NAME (e.g. PINTEREST_TOKEN)"; name.spellcheck = false;
+    const val = h("input"); val.type = "password"; val.placeholder = "value"; val.autocomplete = "off";
+    const scope = h("select");
+    for (const [v, l] of [["approved", "approved actions only"], ["all", "all sessions (env var)"]]) { const o = h("option", null, l); o.value = v; scope.append(o); }
+    const b = h("button", "btn primary", "Save secret");
+    b.onclick = () => {
+      const n = name.value.trim().toUpperCase();
+      if (!n || !val.value) return toast("name and value are required", true);
+      if (sendIpc({ op: "vault_set", name: n, value: val.value, scope: scope.value })) { val.value = ""; name.value = ""; setTimeout(() => loadState().then(renderSettings), 600); }
+    };
+    add.append(name, val, scope, b);
+    box.append(add);
+    setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it with <code>run_approved</code>. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);
   }
 
   section("Billing");

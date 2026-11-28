@@ -36,6 +36,12 @@ pub struct QueueItem {
     pub urgent: bool,
     /// Absolute paths; their contents are part of the approval hash.
     pub attachments: Vec<String>,
+    /// PowerShell command that run_approved executes (optional).
+    pub command: String,
+    /// Names of vault secrets run_approved puts in the command's environment.
+    pub secrets: Vec<String>,
+    /// When run_approved ran it (each item runs once).
+    pub ran_at: f64,
     pub created_by: String,
     pub created_at: f64,
     pub status: String,
@@ -59,6 +65,13 @@ pub fn content_hash(item: &QueueItem) -> String {
     for part in [&item.kind, &item.line, &item.payload, &item.who_executes] {
         h.update((part.len() as u64).to_le_bytes());
         h.update(part.as_bytes());
+    }
+    // Only when set, so items approved before these fields existed keep their hash.
+    if !item.command.is_empty() || !item.secrets.is_empty() {
+        h.update(b"command");
+        h.update((item.command.len() as u64).to_le_bytes());
+        h.update(item.command.as_bytes());
+        h.update(item.secrets.join(",").as_bytes());
     }
     for a in &item.attachments {
         h.update((a.len() as u64).to_le_bytes());
@@ -162,6 +175,9 @@ pub fn render(item: &QueueItem) -> String {
         item.id, item.kind, item.line, item.status, item.urgent, item.expected_value_usd, item.risk, item.who_executes,
         item.created_by, item.summary, item.payload
     );
+    if !item.command.is_empty() {
+        s += &format!("\n## Command (run_approved)\n```powershell\n{}\n```\nSecrets: {}\n", item.command, if item.secrets.is_empty() { "none".to_string() } else { item.secrets.join(", ") });
+    }
     if !item.attachments.is_empty() {
         s += "\n## Attachments\n";
         for a in &item.attachments {

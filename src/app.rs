@@ -210,6 +210,8 @@ pub struct App {
     pub sessions_index: claude_projects::Index,
     /// A newer release on GitHub, if one was found.
     pub update: Mutex<Option<Value>>,
+    /// Business secrets (DPAPI-encrypted, in their own file).
+    pub vault: crate::vault::Vault,
 }
 
 impl App {
@@ -235,6 +237,7 @@ impl App {
         store.save();
         let hub = Hub::new(paths.data_dir.join("transcripts"), paths.data_dir.join("media"));
         hub.mark_interrupted();
+        let vault = crate::vault::Vault::load(paths.config_dir.join("vault.json"));
         Arc::new(App {
             hub,
             paths,
@@ -263,6 +266,7 @@ impl App {
             changed: Notify::new(),
             sessions_index: claude_projects::Index::new(),
             update: Mutex::new(None),
+            vault,
         })
     }
 
@@ -375,10 +379,15 @@ impl App {
             })
         };
         let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
+        let secrets: Vec<Value> = if self.is_business(&ws) {
+            self.vault.list(&ws).into_iter().map(|(n, scope, at)| json!({"name": n, "scope": scope, "added_at": at})).collect()
+        } else {
+            vec![]
+        };
         json!({
             "workspace": ws, "recent_workspaces": recent, "open_workspaces": self.open_workspaces_json(), "orchestrator": self.orch_json(),
             "threads": threads, "running": running, "waiting": waiting,
-            "project": project, "queue": queue,
+            "project": project, "queue": queue, "secrets": secrets,
             "defaults": {
                 "thread_backend": s.thread_backend, "thread_model": s.thread_model,
                 "thread_effort": s.thread_effort, "api_key_set": !s.api_key.trim().is_empty(),
@@ -926,6 +935,7 @@ Pick up where it left off. Check the current state before relying on anything ab
             images,
             fork_session: row.fork_pending && msg.fork.is_none(),
             permission_mode: self.permission_for(&row),
+            env: self.secret_env(&row.workspace),
             inject: Some(self.open_injector(name)),
             prior_cost,
         };
@@ -1341,6 +1351,7 @@ wait for. Then act on it."
             images,
             fork_session: false,
             permission_mode: self.permission_in(&ws),
+            env: self.secret_env(&ws),
             inject: Some(self.open_injector(key)),
             prior_cost,
         };
@@ -1597,6 +1608,7 @@ wait for. Then act on it."
                 resume_at: None,
                 fork_session: false,
                 permission_mode: String::new(),
+                env: vec![],
                 inject: None,
                 prior_cost: None,
             };
@@ -1714,6 +1726,7 @@ wait for. Then act on it."
             resume_at: None,
             fork_session: false,
             permission_mode: String::new(),
+            env: vec![],
             inject: None,
             prior_cost: None,
         };
@@ -2506,12 +2519,18 @@ needs an item the user approved. Propose it with queue_item, with the exact payl
 reject, in the app's Queue tab; you'll get a message with each decision (rejections come with a reason). Execute only \
 what list_approved returns, exactly as written, then record the result with complete_item. The files in queue/ are \
 read-only copies the app writes: editing or moving them changes nothing.
+Secrets (API keys, tokens) live in the app's vault. Never ask for, print, store or put a secret's value anywhere. When \
+an action needs one, give the item a command (PowerShell) that reads it as $env:NAME and list NAME in secrets; once \
+approved, run_approved runs exactly that command with the secret set. Some harmless keys are set as environment \
+variables in every session; the user decides which.
 ";
 
 impl App {
     /// Append to a business workspace's audit log (queue/audit.log, hash-chained) and the
     /// app's own copy. Nothing turns this off. Don't call it with the store locked.
     pub fn audit(&self, ws: &str, line: &str) {
+        let line = crate::vault::redact(line);
+        let line = line.as_str();
         let mut st = self.store.lock().unwrap();
         let tip = st.notes(ws).map(|n| n.audit_tip.clone()).unwrap_or_default();
         let new_tip = crate::queue::audit_append(ws, &tip, line);
@@ -2520,6 +2539,85 @@ impl App {
         let over = st.audit.len().saturating_sub(5000);
         st.audit.drain(..over);
         st.save();
+    }
+
+    /// Secrets scoped to every session, as environment variables (business workspaces).
+    pub fn secret_env(&self, ws: &str) -> Vec<(String, String)> {
+        if self.is_business(ws) { self.vault.env_all(ws) } else { vec![] }
+    }
+
+    /// Add or replace a secret in the shown workspace (from the window only).
+    pub fn vault_set(&self, name: &str, value: &str, scope: &str) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("secrets are only for business workspaces".into());
+        }
+        self.vault.set(&ws, name, value, scope)?;
+        self.audit(&ws, &format!("SECRET SET {name} scope={} by=user", if scope == "all" { "all-sessions" } else { "approved-actions-only" }));
+        self.touch();
+        Ok(())
+    }
+
+    pub fn vault_remove(&self, name: &str) {
+        let ws = self.workspace();
+        if self.vault.remove(&ws, name) {
+            self.audit(&ws, &format!("SECRET REMOVED {name} by=user"));
+        }
+        self.touch();
+    }
+
+    /// run_approved: run an approved item's exact command, with the secrets it names in
+    /// its environment. Each item runs once; the agent then records the result with
+    /// complete_item.
+    pub async fn queue_run(&self, key: &str, id: &str) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        if !self.is_business(&ws) {
+            return Err("the approval queue is only on in business workspaces".into());
+        }
+        let item = {
+            let st = self.store.lock().unwrap();
+            let paused = st.outbound_paused_all || st.notes(&ws).is_some_and(|n| n.outbound_paused);
+            if paused {
+                return Err("outbound is paused by the user (kill switch): nothing may run until they resume it".into());
+            }
+            let listable = crate::queue::listable(st.queue.iter().filter(|i| same_path(&i.workspace, &ws)), false);
+            listable.into_iter().find(|i| i.id == id).cloned().ok_or(format!("{id} isn't an approved, unchanged item in this workspace (see list_approved)"))?
+        };
+        if item.command.trim().is_empty() {
+            return Err(format!("{id} has no command to run; execute its payload yourself, then complete_item"));
+        }
+        if item.ran_at > 0.0 {
+            return Err(format!("{id} already ran; record its result with complete_item"));
+        }
+        let secrets = self.vault.get(&ws, &item.secrets)?;
+        {
+            let mut st = self.store.lock().unwrap();
+            if let Some(i) = st.queue.iter_mut().find(|i| i.id == id && same_path(&i.workspace, &ws)) {
+                i.ran_at = now();
+            }
+            st.save();
+        }
+        self.audit(&ws, &format!("RUN {id} by={key}{}", if item.secrets.is_empty() { String::new() } else { format!(" (secret access: {})", item.secrets.join(", ")) }));
+        let mut cmd = tokio::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &item.command])
+            .current_dir(&ws)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        for (k, v) in &secrets {
+            cmd.env(k, v);
+        }
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        let out = tokio::time::timeout(Duration::from_secs(600), cmd.output()).await;
+        let (code, text) = match out {
+            Err(_) => (None, "timed out after 10 minutes".to_string()),
+            Ok(Err(e)) => (None, format!("couldn't start PowerShell: {e}")),
+            Ok(Ok(o)) => (o.status.code(), format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))),
+        };
+        let text = crate::vault::redact(&text);
+        let text: String = if text.chars().count() > 12000 { text.chars().take(12000).collect::<String>() + "\n(cut short)" } else { text };
+        self.audit(&ws, &format!("RAN {id} exit={}", code.map_or("none".to_string(), |c| c.to_string())));
+        Ok(format!("{id} ran (exit code {}).\n{text}\n\nNow record what happened with complete_item.", code.map_or("none".to_string(), |c| c.to_string())))
     }
 
     pub fn is_paused(&self, ws: &str) -> bool {
@@ -2640,6 +2738,20 @@ impl App {
         if !["agent", "user"].contains(&who.as_str()) {
             return Err("who_executes must be agent or user".into());
         }
+        let command = s("command");
+        let secrets: Vec<String> = args.get("secrets").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        if !secrets.is_empty() && command.is_empty() {
+            return Err("secrets are only passed to a command: add command (what run_approved will run)".into());
+        }
+        let known: Vec<String> = self.vault.list(&ws).into_iter().map(|(n, ..)| n).collect();
+        if let Some(missing) = secrets.iter().find(|n| !known.contains(n)) {
+            return Err(format!("no secret named {missing} in this workspace; the user adds secrets in Settings → Secrets"));
+        }
+        for text in [&summary, &payload, &command] {
+            if let Some(name) = crate::vault::contains_secret(text) {
+                return Err(format!("the item contains the value of secret {name}: never put secret values in an item; name the secret in secrets and use $env:{name} in command"));
+            }
+        }
         let now_t = now();
         let mut st = self.store.lock().unwrap();
         let n = st.queue.iter().filter_map(|i| i.id.strip_prefix('q').and_then(|n| n.parse::<u64>().ok())).max().unwrap_or(0) + 1;
@@ -2664,6 +2776,8 @@ impl App {
             who_executes: who,
             urgent: args.get("urgent").and_then(Value::as_bool).unwrap_or(false),
             attachments,
+            command,
+            secrets,
             created_by: if key.starts_with(ORCHESTRATOR) { "orchestrator".into() } else { key.to_string() },
             created_at: now_t,
             status: "pending".into(),
@@ -2717,7 +2831,7 @@ impl App {
             .iter()
             .map(|i| {
                 format!(
-                    "## {} ({}, line {}, executed by {}){}\nWhat: {}\nPayload (execute exactly this):\n{}{}",
+                    "## {} ({}, line {}, executed by {}){}\nWhat: {}\nPayload (execute exactly this):\n{}{}{}",
                     i.id,
                     i.kind,
                     if i.line.is_empty() { "-" } else { &i.line },
@@ -2725,7 +2839,8 @@ impl App {
                     if i.edited { " [the user edited the payload before approving]" } else { "" },
                     i.summary,
                     i.payload,
-                    if i.attachments.is_empty() { String::new() } else { format!("\nAttachments: {}", i.attachments.join(", ")) }
+                    if i.attachments.is_empty() { String::new() } else { format!("\nAttachments: {}", i.attachments.join(", ")) },
+                    if i.command.is_empty() { String::new() } else { format!("\nCommand (run it with run_approved; secrets: {}):\n{}", if i.secrets.is_empty() { "none".to_string() } else { i.secrets.join(", ") }, i.command) }
                 )
             })
             .collect::<Vec<_>>()
@@ -2743,7 +2858,7 @@ impl App {
         let ws = self.ws_of(key);
         let mut st = self.store.lock().unwrap();
         let item = st.queue.iter_mut().find(|i| i.id == id && same_path(&i.workspace, &ws)).ok_or(format!("no queue item {id} in this workspace"))?;
-        crate::queue::complete(item, result, now())?;
+        crate::queue::complete(item, &crate::vault::redact(result), now())?;
         crate::queue::mirror(item);
         let audit_line = format!("EXECUTED {id} by={key} :: {}", item.result);
         st.save();

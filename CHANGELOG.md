@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.2 (2026-11-28)
+
+- **Secrets vault (business workspaces).** Add API keys and tokens in **Settings →
+  Secrets**. They're encrypted with your Windows account (DPAPI) in their own file, never
+  stored in plain text or in the app's state, and the window only ever shows their names.
+  They can only be added or removed in the app window.
+- **Secrets are only used for approved actions by default.** An agent proposes a queue
+  item with a PowerShell `command` that reads `$env:NAME` and lists the secrets it needs.
+  Once you approve the item, the new `run_approved` tool runs exactly that command, once,
+  with only those secrets set. Each run and secret access is recorded in the audit log.
+  For harmless keys you can choose **all sessions** instead, which sets the secret as an
+  environment variable in every thread.
+- **Redaction.** Secret values are replaced with `[secret:NAME]` in transcripts, the live
+  window, run output, queue results and the audit log. A queue item that contains a secret's
+  value is refused. Claude Code's own session files (`~/.claude/projects`) are outside the
+  app and aren't redacted.
+
 ## 0.5.1 (2026-11-28)
 
 - **Kill switch (business workspaces).** **⏸ Pause outbound**, in the status bar or the

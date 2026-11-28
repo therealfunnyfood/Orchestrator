@@ -75,7 +75,7 @@ documents the user should look at. Relative paths are taken from your working di
 
 /// Approval queue tools: every session in a business workspace gets these. There is no
 /// tool to approve or reject: only the user can, in the app's window.
-pub const QUEUE_TOOLS: [&str; 3] = ["queue_item", "list_approved", "complete_item"];
+pub const QUEUE_TOOLS: [&str; 4] = ["queue_item", "list_approved", "run_approved", "complete_item"];
 
 fn queue_tools() -> Value {
     json!([
@@ -92,12 +92,21 @@ fn queue_tools() -> Value {
                 "who_executes": {"type": "string", "enum": ["agent", "user"], "description": "user = no API, the user does it by hand"},
                 "urgent": {"type": "boolean"},
                 "attachments": {"type": "array", "items": {"type": "string"}, "description": "files the user should see (images, PDFs...); part of what's approved"},
+                "command": {"type": "string", "description": "optional PowerShell command that run_approved will run after approval (e.g. python tools/pinterest.py post ...); part of what's approved"},
+                "secrets": {"type": "array", "items": {"type": "string"}, "description": "names of vault secrets the command needs; they're set as environment variables ($env:NAME) only for that run. Never put a secret's value anywhere."},
             }, "required": ["type", "summary", "payload", "risk"]},
         },
         {
             "name": "list_approved",
             "description": "Items the user approved that haven't been executed yet, with their exact payloads. Execute only these, exactly as written, then call complete_item. An item changed after approval is never listed.",
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "run_approved",
+            "description": "Run an approved item's command exactly as approved, with the secrets it names in its environment, in the \
+workspace folder (PowerShell, 10 minute limit). This is the only way to use secrets kept for approved actions. Each item runs once; \
+then record the result with complete_item.",
+            "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
         },
         {
             "name": "complete_item",
@@ -679,6 +688,7 @@ Each thread's messages and final report start your next turn.".into());
             app.queue_add(key, args, files)
         }
         "list_approved" => app.queue_list_approved(key),
+        "run_approved" => app.queue_run(key, arg(args, "id").ok_or("id is required")?).await,
         "complete_item" => {
             let id = arg(args, "id").ok_or("id is required")?;
             app.queue_complete(key, id, arg(args, "result").unwrap_or(""))
@@ -787,7 +797,7 @@ mod tests {
             if n == "approve" {
                 continue;
             }
-            assert!(!n.contains("approve") || n == "list_approved", "tool {n} looks like it could approve");
+            assert!(!n.contains("approve") || n == "list_approved" || n == "run_approved", "tool {n} looks like it could approve");
             assert!(!n.contains("reject") && !n.contains("decide"), "tool {n} looks like it could decide");
         }
         assert_eq!(names(queue_tools()), QUEUE_TOOLS.to_vec());
@@ -806,7 +816,7 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

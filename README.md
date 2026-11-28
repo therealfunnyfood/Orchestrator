@@ -126,6 +126,19 @@ workspaces are unaffected.
   workspace at once. **Pause workspace** stops every running turn in it and holds thread
   news and automatic turns until you resume. Your own messages still go through. Only you
   can flip these, from the app window.
+- **Secrets.** Add API keys and tokens in **Settings → Secrets**. They're encrypted with
+  your Windows account (DPAPI) in their own file, never in the app's state, and redacted
+  as `[secret:NAME]` from every transcript, live view, queue item and log the app writes.
+  A secret is scoped to **approved actions only** (the default) or **all sessions**:
+  - **Approved actions only:** an agent writes a queue item with a PowerShell `command`
+    that reads `$env:NAME` and lists `NAME` in `secrets`. After you approve it,
+    `run_approved` runs exactly that command, once, with the secret set, and the access is
+    logged.
+  - **All sessions:** the secret is an environment variable in every thread. Use this only
+    for harmless keys.
+
+  Claude Code's own session files (`~/.claude/projects`) are outside the app, so they
+  aren't redacted.
 - **Audit log.** `<workspace>/queue/audit.log` records every item queued, approved,
   rejected, executed or voided, and every pause and resume. Each line ends with a hash
   that chains it to the line before. The file is read-only, and if anything edits it

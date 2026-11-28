@@ -35,7 +35,8 @@ impl Hub {
     pub fn emit(&self, key: &str, mut event: Value) {
         event["ts"] = json!(now());
         event["thread"] = json!(key);
-        let line = event.to_string();
+        // Secret values never reach a transcript or the window.
+        let line = crate::vault::redact(&event.to_string());
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(self.path(key)) {
             let _ = writeln!(f, "{line}");
         }
@@ -44,7 +45,7 @@ impl Hub {
 
     /// Send a transient event (not saved): state changes, streaming text.
     pub fn broadcast(&self, event: Value) {
-        let _ = self.tx.send(event.to_string());
+        let _ = self.tx.send(crate::vault::redact(&event.to_string()));
     }
 
     pub fn history(&self, key: &str, limit: usize) -> Vec<Value> {

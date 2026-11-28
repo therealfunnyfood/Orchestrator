@@ -39,6 +39,8 @@ pub struct TurnSpec {
     /// Claude Code permission mode. Anything but bypassPermissions routes approvals
     /// to the app's `approve` tool (needs mcp_config).
     pub permission_mode: String,
+    /// Extra environment variables (business secrets scoped to all sessions).
+    pub env: Vec<(String, String)>,
     /// Messages sent while the turn runs (stream-json user lines, see `user_line`).
     /// Claude Code reads them at its next step, like typing while Claude works.
     pub inject: Option<tokio::sync::Mutex<mpsc::UnboundedReceiver<String>>>,
@@ -205,6 +207,9 @@ fn build_command(settings: &Settings, spec: &TurnSpec, backend: &str, resume: Op
             // Keys not scoped to a workspace must name one on every request.
             cmd.env("ANTHROPIC_CUSTOM_HEADERS", format!("anthropic-workspace-id: {}", settings.api_workspace_id.trim()));
         }
+    }
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
     }
     if spec.long_tool_calls {
         // wait_for_threads can legitimately block for many minutes.
@@ -434,7 +439,7 @@ pub async fn run_turn(
         let plain = TurnSpec { resume_at: None, images: spec.images.clone(), tools: spec.tools.clone(), mcp_config: spec.mcp_config.clone(),
             prompt: spec.prompt.clone(), cwd: spec.cwd.clone(), resume: None, model: spec.model.clone(), effort: spec.effort.clone(),
             backend: spec.backend.clone(), append_system: spec.append_system.clone(), long_tool_calls: spec.long_tool_calls, fork_session: false,
-            permission_mode: spec.permission_mode.clone(), inject: None, prior_cost: Some(result.session_total) };
+            permission_mode: spec.permission_mode.clone(), env: spec.env.clone(), inject: None, prior_cost: Some(result.session_total) };
         let mut retry = run_once(settings, &plain, &retry_prompt, "api", result.session_id.as_deref(), cancel, on_line).await?;
         retry.plan_cost = result.cost_usd;
         retry.cost_usd += result.cost_usd;

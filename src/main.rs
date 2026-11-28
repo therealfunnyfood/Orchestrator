@@ -19,6 +19,7 @@ mod setup;
 mod store;
 mod uninstall;
 mod updates;
+mod vault;
 mod web;
 
 use rand::Rng;
@@ -74,6 +75,19 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
                     app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
                 }
             });
+        }
+        "vault_set" => {
+            let (name, value, scope) = (s("name"), s("value"), s("scope"));
+            rt().spawn(async move {
+                match app.vault_set(&name, &value, &scope) {
+                    Ok(()) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": format!("secret {name} saved")})),
+                    Err(e) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e})),
+                }
+            });
+        }
+        "vault_remove" => {
+            let name = s("name");
+            rt().spawn(async move { app.vault_remove(&name) });
         }
         "set_outbound_paused" => {
             let paused = msg.get("paused").and_then(|v| v.as_bool()).unwrap_or(true);
