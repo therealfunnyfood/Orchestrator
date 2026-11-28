@@ -218,6 +218,11 @@ impl App {
     pub fn new(paths: Paths, token: String) -> Arc<App> {
         let settings = Settings::load(&paths);
         let mut store = Store::load(paths.data_dir.join("state.json"));
+        // Pending queue items move to the wider hash (nothing was approved under the old one
+        // yet); approved ones keep theirs so their approvals stay valid.
+        for i in store.queue.iter_mut().filter(|i| i.status == "pending" && i.hash_v < 2) {
+            i.hash_v = 2;
+        }
         if store.workspace.is_empty() || !Path::new(&store.workspace).is_dir() {
             store.workspace = paths.default_workspace().to_string_lossy().into_owned();
         }
@@ -391,10 +396,14 @@ impl App {
                 "gates": n.gates, "paid_api_fallback": n.paid_api_fallback, "paid_api_cap_usd": n.paid_api_cap_usd,
                 "notify_events": if n.notify_set { json!(n.notify_events) } else { json!(crate::notify::EVENTS.iter().map(|(e, _)| e).collect::<Vec<_>>()) },
                 "notify_phone": n.notify_phone,
-                "phone_feed": n.phone_feed, "feed_id": orch_key(&ws),
+                "phone_feed": n.phone_feed, "feed_id": orch_key(&ws), "phone_decide": n.phone_decide,
             })
         };
         let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
+        let phones = {
+            let st = self.store.lock().unwrap();
+            json!({"enrolled": st.phones, "pending": st.pending_phone})
+        };
         let secrets: Vec<Value> = if self.is_business(&ws) {
             self.vault.list(&ws).into_iter().map(|(n, scope, at)| json!({"name": n, "scope": scope, "added_at": at})).collect()
         } else {
@@ -405,6 +414,7 @@ impl App {
             "threads": threads, "running": running, "waiting": waiting,
             "project": project, "queue": queue, "secrets": secrets,
             "schedules": if self.is_business(&ws) { self.schedules_json(&ws) } else { json!([]) },
+            "phones": phones,
             "spend": if self.is_business(&ws) { let (_, s) = self.budget(&ws); json!({"day": s.day, "week": s.week}) } else { Value::Null },
             "defaults": {
                 "thread_backend": s.thread_backend, "thread_model": s.thread_model,
@@ -3437,6 +3447,111 @@ impl App {
         }
     }
 
+    // ---- signed decisions from enrolled phones (phone.rs) ----
+
+    /// The user pasted a phone's bundle (window only): parse it and show its fingerprint
+    /// for confirmation. Nothing is enrolled yet.
+    pub fn phone_enroll_begin(&self, bundle: &str) -> Result<(), String> {
+        let p = crate::phone::parse_bundle(bundle)?;
+        self.store.lock().unwrap().pending_phone = Some(p);
+        self.touch();
+        Ok(())
+    }
+
+    /// The user confirmed the fingerprint matches the phone's (window only): enrol it.
+    pub fn phone_enroll_confirm(&self, device: &str, fingerprint: &str) -> Result<(), String> {
+        let (phone, wss) = {
+            let mut st = self.store.lock().unwrap();
+            // The window sends back the fingerprint it showed: only that exact key is enrolled.
+            let mut p = st.pending_phone.take().filter(|p| p.device == device && p.fingerprint == fingerprint).ok_or("nothing to confirm for that device and fingerprint")?;
+            if st.phones.iter().any(|x| x.key == p.key && x.revoked_at > 0.0) {
+                return Err("that key was revoked; pair the phone again so it makes a new key".into());
+            }
+            p.enrolled_at = now();
+            st.phones.retain(|x| x.device != p.device);
+            st.phones.push(p.clone());
+            st.save();
+            let wss: Vec<String> = st.projects.iter().filter(|(_, n)| n.kind == "business").map(|(w, _)| w.clone()).collect();
+            (p, wss)
+        };
+        for ws in wss {
+            self.audit(&ws, &format!("PHONE ENROLLED {} \"{}\" fingerprint {} by=user", phone.device, phone.name, phone.fingerprint));
+        }
+        self.touch();
+        Ok(())
+    }
+
+    pub fn phone_enroll_cancel(&self) {
+        self.store.lock().unwrap().pending_phone = None;
+        self.touch();
+    }
+
+    /// Revoke a phone (window only): it can never decide again.
+    pub fn phone_revoke(&self, device: &str) -> Result<(), String> {
+        let (phone, wss) = {
+            let mut st = self.store.lock().unwrap();
+            let p = st.phones.iter_mut().find(|p| p.device == device && p.revoked_at == 0.0).ok_or("no such active phone")?;
+            p.revoked_at = now();
+            let p = p.clone();
+            st.save();
+            let wss: Vec<String> = st.projects.iter().filter(|(_, n)| n.kind == "business").map(|(w, _)| w.clone()).collect();
+            (p, wss)
+        };
+        for ws in wss {
+            self.audit(&ws, &format!("PHONE REVOKED {} fingerprint {} by=user", phone.device, phone.fingerprint));
+        }
+        self.touch();
+        Ok(())
+    }
+
+    /// Allow signed decisions from enrolled phones in the shown workspace (window only).
+    pub fn set_phone_decide(&self, on: bool) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("phone decisions are for business workspaces".into());
+        }
+        {
+            let mut st = self.store.lock().unwrap();
+            st.notes_mut(&ws).phone_decide = on;
+            st.save();
+        }
+        self.audit(&ws, if on { "PHONE DECISIONS ON by=user (signed approve/reject from enrolled phones)" } else { "PHONE DECISIONS OFF by=user" });
+        self.touch();
+        Ok(())
+    }
+
+    /// POST /api/business/{ws}/decide: a phone's signed approve or reject. Every check is in
+    /// phone::check_decide; then the same decide function the window uses runs.
+    pub fn phone_decide(self: &Arc<Self>, ws_id: &str, req: &crate::phone::DecideRequest) -> Result<Value, crate::phone::Refusal> {
+        let ws = self.feed_ws(ws_id).ok_or((404, "no_feed", "no business workspace with that id has the phone feed on".to_string()))?;
+        let t = now();
+        let (phone, capacity_failed, signed_hash) = {
+            let mut st = self.store.lock().unwrap();
+            if !st.notes(&ws).is_some_and(|n| n.phone_decide) {
+                return Err((403, "decisions_off", "phone decisions are off for this workspace (Settings → Phone)".into()));
+            }
+            st.phone_nonces.retain(|(_, _, at)| t - at < crate::phone::NONCE_KEEP_S);
+            let used = st.phone_nonces.iter().any(|(d, n, _)| *d == req.device && *n == req.nonce);
+            let found = st.queue.iter().find(|i| i.id == req.item_id && same_path(&i.workspace, &ws)).cloned();
+            let item = found.as_ref().map(|i| crate::phone::ItemNow { status: &i.status, payload_hash: crate::queue::content_hash(i) });
+            let signed_hash = item.as_ref().map(|i| i.payload_hash.clone());
+            let phone = crate::phone::check_decide(&st.phones, req, ws_id, item, t, used)?.clone();
+            // Single use: remembered before anything is decided.
+            st.phone_nonces.push((req.device.clone(), req.nonce.clone(), t));
+            st.save();
+            (phone, found.is_some_and(|i| i.capacity.as_ref().is_some_and(|c| !c.ok)), signed_hash)
+        };
+        if capacity_failed && req.decision == "approve" {
+            return Err((409, "capacity_failed", "this item failed the capacity check: approve it in the Orchestrator window (it needs a second, explicit click)".into()));
+        }
+        let via = format!("phone:{}", phone.fingerprint);
+        // The hash the signature covers is what gets approved (an attachment swapped since
+        // then voids the item instead).
+        self.queue_decide(&req.item_id, &req.decision, &req.reason, None, false, &via, signed_hash.as_deref()).map_err(|e| (409, "decide_failed", e))?;
+        let status = self.store.lock().unwrap().queue.iter().find(|i| i.id == req.item_id).map(|i| i.status.clone()).unwrap_or_default();
+        Ok(json!({"ok": true, "item_id": req.item_id, "status": status, "via": via}))
+    }
+
     // ---- manual tasks (queue items the user does by hand) ----
 
     /// Save a file the user dropped on a manual task's card to inbox/images/<id>/.
@@ -3771,6 +3886,7 @@ impl App {
             secrets,
             order_id,
             capacity: capacity.clone(),
+            hash_v: 2,
             created_by: if key.starts_with(ORCHESTRATOR) { "orchestrator".into() } else { key.to_string() },
             created_at: now_t,
             status: "pending".into(),
@@ -3873,9 +3989,9 @@ impl App {
 
     /// The user's decision from the Queue tab. Only called from the desktop window's IPC
     /// channel (see main.rs), never from HTTP or an agent tool.
-    pub fn queue_decide(self: &Arc<Self>, id: &str, action: &str, reason: &str, payload: Option<&str>, force: bool) -> Result<(), String> {
+    pub fn queue_decide(self: &Arc<Self>, id: &str, action: &str, reason: &str, payload: Option<&str>, force: bool, via: &str, seen_hash: Option<&str>) -> Result<(), String> {
         let decision = match action {
-            "approve" => crate::queue::Decision::Approve,
+            "approve" => crate::queue::Decision::Approve(seen_hash.filter(|h| !h.is_empty()).map(str::to_string)),
             "edit_approve" => crate::queue::Decision::EditApprove(payload.unwrap_or("").to_string()),
             "reject" => crate::queue::Decision::Reject(reason.to_string()),
             _ => return Err(format!("unknown action {action}")),
@@ -3897,21 +4013,27 @@ impl App {
             _ if item.edited => "APPROVED after editing",
             _ => "APPROVED",
         };
-        self.audit(&item.workspace, &format!("{what} {} by=user{}", item.id, if item.note.is_empty() { String::new() } else { format!(" :: {}", item.note) }));
+        let via_note = if via == "window" { String::new() } else { format!(" via={via}") };
+        self.audit(&item.workspace, &format!("{what} {} by=user{via_note}{}", item.id, if item.note.is_empty() { String::new() } else { format!(" :: {}", item.note) }));
         let ws = item.workspace.clone();
-        self.business_event(&ws, "item_decided", None, json!({"item_id": item.id, "status": item.status, "via": "window"}));
+        self.business_event(&ws, "item_decided", None, json!({"item_id": item.id, "status": item.status, "via": via}));
         self.queue_news(&ws, &[item]);
         self.queue_changed();
         Ok(())
     }
 
     /// "Approve all low-risk" in the shown workspace.
-    pub fn queue_approve_low_risk(self: &Arc<Self>) -> Result<usize, String> {
+    /// `shown`: the (id, hash) of each low-risk card the user saw; only those are approved,
+    /// and only if they still match.
+    pub fn queue_approve_low_risk(self: &Arc<Self>, shown: &[(String, String)]) -> Result<usize, String> {
         let ws = self.workspace();
         let mut st = self.store.lock().unwrap();
         let mut done = vec![];
         for item in st.queue.iter_mut().filter(|i| same_path(&i.workspace, &ws) && i.status == "pending" && i.risk == "low" && !i.capacity.as_ref().is_some_and(|c| !c.ok) && !crate::queue::is_manual(i)) {
-            crate::queue::decide(item, crate::queue::Decision::Approve, "", now())?;
+            let Some((_, h)) = shown.iter().find(|(i, _)| *i == item.id) else { continue };
+            if crate::queue::decide(item, crate::queue::Decision::Approve(Some(h.clone())), "", now()).is_err() {
+                continue; // changed since the user saw it: left pending
+            }
             crate::queue::mirror(item);
             done.push(item.clone());
         }
@@ -3962,6 +4084,9 @@ impl App {
             .into_iter()
             .map(|i| {
                 let mut v = json!(i);
+                // The hash the card shows: approving sends it back, so the approval covers
+                // exactly what the user saw.
+                v["payload_hash"] = json!(crate::queue::content_hash(i));
                 if crate::queue::is_manual(i) {
                     v["manual"] = json!(true);
                     v["dropped"] = json!(Self::queue_dropped(i));
@@ -4110,5 +4235,105 @@ mod tests {
             back = back.replace(replacement, dev);
         }
         assert_eq!(back, ORCH_APPEND);
+    }
+}
+
+#[cfg(test)]
+mod phone_decide_tests {
+    use super::*;
+    use crate::phone::tests::{sign, test_phone};
+
+    /// A real App on a temp business workspace with the phone feed and decisions on. The
+    /// workspace is paused so the orchestrator news a decision sends never starts a turn.
+    fn app(name: &str) -> (Arc<App>, String, String) {
+        let root = std::env::temp_dir().join(format!("orch-phone-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let ws = ws.to_string_lossy().to_string();
+        let state = json!({
+            "workspace": ws, "open_workspaces": [ws],
+            "projects": {ws.clone(): {"kind": "business", "phone_feed": true, "phone_decide": true, "paused": true}},
+        });
+        std::fs::write(root.join("state.json"), state.to_string()).unwrap();
+        let app = App::new(Paths { config_dir: root.clone(), data_dir: root.clone() }, "t".repeat(40));
+        let id = orch_key(&ws);
+        (app, ws, id)
+    }
+
+    fn queue(app: &Arc<App>, ws: &str, summary: &str) -> String {
+        let out = app.queue_add(&orch_key(ws), &json!({"type": "post_pin", "line": "C", "summary": summary, "payload": "board: tests", "risk": "low"}), vec![]).unwrap();
+        out.split_whitespace().nth(1).unwrap().to_string()
+    }
+
+    fn signed(sk: &p256::ecdsa::SigningKey, ws_id: &str, item: &str, hash: &str, nonce: &str) -> crate::phone::DecideRequest {
+        let ts = now() as i64;
+        crate::phone::DecideRequest {
+            item_id: item.into(), decision: "approve".into(), reason: String::new(), device: "iphone-1".into(), ts, nonce: nonce.into(),
+            sig: sign(sk, &crate::phone::decide_message("iphone-1", ws_id, item, "approve", hash, "", ts, nonce)),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_valid_signature_decides_like_a_window_click() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, ws, id) = app("valid");
+        let (sk, phone) = test_phone("iphone-1", 7);
+        let fp = phone.fingerprint.clone();
+        app.store.lock().unwrap().phones.push(phone);
+        let by_phone = queue(&app, &ws, "pin one");
+        let by_click = queue(&app, &ws, "pin two");
+        let hash = |i: &str| app.store.lock().unwrap().queue.iter().find(|x| x.id == i).map(crate::queue::content_hash).unwrap();
+        let req = signed(&sk, &id, &by_phone, &hash(&by_phone), "nonce-valid-0123456789");
+        let out = app.phone_decide(&id, &req).unwrap();
+        assert_eq!(out["status"], "approved");
+        let h = hash(&by_click);
+        app.queue_decide(&by_click, "approve", "", None, false, "window", Some(&h)).unwrap();
+        let st = app.store.lock().unwrap();
+        for i in [&by_phone, &by_click] {
+            let item = st.queue.iter().find(|x| x.id == *i).unwrap();
+            assert_eq!(item.status, "approved");
+            assert_eq!(item.approved_hash, crate::queue::content_hash(item), "same approval as a click");
+        }
+        drop(st);
+        let audit = std::fs::read_to_string(std::path::Path::new(&ws).join("queue/audit.log")).unwrap();
+        assert!(audit.contains(&format!("APPROVED {by_phone} by=user via=phone:{fp}")), "{audit}");
+        assert!(audit.contains(&format!("APPROVED {by_click} by=user ")) || audit.contains(&format!("APPROVED {by_click} by=user  #")), "{audit}");
+        // The same signed request again is a replay.
+        assert_eq!(app.phone_decide(&id, &req).unwrap_err().1, "replayed_nonce");
+        // The instance token alone (no signature) never decides.
+        let mut unsigned = signed(&sk, &id, &by_phone, &hash(&by_phone), "nonce-unsigned-012345678");
+        unsigned.sig.clear();
+        assert_eq!(app.phone_decide(&id, &unsigned).unwrap_err().1, "signature_required");
+    }
+
+    #[tokio::test]
+    async fn kill_switch_on_approval_records_but_nothing_is_listed() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, ws, id) = app("killswitch");
+        let (sk, phone) = test_phone("iphone-1", 7);
+        app.store.lock().unwrap().phones.push(phone);
+        app.store.lock().unwrap().notes_mut(&ws).outbound_paused = true;
+        let item = queue(&app, &ws, "pin while paused");
+        let hash = app.store.lock().unwrap().queue.iter().find(|x| x.id == item).map(crate::queue::content_hash).unwrap();
+        let out = app.phone_decide(&id, &signed(&sk, &id, &item, &hash, "nonce-paused-0123456789")).unwrap();
+        assert_eq!(out["status"], "approved", "the decision is recorded");
+        let listed = app.queue_list_approved(&orch_key(&ws)).unwrap();
+        assert!(listed.contains("PAUSED"), "{listed}");
+        assert!(!listed.contains(&item), "nothing is handed out while outbound is paused");
+    }
+
+    #[tokio::test]
+    async fn decisions_need_the_workspace_setting() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, ws, id) = app("off");
+        let (sk, phone) = test_phone("iphone-1", 7);
+        app.store.lock().unwrap().phones.push(phone);
+        app.store.lock().unwrap().notes_mut(&ws).phone_decide = false;
+        let item = queue(&app, &ws, "pin");
+        let hash = app.store.lock().unwrap().queue.iter().find(|x| x.id == item).map(crate::queue::content_hash).unwrap();
+        assert_eq!(app.phone_decide(&id, &signed(&sk, &id, &item, &hash, "nonce-off-0123456789ab")).unwrap_err().1, "decisions_off");
+        app.store.lock().unwrap().notes_mut(&ws).phone_feed = false;
+        assert_eq!(app.phone_decide(&id, &signed(&sk, &id, &item, &hash, "nonce-off2-0123456789a")).unwrap_err().1, "no_feed");
     }
 }

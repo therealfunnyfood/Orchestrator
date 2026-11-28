@@ -112,6 +112,8 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/business/{ws}/snapshot", get(feed_snapshot))
         .route("/api/business/{ws}/events", get(feed_events))
         .route("/api/business/{ws}/attachment/{item}/{name}", get(feed_attachment))
+        // The one route that decides: only with a signature from an enrolled phone.
+        .route("/api/business/{ws}/decide", post(phone_decide))
         .route("/api/state", get(|State(a): State<Shared>| async move { Json(a.state_json()) }))
         .route("/api/all-threads", get(|State(a): State<Shared>| async move { Json(a.all_threads_json()) }))
         .route("/api/events/{key}", get(events))
@@ -586,6 +588,18 @@ async fn feed_attachment(State(app): State<Shared>, Path((id, item, name)): Path
     match tokio::fs::read(&path).await {
         Ok(bytes) => (headers(mime_for(&ext)), bytes).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"error": "no_attachment"}))).into_response(),
+    }
+}
+
+/// A phone's signed approve or reject. The token gets the request here; only the signature
+/// (checked in phone::check_decide) can make it count.
+async fn phone_decide(State(app): State<Shared>, Path(id): Path<String>, body: axum::body::Bytes) -> Response {
+    let Ok(req) = serde_json::from_slice::<crate::phone::DecideRequest>(&body) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "bad_request", "message": "expected JSON {item_id, decision, reason, device, ts, nonce, sig}"}))).into_response();
+    };
+    match app.phone_decide(&id, &req) {
+        Ok(v) => Json(v).into_response(),
+        Err((status, code, message)) => (StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST), Json(json!({"error": code, "message": message}))).into_response(),
     }
 }
 

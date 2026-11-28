@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.6.1 (2026-11-28)
+
+- **Approve and reject from your phone, signed with Face ID (business workspaces).** This is
+  phase 2 of the Atlas Business tab, and it's off by default.
+  - **Pairing.** Pair a phone in **Settings → Phone → Paired phones**: paste the bundle it
+    shows, check that the fingerprint matches the one on the phone, and confirm. You can
+    revoke a phone at any time.
+  - **Turning it on.** Then tick "Allow approve / reject from paired phones" for the workspace.
+- **Orchestrator checks every phone decision itself.** A decision counts only with a
+  signature from a phone you paired, over that exact item's **current** content, made in
+  the last 2 minutes, and with a one-time nonce. The local API token alone can never decide
+  anything, because agents have it.
+- A phone decision then goes through exactly the same path as a click in the window, and
+  the audit log records which phone made it. Offers that failed the capacity check still
+  need your second click on the PC.
+- **Item hashes cover more.** An item's hash now also covers its type, summary, risk and
+  urgency, so what you're shown is what you approve. Items you'd already approved keep
+  their approval.
+- **Approvals record what you saw.** An approval, from the window or a phone, now records
+  the hash of what you saw. Content swapped in afterwards (an attachment file, say) makes
+  the item void instead of approved. "Approve all low-risk" approves only the cards you
+  were shown.
+
 ## 0.6.0 (2026-11-28)
 
 - **Read-only business feed for your phone (business workspaces).** This is the first step

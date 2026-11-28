@@ -888,13 +888,19 @@ mod tests {
         }
     }
 
-    /// Phase 1's phone feed is read-only: every /api/business route is a GET.
+    /// The phone feed is read-only, except the signed decide route: every other
+    /// /api/business route is a GET, and decide only goes through phone_decide (which
+    /// checks the signature before anything is decided).
     #[test]
     fn business_feed_routes_are_read_only() {
         let web = include_str!("web.rs");
         let routes: Vec<&str> = web.lines().filter(|l| l.contains(".route(\"/api/business")).collect();
-        assert!(routes.len() >= 4, "feed routes not found");
+        assert!(routes.len() >= 5, "feed routes not found");
         for r in routes {
+            if r.contains("/decide\"") {
+                assert!(r.contains("post(phone_decide)"), "decide must go through phone_decide: {r}");
+                continue;
+            }
             assert!(r.contains(", get(") && !r.contains("post(") && !r.contains("patch(") && !r.contains("delete("), "not read-only: {r}");
         }
     }
@@ -902,7 +908,7 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

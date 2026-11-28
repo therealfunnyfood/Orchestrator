@@ -18,6 +18,7 @@ mod inbox;
 mod mcp;
 mod migrate;
 mod notify;
+mod phone;
 mod queue;
 mod runner;
 mod schedule;
@@ -71,8 +72,9 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
             let (id, action, reason) = (s("id"), s("action"), s("reason"));
             let payload = msg.get("payload").and_then(|v| v.as_str()).map(str::to_string);
             let force = msg.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+            let seen = s("hash");
             rt().spawn(async move {
-                if let Err(e) = app.queue_decide(&id, &action, &reason, payload.as_deref(), force) {
+                if let Err(e) = app.queue_decide(&id, &action, &reason, payload.as_deref(), force, "window", Some(&seen)) {
                     app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
                 }
             });
@@ -82,6 +84,42 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
             std::thread::spawn(move || {
                 if let Ok(mut cb) = arboard::Clipboard::new() {
                     let _ = cb.set_text(text);
+                }
+            });
+        }
+        "phone_enroll_begin" => {
+            let bundle = s("bundle");
+            rt().spawn(async move {
+                if let Err(e) = app.phone_enroll_begin(&bundle) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
+        "phone_enroll_confirm" => {
+            let (device, fp) = (s("device"), s("fingerprint"));
+            rt().spawn(async move {
+                match app.phone_enroll_confirm(&device, &fp) {
+                    Ok(()) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": "phone enrolled"})),
+                    Err(e) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e})),
+                }
+            });
+        }
+        "phone_enroll_cancel" => {
+            rt().spawn(async move { app.phone_enroll_cancel() });
+        }
+        "phone_revoke" => {
+            let device = s("device");
+            rt().spawn(async move {
+                if let Err(e) = app.phone_revoke(&device) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
+        "set_phone_decide" => {
+            let on = msg.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+            rt().spawn(async move {
+                if let Err(e) = app.set_phone_decide(on) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
                 }
             });
         }
@@ -199,8 +237,11 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
             });
         }
         "queue_approve_low_risk" => {
+            let shown: Vec<(String, String)> = msg.get("items").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| {
+                Some((x.get("id")?.as_str()?.to_string(), x.get("hash")?.as_str()?.to_string()))
+            }).collect()).unwrap_or_default();
             rt().spawn(async move {
-                match app.queue_approve_low_risk() {
+                match app.queue_approve_low_risk(&shown) {
                     Ok(n) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": format!("approved {n} low-risk item(s)")})),
                     Err(e) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e})),
                 }

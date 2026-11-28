@@ -1290,7 +1290,7 @@ function renderQueuePane() {
     const b = h("button", "btn", `Approve all low-risk (${low.length})`);
     b.onclick = () => {
       if (!confirm(`Approve all ${low.length} low-risk items?\n\n` + low.map((i) => `• ${i.id}: ${i.summary}`).join("\n"))) return;
-      if (sendIpc({ op: "queue_approve_low_risk" })) b.disabled = true;
+      if (sendIpc({ op: "queue_approve_low_risk", items: low.map((i) => ({ id: i.id, hash: i.payload_hash })) })) b.disabled = true;
     };
     const bar = h("div", "row qbar");
     bar.append(b);
@@ -1451,7 +1451,7 @@ function queueCard(i) {
   if (overCap) { approve.textContent = "Approve anyway…"; approve.className = "btn danger"; }
   approve.onclick = () => {
     if (overCap && !confirm(`${i.id} failed the capacity check:\n\n${i.capacity.note}\n\nTaking it risks a late delivery. Approve anyway?`)) return;
-    if (sendIpc({ op: "queue_decide", id: i.id, action: "approve", force: overCap })) busy(approve);
+    if (sendIpc({ op: "queue_decide", id: i.id, action: "approve", force: overCap, hash: i.payload_hash })) busy(approve);
   };
   edit.onclick = () => {
     c.classList.add("editing");
@@ -2912,6 +2912,44 @@ async function renderSettings() {
       const cb = h("input"); cb.type = "checkbox"; cb.checked = !!pj.phone_feed;
       cb.onchange = () => { if (sendIpc({ op: "set_phone_feed", on: cb.checked })) setTimeout(loadState, 500); else cb.checked = !cb.checked; };
       lab.append(cb, document.createTextNode(`Share this workspace's business feed with your paired phone (id ${pj.feed_id || ""})`));
+      {
+        const ph = S.state.phones || { enrolled: [], pending: null };
+        const box = h("div", "secrets");
+        for (const p of ph.enrolled || []) {
+          const r = h("div", "row secret-row");
+          r.append(h("span", "mono", p.fingerprint), h("span", null, `${p.name} (${p.device})`));
+          if (p.revoked_at) r.append(h("span", "qchip st-void", "revoked"));
+          else {
+            const rv = h("button", "btn danger", "Revoke");
+            rv.onclick = () => { if (confirm(`Revoke ${p.name} (${p.fingerprint})? It can't sign decisions again.`) && sendIpc({ op: "phone_revoke", device: p.device })) setTimeout(() => loadState().then(renderSettings), 500); };
+            r.append(rv);
+          }
+          box.append(r);
+        }
+        if (ph.pending) {
+          const r = h("div", "qbanner");
+          r.textContent = `Check that your phone shows this fingerprint: ${ph.pending.fingerprint}  (${ph.pending.name}, device ${ph.pending.device})`;
+          const ok = h("button", "btn primary", "It matches: enrol");
+          ok.onclick = () => { if (sendIpc({ op: "phone_enroll_confirm", device: ph.pending.device, fingerprint: ph.pending.fingerprint })) setTimeout(() => loadState().then(renderSettings), 500); };
+          const no = h("button", "btn", "Cancel");
+          no.onclick = () => { sendIpc({ op: "phone_enroll_cancel" }); setTimeout(() => loadState().then(renderSettings), 400); };
+          const row = h("div", "row"); row.append(ok, no);
+          box.append(r, row);
+        } else {
+          const row = h("div", "row");
+          const ta = h("input"); ta.placeholder = "paste the phone's pairing bundle (atlas-orch/v1|pair|… or JSON)"; ta.style.flex = "1"; ta.spellcheck = false;
+          const b = h("button", "btn", "Check");
+          b.onclick = () => { if (ta.value.trim() && sendIpc({ op: "phone_enroll_begin", bundle: ta.value.trim() })) setTimeout(() => loadState().then(renderSettings), 500); };
+          row.append(ta, b);
+          box.append(row);
+        }
+        const lab = h("label"); lab.style.cssText = "display:flex;gap:6px;align-items:center;margin-top:6px";
+        const cb2 = h("input"); cb2.type = "checkbox"; cb2.checked = !!S.state.project.phone_decide;
+        cb2.onchange = () => { if (sendIpc({ op: "set_phone_decide", on: cb2.checked })) setTimeout(loadState, 500); else cb2.checked = !cb2.checked; };
+        lab.append(cb2, document.createTextNode("Allow approve / reject from paired phones in this workspace (each decision signed with Face ID)"));
+        box.append(lab);
+        setting("Phone", "Paired phones", "A phone can only approve or reject when it signs the decision with a key you enrolled here: Orchestrator checks the signature, the item's current hash, the time and a one-time nonce. The local API token alone can never decide (agents have it). Enrol by pasting the bundle your phone shows and checking the fingerprint matches.", box);
+      }
       setting("Phone", "Phone access (Atlas Business tab)", "Off by default. When on, the Atlas companion on this PC can read a <b>read-only</b> feed of this workspace over the local API: pending items with their exact payloads, today's deadlines and usage, money totals, schedules, attachment thumbnails, and live events. Nothing can be approved or changed through it.", lab);
     }
     setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it with <code>run_approved</code>. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);

@@ -210,11 +210,11 @@ fn dpapi(_input: &[u8], _encrypt: bool) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     /// The tests share the global list of values used for redaction.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    pub static SERIAL: Mutex<()> = Mutex::new(());
 
     #[test]
     fn dpapi_round_trip_and_no_plain_text_on_disk() {

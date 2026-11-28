@@ -142,6 +142,14 @@ pub struct Store {
     pub reservations: Vec<crate::capacity::Reservation>,
     /// Push hints already sent (keys), so each goes out once.
     pub push_sent: Vec<String>,
+    /// Phones enrolled in the window to sign business decisions (all workspaces).
+    pub phones: Vec<crate::phone::Phone>,
+    /// A phone bundle the user pasted and hasn't confirmed yet (shown with its fingerprint).
+    /// Never saved: a pairing must be started and confirmed in the same app session.
+    #[serde(skip)]
+    pub pending_phone: Option<crate::phone::Phone>,
+    /// Nonces phones used: (device, nonce, time), kept a while to refuse replays.
+    pub phone_nonces: Vec<(String, String, f64)>,
     /// User messages to the orchestrator since it last reviewed its lessons.
     pub since_lessons: u32,
     #[serde(skip)]
@@ -255,6 +263,8 @@ pub struct ProjectNotes {
     pub notify_phone: String,
     /// The phone feed (Atlas Business tab): off unless the user turns it on.
     pub phone_feed: bool,
+    /// Signed approve/reject from enrolled phones (needs phone_feed too). Off by default.
+    pub phone_decide: bool,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }

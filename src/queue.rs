@@ -45,6 +45,9 @@ pub struct QueueItem {
     /// Offers and orders: the order it commits to, and the app's capacity check.
     pub order_id: String,
     pub capacity: Option<crate::capacity::Check>,
+    /// Which fields the hash covers: 2 (0.6.1+) also covers type labels shown to the user
+    /// (summary, risk, urgent); older items keep their version so approvals stay valid.
+    pub hash_v: u8,
     pub created_by: String,
     pub created_at: f64,
     pub status: String,
@@ -68,6 +71,16 @@ pub fn content_hash(item: &QueueItem) -> String {
     for part in [&item.kind, &item.line, &item.payload, &item.who_executes] {
         h.update((part.len() as u64).to_le_bytes());
         h.update(part.as_bytes());
+    }
+    // Version 2: what the user is shown about the item is approved too, so a misleading
+    // summary or a quietly lowered risk can't be swapped in after the fact.
+    if item.hash_v >= 2 {
+        h.update(b"v2");
+        h.update((item.summary.len() as u64).to_le_bytes());
+        h.update(item.summary.as_bytes());
+        h.update((item.risk.len() as u64).to_le_bytes());
+        h.update(item.risk.as_bytes());
+        h.update([item.urgent as u8]);
     }
     // Only when set, so items approved before these fields existed keep their hash.
     if !item.command.is_empty() || !item.secrets.is_empty() {
@@ -103,7 +116,10 @@ pub fn still_approved<'a>(items: impl Iterator<Item = &'a QueueItem>) -> (Vec<&'
 
 /// What the user decided in the Queue tab.
 pub enum Decision {
-    Approve,
+    /// Approve, with the hash the user was shown (the window's card, or what the phone
+    /// signed). The approval records exactly that hash, so content swapped in after the user
+    /// looked (an attachment file, say) makes it void instead of approved.
+    Approve(Option<String>),
     /// Edit the payload, then approve it as edited.
     EditApprove(String),
     Reject(String),
@@ -114,8 +130,16 @@ pub fn decide(item: &mut QueueItem, d: Decision, note: &str, now: f64) -> Result
     if item.status != "pending" {
         return Err(format!("item {} is already {}", item.id, item.status));
     }
+    let mut seen = None;
     match d {
-        Decision::Approve => {}
+        Decision::Approve(expected) => {
+            if let Some(h) = &expected {
+                if content_hash(item) != *h {
+                    return Err(format!("{} changed since you saw it; look at it again", item.id));
+                }
+            }
+            seen = expected;
+        }
         Decision::EditApprove(payload) => {
             if payload.trim().is_empty() {
                 return Err("the edited payload is empty".into());
@@ -133,7 +157,7 @@ pub fn decide(item: &mut QueueItem, d: Decision, note: &str, now: f64) -> Result
             return Ok(());
         }
     }
-    item.approved_hash = content_hash(item);
+    item.approved_hash = seen.unwrap_or_else(|| content_hash(item));
     item.status = "approved".into();
     item.note = note.trim().to_string();
     item.decided_at = now;
@@ -379,7 +403,7 @@ mod tests {
     fn approved_item_is_listed() {
         let d = tmp("listed");
         let mut i = item(&d);
-        decide(&mut i, Decision::Approve, "", 1.0).unwrap();
+        decide(&mut i, Decision::Approve(None), "", 1.0).unwrap();
         let items = vec![i];
         let (ok, changed) = still_approved(items.iter());
         assert_eq!(ok.len(), 1);
@@ -390,7 +414,7 @@ mod tests {
     fn payload_changed_after_approval_is_not_listed() {
         let d = tmp("payload");
         let mut i = item(&d);
-        decide(&mut i, Decision::Approve, "", 1.0).unwrap();
+        decide(&mut i, Decision::Approve(None), "", 1.0).unwrap();
         i.payload = "title: Cat mug\nprice: 1.00".into();
         let items = vec![i.clone()];
         let (ok, changed) = still_approved(items.iter());
@@ -403,7 +427,7 @@ mod tests {
     fn attachment_swapped_after_approval_is_not_listed() {
         let d = tmp("attachment");
         let mut i = item(&d);
-        decide(&mut i, Decision::Approve, "", 1.0).unwrap();
+        decide(&mut i, Decision::Approve(None), "", 1.0).unwrap();
         std::fs::write(&i.attachments[0], b"a different image").unwrap();
         let items = vec![i];
         assert!(still_approved(items.iter()).0.is_empty());
@@ -447,14 +471,14 @@ mod tests {
         let d = tmp("twice");
         let mut i = item(&d);
         decide(&mut i, Decision::Reject("no".into()), "", 1.0).unwrap();
-        assert!(decide(&mut i, Decision::Approve, "", 2.0).is_err());
+        assert!(decide(&mut i, Decision::Approve(None), "", 2.0).is_err());
     }
 
     #[test]
     fn kill_switch_blocks_list_approved() {
         let d = tmp("killswitch");
         let mut i = item(&d);
-        decide(&mut i, Decision::Approve, "", 1.0).unwrap();
+        decide(&mut i, Decision::Approve(None), "", 1.0).unwrap();
         let items = vec![i];
         assert_eq!(listable(items.iter(), false).len(), 1);
         assert!(listable(items.iter(), true).is_empty(), "nothing may be listed while outbound is paused");
@@ -513,12 +537,54 @@ mod tests {
     }
 
     #[test]
+    fn approval_records_the_hash_the_user_saw() {
+        let d = tmp("seen");
+        let mut i = item(&d);
+        let shown = content_hash(&i);
+        // The attachment is swapped after the user looked but before they clicked.
+        std::fs::write(&i.attachments[0], b"swapped").unwrap();
+        assert!(decide(&mut i.clone(), Decision::Approve(Some(shown.clone())), "", 1.0).is_err(), "refused: it changed");
+        // Swapped back in time for the check, then again right after: the approval holds
+        // what the user saw, so the swap voids it.
+        std::fs::write(&i.attachments[0], b"original image bytes").unwrap();
+        decide(&mut i, Decision::Approve(Some(shown.clone())), "", 1.0).unwrap();
+        assert_eq!(i.approved_hash, shown);
+        std::fs::write(&i.attachments[0], b"swapped").unwrap();
+        let items = vec![i];
+        assert!(still_approved(items.iter()).0.is_empty());
+    }
+
+    #[test]
+    fn hash_v2_covers_what_the_user_is_shown() {
+        let d = tmp("hashv2");
+        let mut i = item(&d);
+        i.hash_v = 2;
+        let base = content_hash(&i);
+        for change in [
+            |x: &mut QueueItem| x.summary = "List the dog mug".into(),
+            |x: &mut QueueItem| x.risk = "high".into(),
+            |x: &mut QueueItem| x.urgent = true,
+            |x: &mut QueueItem| x.kind = "spend".into(),
+        ] {
+            let mut j = i.clone();
+            change(&mut j);
+            assert_ne!(content_hash(&j), base);
+        }
+        // Version 1 items (approved before 0.6.1) keep their old hash.
+        let mut old = i.clone();
+        old.hash_v = 0;
+        let v1 = content_hash(&old);
+        old.summary = "changed".into();
+        assert_eq!(content_hash(&old), v1);
+    }
+
+    #[test]
     fn mirror_moves_the_read_only_copy() {
         let d = tmp("mirror");
         let mut i = item(&d);
         mirror(&i);
         assert!(d.join("queue/pending/q1.md").exists());
-        decide(&mut i, Decision::Approve, "", 1.0).unwrap();
+        decide(&mut i, Decision::Approve(None), "", 1.0).unwrap();
         mirror(&i);
         assert!(!d.join("queue/pending/q1.md").exists());
         let p = d.join("queue/approved/q1.md");

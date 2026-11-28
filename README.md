@@ -138,6 +138,11 @@ weekly review, and learn from rejected items. The rest is the same text in both 
   The feed covers pending items with their exact payloads, today's deadlines and usage,
   money totals, schedules, attachment thumbnails, and a live event stream with push hints.
   Nothing can be approved or changed through it. It's off by default.
+- **Phone approvals (signed).** Pair a phone in **Settings → Phone → Paired phones**: paste
+  its bundle and check the fingerprint. Then allow phone decisions for the workspace. The
+  phone can approve or reject only with a Face ID signature that Orchestrator verifies
+  against the paired key. The signature has to match the item's current content, be under 2
+  minutes old and use a fresh nonce. The local API token alone can never decide.
 - **Readable copies.** Each item is also written as a read-only Markdown file in
   `<workspace>/queue/pending|approved|rejected|done|void/`. Editing or moving those files
   changes nothing. Every queue event is appended to `<workspace>/queue/audit.log`.
