@@ -369,12 +369,14 @@ impl App {
             json!({
                 "brief": n.brief, "rules": n.rules, "tuning": n.tuning, "imported_at": n.imported_at, "updated_at": n.updated_at,
                 "lessons": st.lessons, "lessons_updated_at": st.lessons_updated_at, "project_lessons": n.lessons,
+                "kind": if n.kind == "business" { "business" } else { "development" },
             })
         };
+        let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
         json!({
             "workspace": ws, "recent_workspaces": recent, "open_workspaces": self.open_workspaces_json(), "orchestrator": self.orch_json(),
             "threads": threads, "running": running, "waiting": waiting,
-            "project": project,
+            "project": project, "queue": queue,
             "defaults": {
                 "thread_backend": s.thread_backend, "thread_model": s.thread_model,
                 "thread_effort": s.thread_effort, "api_key_set": !s.api_key.trim().is_empty(),
@@ -404,6 +406,7 @@ impl App {
             json!({
                 "path": w, "key": key, "current": same_path(w, &current),
                 "busy": self.busy(&key), "running_threads": running, "needs_input": needs_input,
+                "queue_pending": self.queue_pending(w),
             })
         }).collect();
         json!(rows)
@@ -1059,7 +1062,15 @@ Pick up where it left off. Check the current state before relying on anything ab
     /// working, as a new turn if it's idle, else at the start of its next turn.
     fn post_to_orchestrator(self: &Arc<Self>, from: &str, text: &str) -> Result<(), String> {
         let ws = self.store.lock().unwrap().get(from).map(|t| t.workspace.clone()).ok_or(format!("no thread named '{from}'"))?;
-        let key = orch_key(&ws);
+        self.post_news(&orch_key(&ws), from, text);
+        Ok(())
+    }
+
+    /// Deliver news to an orchestrator: into its wait, mid-turn, or as a new turn. `from`
+    /// is a thread name, or "@<label>" for the app itself (e.g. "@approval queue"), which
+    /// the user already knows about.
+    fn post_news(self: &Arc<Self>, key: &str, from: &str, text: &str) {
+        let key = key.to_string();
         self.inbox.lock().unwrap().entry(key.clone()).or_default().push((from.to_string(), text.to_string()));
         self.touch();
         if self.waiting.lock().unwrap().contains(&key) {
@@ -1075,7 +1086,6 @@ Pick up where it left off. Check the current state before relying on anything ab
         } else if !self.busy(&key) {
             self.flush_inbox(&key);
         }
-        Ok(())
     }
 
     /// Take the orchestrator's pending thread messages, formatted for a prompt.
@@ -1087,9 +1097,10 @@ Pick up where it left off. Check the current state before relying on anything ab
                 "thread {from} says the user needs to act, and you haven't told them:\n\"{t}\"\n\
 Pass on exactly what they need to do."
             ));
-        } else if let Some((from, text)) = msgs.last() {
+        } else if let Some((from, text)) = msgs.iter().rev().find(|(f, _)| !f.starts_with('@')) {
             // Any thread news: the user may be waiting on it ("wait for switched"), and they
             // can't see tool results, so the orchestrator says something before waiting again.
+            // (News from the app itself, e.g. the user's own queue decisions, owes nothing.)
             let t: String = text.chars().take(600).collect();
             let who = if from.is_empty() { "a thread".to_string() } else { format!("thread {from}") };
             self.owe_news(key, format!(
@@ -1099,7 +1110,11 @@ Tell them in a line or two what changed, and anything they're waiting on or now 
         }
         Some(
             msgs.iter()
-                .map(|(from, text)| if from.is_empty() { text.clone() } else { format!("[from thread {from}]\n{text}") })
+                .map(|(from, text)| match from.strip_prefix('@') {
+                    Some(label) => format!("[from the {label}]\n{text}"),
+                    None if from.is_empty() => text.clone(),
+                    None => format!("[from thread {from}]\n{text}"),
+                })
                 .collect::<Vec<_>>()
                 .join("\n\n"),
         )
@@ -1845,6 +1860,9 @@ Mention it only if the user asks about cost or usage.{}\n",
         let st = self.store.lock().unwrap();
         let mut p = ORCH_APPEND.to_string() + &mix + &cap + &timing + &others;
         p += &format!("\n# Your workspace\nYou are the orchestrator for {ws}. Your threads work there unless you give them another folder.\n");
+        if st.notes(ws).is_some_and(|n| n.kind == "business") {
+            p += BUSINESS_QUEUE_NOTE;
+        }
         if let Some(n) = st.notes(ws) {
             if !n.brief.trim().is_empty() {
                 p += &format!("\n# Project brief (saved with save_project_notes)\n{}\n", n.brief.trim());
@@ -1938,6 +1956,9 @@ The user may be looking at another workspace while you work; carry on regardless
     fn worker_prompt(&self, ws: &str) -> String {
         let st = self.store.lock().unwrap();
         let mut p = WORKER_APPEND.to_string();
+        if st.notes(ws).is_some_and(|n| n.kind == "business") {
+            p += BUSINESS_QUEUE_NOTE;
+        }
         if let Some(n) = st.notes(ws).filter(|n| !n.rules.trim().is_empty()) {
             p += &format!("\n\nRules for this project (never break these without asking the user via ask_user):\n{}", n.rules.trim());
         }
@@ -2454,6 +2475,266 @@ pub fn clock_time(t: f64) -> String {
 /// The current local time, put in front of every message the orchestrator gets.
 pub fn now_note() -> String {
     format!("[now: {}]", chrono::Local::now().format("%a %b %-d, %-I:%M %p"))
+}
+
+// ---------------------------------------------------------------- approval queue
+
+/// Added to the orchestrator's and threads' instructions in business workspaces.
+const BUSINESS_QUEUE_NOTE: &str = "
+# Approval queue (business workspace)
+Anything that leaves this computer (publishing, posting, messaging, offers, spending, price changes, new ventures) \
+needs an item the user approved. Propose it with queue_item, with the exact payload. Only the user can approve or \
+reject, in the app's Queue tab; you'll get a message with each decision (rejections come with a reason). Execute only \
+what list_approved returns, exactly as written, then record the result with complete_item. The files in queue/ are \
+read-only copies the app writes: editing or moving them changes nothing.
+";
+
+impl App {
+    /// Business workspaces get the approval queue and the other business features.
+    pub fn is_business(&self, ws: &str) -> bool {
+        self.store.lock().unwrap().notes(ws).is_some_and(|n| n.kind == "business")
+    }
+
+    /// Set the shown workspace's type: "business" or "development".
+    pub fn set_workspace_kind(&self, kind: &str) -> Result<(), String> {
+        if !["business", "development"].contains(&kind) {
+            return Err("kind must be business or development".into());
+        }
+        let ws = self.workspace();
+        let mut st = self.store.lock().unwrap();
+        st.notes_mut(&ws).kind = if kind == "business" { "business".into() } else { String::new() };
+        st.save();
+        drop(st);
+        self.touch();
+        Ok(())
+    }
+
+    /// queue_item: an agent proposes an outbound action. `attachments` are absolute paths.
+    pub fn queue_add(&self, key: &str, args: &Value, attachments: Vec<String>) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        if !self.is_business(&ws) {
+            return Err("the approval queue is only on in business workspaces".into());
+        }
+        let s = |k: &str| args.get(k).and_then(Value::as_str).map(str::trim).unwrap_or("").to_string();
+        let kind = s("type");
+        let summary = s("summary");
+        let payload = match args.get("payload") {
+            Some(Value::String(p)) => p.clone(),
+            Some(v) if !v.is_null() => serde_json::to_string_pretty(v).unwrap_or_default(),
+            _ => String::new(),
+        };
+        if kind.is_empty() || summary.is_empty() || payload.trim().is_empty() {
+            return Err("type, summary and payload are required".into());
+        }
+        let risk = if s("risk").is_empty() { "medium".to_string() } else { s("risk").to_lowercase() };
+        if !crate::queue::RISKS.contains(&risk.as_str()) {
+            return Err("risk must be low, medium or high".into());
+        }
+        let who = if s("who_executes").is_empty() { "agent".to_string() } else { s("who_executes").to_lowercase() };
+        if !["agent", "user"].contains(&who.as_str()) {
+            return Err("who_executes must be agent or user".into());
+        }
+        let now_t = now();
+        let mut st = self.store.lock().unwrap();
+        let n = st.queue.iter().filter_map(|i| i.id.strip_prefix('q').and_then(|n| n.parse::<u64>().ok())).max().unwrap_or(0) + 1;
+        let id = format!("q{n}");
+        let line = s("line");
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M");
+        let file = format!(
+            "{stamp}-{}{}-{}-{id}.md",
+            if line.is_empty() { String::new() } else { format!("{}-", crate::queue::slug(&line)) },
+            crate::queue::slug(&kind),
+            crate::queue::slug(&summary).chars().take(30).collect::<String>().trim_end_matches('-')
+        );
+        let item = crate::queue::QueueItem {
+            id: id.clone(),
+            workspace: ws.clone(),
+            kind,
+            line,
+            summary,
+            payload,
+            expected_value_usd: args.get("expected_value_usd").and_then(Value::as_f64).unwrap_or(0.0),
+            risk,
+            who_executes: who,
+            urgent: args.get("urgent").and_then(Value::as_bool).unwrap_or(false),
+            attachments,
+            created_by: if key.starts_with(ORCHESTRATOR) { "orchestrator".into() } else { key.to_string() },
+            created_at: now_t,
+            status: "pending".into(),
+            file,
+            ..Default::default()
+        };
+        crate::queue::mirror(&item);
+        crate::queue::audit(&ws, &format!("QUEUED {id} {} line={} by={} :: {}", item.kind, item.line, item.created_by, item.summary));
+        let urgent = item.urgent;
+        st.queue.push(item);
+        st.save();
+        drop(st);
+        self.queue_changed();
+        if urgent {
+            crate::attention();
+        }
+        Ok(format!("queued {id} for the user's approval. It can't be executed until they approve it in the app; list_approved shows approved items."))
+    }
+
+    /// list_approved: items the user approved that still match what they approved.
+    pub fn queue_list_approved(&self, key: &str) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        if !self.is_business(&ws) {
+            return Err("the approval queue is only on in business workspaces".into());
+        }
+        let mut st = self.store.lock().unwrap();
+        // An approved item that changed since is void for good (logged once).
+        let changed: Vec<String> = crate::queue::still_approved(st.queue.iter().filter(|i| same_path(&i.workspace, &ws))).1.iter().map(|i| i.id.clone()).collect();
+        if !changed.is_empty() {
+            for item in st.queue.iter_mut().filter(|i| changed.contains(&i.id) && same_path(&i.workspace, &ws)) {
+                item.status = "void".into();
+                crate::queue::mirror(item);
+                crate::queue::audit(&ws, &format!("VOID {} (payload or an attachment changed after approval; it won't be executed)", item.id));
+            }
+            st.save();
+        }
+        let (ok, _) = crate::queue::still_approved(st.queue.iter().filter(|i| same_path(&i.workspace, &ws)));
+        if ok.is_empty() {
+            return Ok("no approved items waiting".into());
+        }
+        Ok(ok
+            .iter()
+            .map(|i| {
+                format!(
+                    "## {} ({}, line {}, executed by {}){}\nWhat: {}\nPayload (execute exactly this):\n{}{}",
+                    i.id,
+                    i.kind,
+                    if i.line.is_empty() { "-" } else { &i.line },
+                    i.who_executes,
+                    if i.edited { " [the user edited the payload before approving]" } else { "" },
+                    i.summary,
+                    i.payload,
+                    if i.attachments.is_empty() { String::new() } else { format!("\nAttachments: {}", i.attachments.join(", ")) }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n"))
+    }
+
+    /// complete_item: record what happened when an approved item was executed.
+    pub fn queue_complete(&self, key: &str, id: &str, result: &str) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        let mut st = self.store.lock().unwrap();
+        let item = st.queue.iter_mut().find(|i| i.id == id && same_path(&i.workspace, &ws)).ok_or(format!("no queue item {id} in this workspace"))?;
+        crate::queue::complete(item, result, now())?;
+        crate::queue::mirror(item);
+        crate::queue::audit(&ws, &format!("EXECUTED {id} by={key} :: {}", item.result));
+        st.save();
+        drop(st);
+        self.queue_changed();
+        Ok(format!("{id} marked done"))
+    }
+
+    /// The user's decision from the Queue tab. Only called from the desktop window's IPC
+    /// channel (see main.rs), never from HTTP or an agent tool.
+    pub fn queue_decide(self: &Arc<Self>, id: &str, action: &str, reason: &str, payload: Option<&str>) -> Result<(), String> {
+        let decision = match action {
+            "approve" => crate::queue::Decision::Approve,
+            "edit_approve" => crate::queue::Decision::EditApprove(payload.unwrap_or("").to_string()),
+            "reject" => crate::queue::Decision::Reject(reason.to_string()),
+            _ => return Err(format!("unknown action {action}")),
+        };
+        let mut st = self.store.lock().unwrap();
+        let item = st.queue.iter_mut().find(|i| i.id == id).ok_or(format!("no queue item {id}"))?;
+        crate::queue::decide(item, decision, reason, now())?;
+        crate::queue::mirror(item);
+        let item = item.clone();
+        st.save();
+        drop(st);
+        let what = match item.status.as_str() {
+            "rejected" => "REJECTED",
+            _ if item.edited => "APPROVED after editing",
+            _ => "APPROVED",
+        };
+        crate::queue::audit(&item.workspace, &format!("{what} {} by=user{}", item.id, if item.note.is_empty() { String::new() } else { format!(" :: {}", item.note) }));
+        let ws = item.workspace.clone();
+        self.queue_news(&ws, &[item]);
+        self.queue_changed();
+        Ok(())
+    }
+
+    /// "Approve all low-risk" in the shown workspace.
+    pub fn queue_approve_low_risk(self: &Arc<Self>) -> Result<usize, String> {
+        let ws = self.workspace();
+        let mut st = self.store.lock().unwrap();
+        let mut done = vec![];
+        for item in st.queue.iter_mut().filter(|i| same_path(&i.workspace, &ws) && i.status == "pending" && i.risk == "low") {
+            crate::queue::decide(item, crate::queue::Decision::Approve, "", now())?;
+            crate::queue::mirror(item);
+            crate::queue::audit(&ws, &format!("APPROVED {} by=user (approve all low-risk)", item.id));
+            done.push(item.clone());
+        }
+        st.save();
+        drop(st);
+        if !done.is_empty() {
+            self.queue_news(&ws, &done);
+            self.queue_changed();
+        }
+        Ok(done.len())
+    }
+
+    /// Tell the workspace's orchestrator what the user decided, so it can act on approvals
+    /// and learn from rejections.
+    fn queue_news(self: &Arc<Self>, ws: &str, items: &[crate::queue::QueueItem]) {
+        let lines: Vec<String> = items
+            .iter()
+            .map(|i| {
+                let head = format!("{} ({}, line {}): {}", i.id, i.kind, if i.line.is_empty() { "-" } else { &i.line }, i.summary);
+                match i.status.as_str() {
+                    "rejected" => format!("The user REJECTED {head}\nReason: {}\nRead the reason, and save a lesson if it shows a pattern.", i.note),
+                    _ if i.who_executes == "user" => format!(
+                        "The user APPROVED {head}{}\nThey'll do this one by hand; record the result with complete_item once they tell you.",
+                        if i.edited { " (after editing the payload)" } else { "" }
+                    ),
+                    _ => format!(
+                        "The user APPROVED {head}{}{}\nIt's now in list_approved; execute exactly that payload, then complete_item.",
+                        if i.edited { " (after editing the payload: use the edited version)" } else { "" },
+                        if i.note.is_empty() { String::new() } else { format!("\nTheir note: {}", i.note) }
+                    ),
+                }
+            })
+            .collect();
+        self.post_news(&orch_key(ws), "@approval queue", &lines.join("\n\n"));
+    }
+
+    /// Queue items for the Queue tab: pending first, then the latest decided ones.
+    pub fn queue_json(&self, ws: &str) -> Value {
+        let st = self.store.lock().unwrap();
+        let mut items: Vec<&crate::queue::QueueItem> = st.queue.iter().filter(|i| same_path(&i.workspace, ws)).collect();
+        items.sort_by(|a, b| b.created_at.total_cmp(&a.created_at));
+        let (pending, decided): (Vec<_>, Vec<_>) = items.into_iter().partition(|i| i.status == "pending");
+        let mut decided = decided;
+        decided.sort_by(|a, b| b.decided_at.max(b.done_at).total_cmp(&a.decided_at.max(a.done_at)));
+        decided.truncate(40);
+        // An approved item that no longer matches its approval can't be executed.
+        let decided: Vec<Value> = decided
+            .into_iter()
+            .map(|i| {
+                let mut v = json!(i);
+                if i.status == "approved" && crate::queue::content_hash(i) != i.approved_hash {
+                    v["void"] = json!(true);
+                }
+                v
+            })
+            .collect();
+        json!({"pending": pending, "decided": decided})
+    }
+
+    pub fn queue_pending(&self, ws: &str) -> usize {
+        self.store.lock().unwrap().queue.iter().filter(|i| i.status == "pending" && same_path(&i.workspace, ws)).count()
+    }
+
+    fn queue_changed(&self) {
+        let total = self.store.lock().unwrap().queue.iter().filter(|i| i.status == "pending").count();
+        crate::set_badge(total);
+        self.touch();
+    }
 }
 
 /// Size limits (characters) for what the orchestrator reads on every turn. Saves over the

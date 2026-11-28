@@ -100,6 +100,28 @@ To uninstall, use Settings → Apps → Installed apps → Orchestrator.
 
 Type `/` for commands, or press Ctrl+Shift+P for the command palette.
 
+### Business workspaces
+
+A workspace can also run work that reaches the outside world, like publishing listings,
+answering buyers or spending money. Set **Settings → Workspace type → Business**. Development
+workspaces are unaffected.
+
+- **Approval queue.** Agents can't send, publish or spend anything themselves. They propose
+  each action with `queue_item`: its type, business line, expected value, risk, the exact
+  payload, and attachments such as images or PDFs. You review it in the **✓ Queue** tab and
+  choose **Approve**, **Edit, then approve** or **Reject** (with a one-line reason). The
+  orchestrator gets every decision, including your reasons, and learns from rejections.
+  Agents execute only what `list_approved` returns, then record the result with
+  `complete_item`.
+- **Only you can approve.** Decisions go from the app window straight to the app over a
+  private channel. That channel can't be reached over the local API, which agents can use.
+  Approving stores a hash of the payload and of every attachment's contents. If anything
+  changes after that, the approval is void and the item is never executed.
+- **Readable copies.** Each item is also written as a read-only Markdown file in
+  `<workspace>/queue/pending|approved|rejected|done|void/`. Editing or moving those files
+  changes nothing. Every queue event is appended to `<workspace>/queue/audit.log`.
+- The sidebar and the tray icon show how many items are waiting for you.
+
 ### Permission levels
 
 Set per project (🛡 in the status bar, `/permissions`, or Settings). Each thread can

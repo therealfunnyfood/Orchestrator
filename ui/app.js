@@ -224,6 +224,7 @@ async function loadState() {
   S.active = Math.min(S.active, S.tabs.length - 1);
   renderChrome();
   if (cur().type === "manage") renderManage();
+  if (cur().type === "queue") renderQueuePane();
 }
 
 function theme(t) {
@@ -252,6 +253,12 @@ function renderChrome() {
   const mb = $('.act[data-act="manage"]');
   mb.querySelector(".badge")?.remove();
   if (running) { const b = h("span", "badge", String(running)); mb.append(b); }
+  const qb = $('.act[data-act="queue"]');
+  const business = S.state.project?.kind === "business";
+  qb.classList.toggle("hidden", !business);
+  qb.querySelector(".badge")?.remove();
+  const qn = S.state.queue?.pending?.length || 0;
+  if (business && qn) qb.append(h("span", "badge warn", String(qn)));
 }
 
 // ================================================================ sidebar tree
@@ -328,6 +335,7 @@ function renderWorkspaces() {
     const r = h("div", "node ws-tab" + (w.current ? " on" : ""));
     r.append(h("span", "st " + (working ? "running" : "idle")), h("span", "nm", baseName(w.path)));
     if (w.needs_input) { const q = h("span", "q-badge", "?"); q.title = "Waiting for your answer"; r.append(q); }
+    if (w.queue_pending) { const q = h("span", "qn-badge", String(w.queue_pending)); q.title = `${w.queue_pending} waiting for your approval`; r.append(q); }
     if (w.running_threads) r.append(h("span", "meta", `${w.running_threads} running`));
     if (open.length > 1) {
       const x = h("button", "ib ws-close", "×");
@@ -413,6 +421,7 @@ function tabTitle(t) {
   if (t.type === "manage") return ["☰", "Threads"];
   if (t.type === "settings") return ["⚙", "Settings"];
   if (t.type === "brief") return ["📋", "Project brief"];
+  if (t.type === "queue") return ["✓", "Queue"];
   if (t.type === "doc") return ["▤", t.name];
   if (isOrch(t.key)) return ["◈", "orchestrator"];
   return ["›", t.key];
@@ -467,11 +476,13 @@ async function activate(i) {
   $("#pane-manage").classList.toggle("hidden", t.type !== "manage");
   $("#pane-settings").classList.toggle("hidden", t.type !== "settings");
   $("#pane-brief").classList.toggle("hidden", t.type !== "brief");
+  $("#pane-queue").classList.toggle("hidden", t.type !== "queue");
   $("#pane-doc").classList.toggle("hidden", t.type !== "doc");
   if (t.type === "chat") { S.unread.delete(t.key); await loadLog(t.key); }
   if (t.type === "manage") renderManage();
   if (t.type === "settings") renderSettings();
   if (t.type === "brief") renderBrief();
+  if (t.type === "queue") { lastSig.queue = null; renderQueuePane(); }
   if (t.type === "doc") renderDoc();
   renderChrome();
   if (t.type === "chat") $("#input").focus();
@@ -481,6 +492,7 @@ const openChat = (key) => openTab({ type: "chat", key });
 const openManage = () => { lastSig.manage = null; openTab({ type: "manage" }); };
 const openSettings = () => openTab({ type: "settings" });
 const openBrief = () => openTab({ type: "brief" });
+const openQueue = () => openTab({ type: "queue" });
 
 // ================================================================ transcript
 
@@ -1221,6 +1233,133 @@ function renderBrief() {
   pane.append(page);
 }
 
+// ---------------------------------------------------------------- approval queue
+
+// Decisions go to the app over the window's private IPC channel, never over HTTP:
+// agents can reach the HTTP API, so it can't be what approves things.
+function sendIpc(msg) {
+  if (!window.ipc?.postMessage) { toast("This only works in the Orchestrator window, not in a browser", true); return false; }
+  window.ipc.postMessage(JSON.stringify(msg));
+  return true;
+}
+
+function renderQueuePane() {
+  const pane = $("#pane-queue");
+  const q = S.state.queue;
+  // Don't wipe a card the user is editing or rejecting.
+  if ($(".qcard.editing", pane)) return;
+  if (!changed("queue", [q, S.state.workspace]) && $(".page", pane)) return;
+  pane.textContent = "";
+  const page = h("div", "page queue-page");
+  page.append(h("h1", null, "Approval queue"));
+  if (!q) {
+    page.append(h("div", "sub", "The approval queue is only on in business workspaces (Settings → Workspace type)."));
+    pane.append(page);
+    return;
+  }
+  page.append(h("div", "sub", `${S.state.workspace} · nothing leaves this computer until you approve it here`));
+  const low = q.pending.filter((i) => i.risk === "low");
+  if (low.length > 1) {
+    const b = h("button", "btn", `Approve all low-risk (${low.length})`);
+    b.onclick = () => {
+      if (!confirm(`Approve all ${low.length} low-risk items?\n\n` + low.map((i) => `• ${i.id}: ${i.summary}`).join("\n"))) return;
+      if (sendIpc({ op: "queue_approve_low_risk" })) b.disabled = true;
+    };
+    const bar = h("div", "row qbar");
+    bar.append(b);
+    page.append(bar);
+  }
+  page.append(h("div", "set-section", `Waiting for you · ${q.pending.length}`));
+  if (!q.pending.length) page.append(h("div", "sub", "Nothing waiting."));
+  for (const i of q.pending) page.append(queueCard(i));
+  if (q.decided.length) {
+    page.append(h("div", "set-section", "Recent decisions"));
+    for (const i of q.decided) {
+      const r = h("div", "qrow");
+      r.append(h("span", "qchip st-" + i.status, i.status + (i.edited ? " (edited)" : "")), h("span", "qid", i.id), h("span", "qsum", `${i.type} · ${i.summary}`));
+      if (i.void || i.status === "void") { const v = h("span", "qchip risk-high", "changed after approval"); v.title = "The payload or an attachment changed after you approved it, so it won't be executed."; r.insertBefore(v, r.children[1]); }
+      const more = i.status === "rejected" ? i.note : i.status === "done" ? i.result : i.note;
+      if (more) r.append(h("div", "qmore", more));
+      r.title = `${i.id} · ${i.type} · line ${i.line || "-"}\nby ${i.created_by}`;
+      page.append(r);
+    }
+  }
+  pane.append(page);
+}
+
+function queueCard(i) {
+  const c = h("div", "qcard" + (i.urgent ? " urgent" : ""));
+  const head = h("div", "qhead");
+  head.append(h("span", "qchip", i.type));
+  if (i.line) head.append(h("span", "qchip", "line " + i.line));
+  head.append(h("span", "qchip money", `$${(+i.expected_value_usd || 0).toFixed(2)}`));
+  head.append(h("span", "qchip risk-" + i.risk, i.risk + " risk"));
+  if (i.who_executes === "user") head.append(h("span", "qchip you", "you do this by hand"));
+  if (i.urgent) head.append(h("span", "qchip urgent", "urgent"));
+  c.append(head, h("div", "qsummary", i.summary), h("div", "qmeta", `${i.id} · from ${i.created_by} · ${relTime(i.created_at) === "now" ? "just now" : relTime(i.created_at) + " ago"}`));
+  const pre = h("pre", "qpayload", i.payload);
+  c.append(pre);
+  if (i.attachments?.length) {
+    const g = h("div", "qatt");
+    for (const p of i.attachments) {
+      const ext = (p.split(".").pop() || "").toLowerCase();
+      if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(ext)) {
+        const img = h("img");
+        img.src = fileUrl(p);
+        img.title = p;
+        img.onclick = () => lightbox(fileUrl(p));
+        g.append(img);
+      } else {
+        const a = h("a", "flink qfile", "📄 " + baseName(p));
+        a.title = p;
+        a.onclick = () => openPath(p, ext === "pdf" ? "default" : "editor");
+        g.append(a);
+      }
+    }
+    c.append(g);
+  }
+  const acts = h("div", "row qacts");
+  const approve = h("button", "btn primary", "Approve");
+  const edit = h("button", "btn", "Edit, then approve");
+  const reject = h("button", "btn danger", "Reject…");
+  const busy = (b) => { for (const x of $$("button", acts)) x.disabled = true; b.textContent = "…"; };
+  approve.onclick = () => { if (sendIpc({ op: "queue_decide", id: i.id, action: "approve" })) busy(approve); };
+  edit.onclick = () => {
+    c.classList.add("editing");
+    const ta = h("textarea", "qedit");
+    ta.value = i.payload;
+    ta.rows = Math.min(20, i.payload.split("\n").length + 2);
+    pre.replaceWith(ta);
+    acts.textContent = "";
+    const ok = h("button", "btn primary", "Approve edited");
+    const cancel = h("button", "btn", "Cancel");
+    ok.onclick = () => { if (sendIpc({ op: "queue_decide", id: i.id, action: "edit_approve", payload: ta.value })) { c.classList.remove("editing"); busy(ok); } };
+    cancel.onclick = () => { c.classList.remove("editing"); lastSig.queue = null; renderQueuePane(); };
+    acts.append(ok, cancel);
+    ta.focus();
+  };
+  reject.onclick = () => {
+    c.classList.add("editing");
+    acts.textContent = "";
+    const why = h("input", "qwhy");
+    why.placeholder = "Why? (one line: it's how the agents learn your taste)";
+    const ok = h("button", "btn danger", "Reject");
+    const cancel = h("button", "btn", "Cancel");
+    const go = () => {
+      if (!why.value.trim()) { why.focus(); return toast("a rejection needs a reason", true); }
+      if (sendIpc({ op: "queue_decide", id: i.id, action: "reject", reason: why.value.trim() })) { c.classList.remove("editing"); busy(ok); }
+    };
+    ok.onclick = go;
+    why.onkeydown = (e) => { if (e.key === "Enter") go(); if (e.key === "Escape") cancel.onclick(); };
+    cancel.onclick = () => { c.classList.remove("editing"); lastSig.queue = null; renderQueuePane(); };
+    acts.append(why, ok, cancel);
+    why.focus();
+  };
+  acts.append(approve, edit, reject);
+  c.append(acts);
+  return c;
+}
+
 // ---------------------------------------------------------------- edit, retry, queue
 
 function startEdit(el) {
@@ -1730,6 +1869,7 @@ function connect() {
   ws.onmessage = (m) => {
     const ev = JSON.parse(m.data);
     if (ev.kind === "state") return scheduleState();
+    if (ev.kind === "toast") return toast(ev.text);
     if (ev.kind === "delta" || ev.kind === "draft_reset") {
       if (ev.thread !== curKey()) return;
       if (ev.kind === "draft_reset") { $("#draft")?.remove(); return; }
@@ -2488,6 +2628,15 @@ async function renderSettings() {
   };
   const effortOpts = [["", "default"], ...EFFORTS.map((e) => [e, `${e} — ${EFFORT_DESC[e]}`])];
 
+  section("Workspace");
+  {
+    const el = h("select");
+    for (const [v, l] of [["development", "Development"], ["business", "Business"]]) { const o = h("option", null, l); o.value = v; el.append(o); }
+    el.value = S.state.project?.kind || "development";
+    el.onchange = () => { if (sendIpc({ op: "set_workspace_kind", kind: el.value })) { toast(`this workspace is now a ${el.value} workspace`); setTimeout(loadState, 400); } else el.value = S.state.project?.kind || "development"; };
+    setting("Workspace", "Workspace type", "<b>Business</b> turns on the business features for this workspace: the approval queue (agents propose anything outbound with <code>queue_item</code>, and only you approve it, in the ✓ Queue tab). <b>Development</b> (the default) works as before. Can only be changed in this window.", el);
+  }
+
   section("Billing");
   {
     const row = h("div", "row");
@@ -2676,6 +2825,7 @@ function wire() {
     if (act === "orch") openChat(orchKey());
     if (act === "explorer") toggleSide();
     if (act === "manage") openManage();
+    if (act === "queue") openQueue();
     if (act === "settings") openSettings();
     if (act === "palette") palette();
   };

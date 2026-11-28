@@ -73,6 +73,42 @@ documents the user should look at. Relative paths are taken from your working di
     ])
 }
 
+/// Approval queue tools: every session in a business workspace gets these. There is no
+/// tool to approve or reject: only the user can, in the app's window.
+pub const QUEUE_TOOLS: [&str; 3] = ["queue_item", "list_approved", "complete_item"];
+
+fn queue_tools() -> Value {
+    json!([
+        {
+            "name": "queue_item",
+            "description": "Propose an action that leaves this computer (publishing, posting, sending a message, an offer, spending, a price change, a new venture...) for the user's approval. Nothing outbound may happen without an approved item. The user approves or rejects it in the app (rejections come with a reason); you can't approve anything. payload must be exactly what will be executed or sent: after approval it can't change (an edited payload or swapped attachment makes the approval void). type is free text (e.g. publish_listing, send_message, spend, manual_image).",
+            "inputSchema": {"type": "object", "properties": {
+                "type": {"type": "string"},
+                "line": {"type": "string", "description": "business line or venture id"},
+                "summary": {"type": "string", "description": "one sentence: what this is"},
+                "payload": {"description": "exactly what will be executed or sent (text or JSON)"},
+                "expected_value_usd": {"type": "number", "description": "best estimate of profit"},
+                "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+                "who_executes": {"type": "string", "enum": ["agent", "user"], "description": "user = no API, the user does it by hand"},
+                "urgent": {"type": "boolean"},
+                "attachments": {"type": "array", "items": {"type": "string"}, "description": "files the user should see (images, PDFs...); part of what's approved"},
+            }, "required": ["type", "summary", "payload", "risk"]},
+        },
+        {
+            "name": "list_approved",
+            "description": "Items the user approved that haven't been executed yet, with their exact payloads. Execute only these, exactly as written, then call complete_item. An item changed after approval is never listed.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "complete_item",
+            "description": "Record the result of executing an approved item (what happened, links or IDs, the ledger line added).",
+            "inputSchema": {"type": "object", "properties": {
+                "id": {"type": "string"}, "result": {"type": "string"},
+            }, "required": ["id", "result"]},
+        },
+    ])
+}
+
 /// A thread task's estimate from spawn_thread / send_to_thread arguments.
 fn task_estimate(args: &Value, task: &str) -> Option<crate::app::Estimate> {
     let low = args.get("estimate_minutes").and_then(Value::as_f64)?;
@@ -624,6 +660,26 @@ Each thread's messages and final report start your next turn.".into());
             };
             app.save_lessons(key, arg(args, "lessons"), arg(args, "project_lessons").map(|l| (ws.as_str(), l)))
         }
+        "queue_item" => {
+            let cwd = session_cwd(app, key);
+            let mut files = vec![];
+            for a in args.get("attachments").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+                let mut p = std::path::PathBuf::from(a);
+                if !p.is_absolute() {
+                    p = std::path::Path::new(&cwd).join(p);
+                }
+                if !p.is_file() {
+                    return Err(format!("attachment not found: {}", p.display()));
+                }
+                files.push(p.to_string_lossy().into_owned());
+            }
+            app.queue_add(key, args, files)
+        }
+        "list_approved" => app.queue_list_approved(key),
+        "complete_item" => {
+            let id = arg(args, "id").ok_or("id is required")?;
+            app.queue_complete(key, id, arg(args, "result").unwrap_or(""))
+        }
         "save_tuning_notes" => {
             let notes = arg(args, "notes").ok_or("notes is required")?;
             check_len("notes", notes, crate::app::LIMIT_TUNING)?;
@@ -677,6 +733,9 @@ pub async fn handle(app: &Arc<App>, key: &str, msg: &Value) -> Option<Value> {
             if key.starts_with(ORCHESTRATOR) {
                 tools.extend(thread_tools().as_array().cloned().unwrap_or_default());
             }
+            if app.is_business(&app.ws_of(key)) {
+                tools.extend(queue_tools().as_array().cloned().unwrap_or_default());
+            }
             json!({"tools": tools})
         }
         "tools/call" => {
@@ -691,7 +750,8 @@ pub async fn handle(app: &Arc<App>, key: &str, msg: &Value) -> Option<Value> {
                 }}));
             }
             let allowed = key.starts_with(ORCHESTRATOR)
-                || ["update_plan", "ask_user", "show_media", "message_orchestrator"].contains(&name);
+                || ["update_plan", "ask_user", "show_media", "message_orchestrator"].contains(&name)
+                || QUEUE_TOOLS.contains(&name);
             let outcome = if allowed { call(app, key, name, &args).await } else { Err(format!("{name} is only available to the orchestrator")) };
             match outcome {
                 Ok(text) => json!({"content": [{"type": "text", "text": text}], "isError": false}),
@@ -703,4 +763,48 @@ pub async fn handle(app: &Arc<App>, key: &str, msg: &Value) -> Option<Value> {
         }
     };
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(v: Value) -> Vec<String> {
+        v.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// Agents (threads and the orchestrator) only reach the app through these tools and the
+    /// HTTP API. Neither may be able to approve or reject a queue item.
+    #[test]
+    fn no_agent_tool_can_decide_a_queue_item() {
+        let all: Vec<String> = [ui_tools(), thread_tools(), queue_tools()].into_iter().flat_map(names).collect();
+        for n in &all {
+            // "approve" is Claude Code's permission-prompt tool (tool approvals in the
+            // chat), unrelated to the queue.
+            if n == "approve" {
+                continue;
+            }
+            assert!(!n.contains("approve") || n == "list_approved", "tool {n} looks like it could approve");
+            assert!(!n.contains("reject") && !n.contains("decide"), "tool {n} looks like it could decide");
+        }
+        assert_eq!(names(queue_tools()), QUEUE_TOOLS.to_vec());
+    }
+
+    /// wry defines a global `ipc` in the desktop window; a top-level `ipc` in app.js stops
+    /// the whole script from loading there (it still works in a browser, so it's easy to miss).
+    #[test]
+    fn ui_script_does_not_redeclare_the_ipc_global() {
+        let js = include_str!("../ui/app.js");
+        for decl in ["function ipc(", "const ipc ", "let ipc ", "var ipc ", "class ipc "] {
+            assert!(!js.lines().any(|l| l.starts_with(decl)), "app.js declares a top-level `ipc`: {decl}");
+        }
+    }
+
+    #[test]
+    fn http_api_has_no_route_to_queue_decisions() {
+        let web = include_str!("web.rs");
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind"] {
+            assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
+        }
+    }
 }

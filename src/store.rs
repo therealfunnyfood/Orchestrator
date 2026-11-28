@@ -118,6 +118,8 @@ pub struct Store {
     /// Lessons used to be one shared list; set once an orchestrator has moved the
     /// project-specific ones into their projects.
     pub lessons_split: bool,
+    /// Approval queue items of business workspaces (all workspaces; see queue.rs).
+    pub queue: Vec<crate::queue::QueueItem>,
     /// User messages to the orchestrator since it last reviewed its lessons.
     pub since_lessons: u32,
     #[serde(skip)]
@@ -202,6 +204,9 @@ pub struct ProjectNotes {
     /// The orchestrator's lessons that only apply to this project (save_lessons
     /// project_lessons); lessons about the user in general are in Store::lessons.
     pub lessons: String,
+    /// "business" turns on the business features (approval queue, ...); anything else
+    /// (the default) is a development workspace and behaves as before.
+    pub kind: String,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }

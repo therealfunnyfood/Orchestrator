@@ -13,6 +13,7 @@ mod config;
 mod events;
 mod mcp;
 mod migrate;
+mod queue;
 mod runner;
 mod setup;
 mod store;
@@ -37,9 +38,73 @@ enum UiEvent {
     Quit,
     Tray(tray_icon::TrayIconEvent),
     Menu(tray_icon::menu::MenuEvent),
+    /// Queue items waiting for approval (all workspaces): shown on the tray icon.
+    Badge(usize),
 }
 
 static PROXY: OnceLock<Mutex<tao::event_loop::EventLoopProxy<UiEvent>>> = OnceLock::new();
+
+pub fn set_badge(n: usize) {
+    if let Some(p) = PROXY.get() {
+        let _ = p.lock().unwrap().send_event(UiEvent::Badge(n));
+    }
+}
+
+/// Messages the desktop window's page sends to the app over the webview's private IPC
+/// channel. Only the user's clicks get here: agents can reach the app's HTTP API (they can
+/// read its token), but not this channel. So approval decisions come only this way.
+fn handle_ipc(app: &Arc<app::App>, body: &str) {
+    let Ok(msg) = serde_json::from_str::<serde_json::Value>(body) else { return };
+    let s = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let app = app.clone();
+    match s("op").as_str() {
+        "queue_decide" => {
+            let (id, action, reason) = (s("id"), s("action"), s("reason"));
+            let payload = msg.get("payload").and_then(|v| v.as_str()).map(str::to_string);
+            rt().spawn(async move {
+                if let Err(e) = app.queue_decide(&id, &action, &reason, payload.as_deref()) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
+        "set_workspace_kind" => {
+            let kind = s("kind");
+            rt().spawn(async move {
+                if let Err(e) = app.set_workspace_kind(&kind) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
+        "queue_approve_low_risk" => {
+            rt().spawn(async move {
+                match app.queue_approve_low_risk() {
+                    Ok(n) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": format!("approved {n} low-risk item(s)")})),
+                    Err(e) => app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e})),
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+/// The tray icon, with a red dot when something waits for approval.
+fn tray_icon_with_dot(dot: bool) -> Option<tray_icon::Icon> {
+    let mut px = include_bytes!("../assets/icon64.rgba").to_vec();
+    if dot {
+        let (cx, cy, r) = (50.0f32, 14.0f32, 13.0f32);
+        for y in 0..64 {
+            for x in 0..64 {
+                let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+                if d <= r {
+                    let i = (y * 64 + x) * 4;
+                    let edge = d > r - 2.0;
+                    px[i..i + 4].copy_from_slice(if edge { &[255, 255, 255, 255] } else { &[220, 38, 38, 255] });
+                }
+            }
+        }
+    }
+    tray_icon::Icon::from_rgba(px, 64, 64).ok()
+}
 
 pub fn attention() {
     if let Some(p) = PROXY.get() {
@@ -206,6 +271,7 @@ fn run_windows(app: Arc<app::App>, url: String) {
     let theme = Some(if light { tao::window::Theme::Light } else { tao::window::Theme::Dark });
     let mut context = wry::WebContext::new(Some(app.paths.data_dir.join("webview")));
 
+    let ipc_app = app.clone();
     let make = move |target: &EventLoopWindowTarget<UiEvent>, context: &mut wry::WebContext, title: &str, url: &str, w: f64, h: f64|
      -> (Window, wry::WebView) {
         let window = WindowBuilder::new()
@@ -216,8 +282,10 @@ fn run_windows(app: Arc<app::App>, url: String) {
             .with_theme(theme)
             .build(target)
             .expect("window");
+        let ipc_app = ipc_app.clone();
         let webview = wry::WebViewBuilder::new_with_web_context(context)
             .with_url(url)
+            .with_ipc_handler(move |req: wry::http::Request<String>| handle_ipc(&ipc_app, req.body()))
             .with_background_color(bg)
             .with_devtools(cfg!(debug_assertions))
             .build(&window)
@@ -265,6 +333,13 @@ fn run_windows(app: Arc<app::App>, url: String) {
                 ..
             })) => show(&main_window),
             Event::UserEvent(UiEvent::Tray(_)) => {}
+            Event::UserEvent(UiEvent::Badge(n)) => {
+                if let Some(t) = &tray {
+                    let _ = t.set_icon(tray_icon_with_dot(n > 0));
+                    let tip = if n > 0 { format!("Orchestrator — {n} waiting for your approval") } else { "Orchestrator — click to open, right-click to quit".into() };
+                    let _ = t.set_tooltip(Some(tip));
+                }
+            }
             Event::UserEvent(UiEvent::Menu(e)) => {
                 if e.id == "open" {
                     show(&main_window);

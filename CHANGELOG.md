@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0 (2026-11-28)
+
+- **Business workspaces.** A new setting, Settings → Workspace type, can switch a workspace
+  to **Business**. That turns on the features for running work that reaches the outside
+  world. Development workspaces work exactly as before.
+- **Approval queue.** In a business workspace, agents propose anything outbound
+  (publishing, messages, offers, spending) with the new `queue_item` tool, and you decide in
+  the new **✓ Queue** tab. Each item shows its type, line, expected value, risk, exact
+  payload and image previews. You can **Approve**, **Edit, then approve** or **Reject**
+  (with a one-line reason), or approve all low-risk items at once. The orchestrator gets
+  every decision with your reason, so it learns from rejections. Agents execute only
+  what `list_approved` returns and record results with `complete_item`.
+- **Only you can approve.** Decisions travel from the app window to the app over a private
+  channel that agents can't reach. An approval covers the exact payload and the contents
+  of every attachment. If either changes afterwards, the item is void and never executed.
+- Items are also written as read-only Markdown files in `<workspace>/queue/`, plus an
+  append-only `queue/audit.log`. The sidebar and the tray icon show how many items are
+  waiting for you.
+
 ## 0.4.27 (2026-11-24)
 
 - **Lessons are split in two.** "Lessons about you" are shared by every project; "lessons for

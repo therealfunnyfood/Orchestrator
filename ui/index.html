@@ -19,6 +19,9 @@
     <button class="act" data-act="manage" title="Manage threads">
       <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M3.5 9.5h17M3.5 14.5h17M9 4.5v15"/></svg>
     </button>
+    <button class="act hidden" data-act="queue" title="Approval queue (business workspace)">
+      <svg viewBox="0 0 24 24"><rect x="4.5" y="3.5" width="15" height="17" rx="1.5"/><path d="M8.5 9.5l2.2 2.2 4.8-4.8M8.5 16h7"/></svg>
+    </button>
     <div class="act-spacer"></div>
     <button class="act" data-act="palette" title="Command palette (Ctrl+Shift+P)">
       <svg viewBox="0 0 24 24"><path d="M5 8l4 4-4 4M11 17h8"/></svg>
@@ -64,6 +67,7 @@
       <section id="pane-manage" class="pane hidden"></section>
       <section id="pane-settings" class="pane hidden"></section>
       <section id="pane-brief" class="pane hidden"></section>
+      <section id="pane-queue" class="pane hidden"></section>
       <section id="pane-doc" class="pane hidden"></section>
       <div id="splitter" class="splitter hidden" title="Drag to resize"></div>
       <section id="side-pane" class="side-pane hidden">
