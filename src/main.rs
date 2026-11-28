@@ -42,6 +42,8 @@ enum UiEvent {
     Attention,
     /// Open (or focus) a conversation in its own window.
     PopOut { key: String, title: String },
+    /// Open (or focus) a pane (Queue or Needs you) in its own window.
+    PopPane(String),
     /// Bring the main window back (tray click, or a second launch of the app).
     Show,
     /// Close everything (e.g. so the installer can update the app).
@@ -261,6 +263,13 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
                 }
             });
         }
+        // "⧉ Pop out" on the Queue and Needs you panes: the new window loads the same page in
+        // single-pane mode and talks to the app through this same handler.
+        "pop_out_pane" => {
+            if let Err(e) = pop_out_pane(&s("pane")) {
+                app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+            }
+        }
         "queue_approve_low_risk" => {
             let shown: Vec<(String, String)> = msg.get("items").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| {
                 Some((x.get("id")?.as_str()?.to_string(), x.get("hash")?.as_str()?.to_string()))
@@ -307,6 +316,35 @@ pub fn pop_out(key: &str, title: &str) -> bool {
     match PROXY.get() {
         Some(p) => p.lock().unwrap().send_event(UiEvent::PopOut { key: key.into(), title: title.into() }).is_ok(),
         None => false,
+    }
+}
+
+/// The panes that can be popped out into their own window: (pane, window title).
+pub const PANES: [(&str, &str); 2] = [("queue", "Queue"), ("needs", "Needs you")];
+
+/// Open (or focus) a pane's own window. Only from the window's IPC channel.
+pub fn pop_out_pane(pane: &str) -> Result<(), String> {
+    if !PANES.iter().any(|(p, _)| *p == pane) {
+        return Err(format!("no pane {pane}"));
+    }
+    match PROXY.get() {
+        Some(p) => p.lock().unwrap().send_event(UiEvent::PopPane(pane.into())).map_err(|_| "the window is closing".to_string()),
+        None => Err("pop-out windows need the desktop app".into()),
+    }
+}
+
+/// Where each pane window was last (physical x, y, width, height), kept across runs.
+fn pane_geometry_file(app: &app::App) -> std::path::PathBuf {
+    app.paths.data_dir.join("pane-windows.json")
+}
+
+fn load_pane_geometry(app: &app::App) -> HashMap<String, (i32, i32, u32, u32)> {
+    std::fs::read_to_string(pane_geometry_file(app)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_pane_geometry(app: &app::App, g: &HashMap<String, (i32, i32, u32, u32)>) {
+    if let Ok(t) = serde_json::to_string(g) {
+        let _ = std::fs::write(pane_geometry_file(app), t);
     }
 }
 
@@ -491,16 +529,26 @@ fn run_windows(app: Arc<app::App>, url: String, minimized: bool) {
     let mut context = wry::WebContext::new(Some(app.paths.data_dir.join("webview")));
 
     let ipc_app = app.clone();
-    let make = move |target: &EventLoopWindowTarget<UiEvent>, context: &mut wry::WebContext, title: &str, url: &str, w: f64, h: f64|
+    // `at`: a saved position and size (physical pixels), used only if it's on a screen.
+    let make = move |target: &EventLoopWindowTarget<UiEvent>, context: &mut wry::WebContext, title: &str, url: &str, w: f64, h: f64,
+                     at: Option<(i32, i32, u32, u32)>|
      -> (Window, wry::WebView) {
-        let window = WindowBuilder::new()
+        let mut builder = WindowBuilder::new()
             .with_title(title)
             .with_inner_size(LogicalSize::new(w, h))
             .with_min_inner_size(LogicalSize::new(520.0, 400.0))
             .with_window_icon(icon())
-            .with_theme(theme)
-            .build(target)
-            .expect("window");
+            .with_theme(theme);
+        if let Some((x, y, gw, gh)) = at {
+            let on_screen = target.available_monitors().any(|m| {
+                let (p, s) = (m.position(), m.size());
+                x + 40 >= p.x && y + 10 >= p.y && x + 40 < p.x + s.width as i32 && y + 10 < p.y + s.height as i32
+            });
+            if on_screen && gw >= 300 && gh >= 200 {
+                builder = builder.with_position(tao::dpi::PhysicalPosition::new(x, y)).with_inner_size(tao::dpi::PhysicalSize::new(gw, gh));
+            }
+        }
+        let window = builder.build(target).expect("window");
         let ipc_app = ipc_app.clone();
         let webview = wry::WebViewBuilder::new_with_web_context(context)
             .with_url(url)
@@ -512,7 +560,7 @@ fn run_windows(app: Arc<app::App>, url: String, minimized: bool) {
         (window, webview)
     };
 
-    let (main_window, main_view) = make(&event_loop, &mut context, "Orchestrator", &url, 1400.0, 900.0);
+    let (main_window, main_view) = make(&event_loop, &mut context, "Orchestrator", &url, 1400.0, 900.0, None);
     let main_id = main_window.id();
     if minimized {
         main_window.set_visible(false);
@@ -538,6 +586,14 @@ fn run_windows(app: Arc<app::App>, url: String, minimized: bool) {
     let instance_file = app.paths.data_dir.join("instance.json");
     // Pop-out windows, and which conversation each one shows.
     let mut popouts: HashMap<WindowId, (Window, wry::WebView, String)> = HashMap::new();
+    // Pane windows (Queue, Needs you), and which pane each one shows.
+    let mut panes: HashMap<WindowId, (Window, wry::WebView, String)> = HashMap::new();
+    let mut pane_geometry = load_pane_geometry(&app);
+    let geometry_of = |w: &Window| -> Option<(i32, i32, u32, u32)> {
+        let p = w.outer_position().ok()?;
+        let s = w.inner_size();
+        (!w.is_minimized()).then_some((p.x, p.y, s.width, s.height))
+    };
 
     event_loop.run(move |event, target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -598,14 +654,40 @@ fn run_windows(app: Arc<app::App>, url: String, minimized: bool) {
                     w.set_focus();
                 } else {
                     let pop_url = format!("{url}&view={key}");
-                    let (w, v) = make(target, &mut context, &format!("{title} — Orchestrator"), &pop_url, 920.0, 860.0);
+                    let (w, v) = make(target, &mut context, &format!("{title} — Orchestrator"), &pop_url, 920.0, 860.0, None);
                     popouts.insert(w.id(), (w, v, key));
+                }
+            }
+            Event::UserEvent(UiEvent::PopPane(pane)) => {
+                if let Some((w, _, _)) = panes.values().find(|(_, _, p)| *p == pane) {
+                    show(w);
+                } else {
+                    let title = PANES.iter().find(|(p, _)| *p == pane).map(|(_, t)| *t).unwrap_or("Pane");
+                    let pane_url = format!("{url}&pane={pane}");
+                    let at = pane_geometry.get(&pane).copied();
+                    let (w, v) = make(target, &mut context, &format!("{title} — Orchestrator"), &pane_url, 760.0, 860.0, at);
+                    panes.insert(w.id(), (w, v, pane));
                 }
             }
             Event::WindowEvent { window_id, event: WindowEvent::CloseRequested, .. } => {
                 if window_id == main_id {
-                    // Keep working in the background; quit from the tray menu.
+                    // Keep working in the background; quit from the tray menu. Pane windows
+                    // belong to the main window, so they close with it.
                     main_window.set_visible(false);
+                    for (w, _, pane) in panes.values() {
+                        if let Some(g) = geometry_of(w) {
+                            pane_geometry.insert(pane.clone(), g);
+                        }
+                    }
+                    if !panes.is_empty() {
+                        save_pane_geometry(&app, &pane_geometry);
+                    }
+                    panes.clear();
+                } else if let Some((w, _, pane)) = panes.remove(&window_id) {
+                    if let Some(g) = geometry_of(&w) {
+                        pane_geometry.insert(pane, g);
+                        save_pane_geometry(&app, &pane_geometry);
+                    }
                 } else {
                     popouts.remove(&window_id);
                 }
@@ -613,6 +695,15 @@ fn run_windows(app: Arc<app::App>, url: String, minimized: bool) {
             _ => {}
         }
         if quit {
+            for (w, _, pane) in panes.values() {
+                if let Some(g) = geometry_of(w) {
+                    pane_geometry.insert(pane.clone(), g);
+                }
+            }
+            if !panes.is_empty() {
+                save_pane_geometry(&app, &pane_geometry);
+            }
+            panes.clear();
             popouts.clear();
             let _ = std::fs::remove_file(&instance_file);
             shutdown(&app);

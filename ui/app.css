@@ -439,6 +439,8 @@ body.embedded #status { display: none; }
 body.embedded #shell { height: 100vh; }
 .crumbs .solo-btn { border: 1px solid var(--border); }
 .solo-missing { padding: 40px; color: var(--muted); font-family: var(--mono); }
+.pane-title { display: flex; align-items: center; gap: 12px; }
+.pane-title .popout-btn { margin-left: auto; font-size: 12px; font-weight: normal; }
 
 /* thread links */
 a.tlink, .tlink { color: var(--accent-2); cursor: pointer; text-decoration: none; border-bottom: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); font-family: var(--mono); }

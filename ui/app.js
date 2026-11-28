@@ -27,7 +27,10 @@ const SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "
 
 const PARAMS = new URLSearchParams(location.search);
 const VIEW = PARAMS.get("view");            // pop-out window or side panel: one conversation
-const SOLO = !!VIEW;
+// Pane window (⧉ Pop out): only the Queue or Needs you pane, for the shown workspace.
+const PANE = ["queue", "needs"].includes(PARAMS.get("pane")) ? PARAMS.get("pane") : null;
+const SOLO = !!VIEW || !!PANE;
+if (PANE) document.body.classList.add("pane-only");
 const EMBEDDED = SOLO && window.parent !== window;
 if (SOLO) document.body.classList.add("solo");
 if (EMBEDDED) document.body.classList.add("embedded");
@@ -204,6 +207,15 @@ function scheduleState() { clearTimeout(stateTimer); stateTimer = setTimeout(loa
 async function loadState() {
   try { S.state = await api("/api/state"); } catch (e) { return fail(e); }
   document.documentElement.dataset.theme = theme(S.state.defaults.theme);
+  if (PANE) {
+    // It follows the main window's workspace (the state's shown workspace).
+    S.tabs = [{ type: PANE }];
+    S.active = 0;
+    document.title = (PANE === "queue" ? "Queue" : "Needs you") + " — Orchestrator";
+    renderChrome();
+    if (PANE === "queue") renderQueuePane(); else renderNeedsPane();
+    return;
+  }
   // keep tabs valid: orchestrator tab follows the workspace, dead threads close
   if (SOLO) {
     const key = isOrch(VIEW) ? orchKey() : VIEW;
@@ -1308,6 +1320,18 @@ function renderBrief() {
 
 // Decisions go to the app over the window's private IPC channel, never over HTTP:
 // agents can reach the HTTP API, so it can't be what approves things.
+// A pane's heading, with "⧉ Pop out" (opens the pane in its own window) outside pane windows.
+function paneTitle(text, pane) {
+  const t = h("h1", "pane-title", text);
+  if (!PANE) {
+    const b = h("button", "btn popout-btn", "⧉ Pop out");
+    b.title = "Open this in its own window (it stays live; clicking again brings it to the front)";
+    b.onclick = () => sendIpc({ op: "pop_out_pane", pane });
+    t.append(b);
+  }
+  return t;
+}
+
 function sendIpc(msg) {
   if (!window.ipc?.postMessage) { toast("This only works in the Orchestrator window, not in a browser", true); return false; }
   window.ipc.postMessage(JSON.stringify(msg));
@@ -1323,7 +1347,7 @@ function renderQueuePane() {
   const keep = scrollState(pane);
   pane.textContent = "";
   const page = h("div", "page queue-page");
-  page.append(h("h1", null, "Approval queue"));
+  page.append(paneTitle("Approval queue", "queue"));
   if (!q) {
     page.append(h("div", "sub", "The approval queue is only on in business workspaces (Settings → Workspace type)."));
     pane.append(page);
@@ -1787,7 +1811,7 @@ function renderNeedsPane(force) {
   if (ND.player) { renderNeedsPlayer(pane); restoreScroll(pane, keep); return; }
   pane.textContent = "";
   const page = h("div", "page nd-page");
-  page.append(h("h1", null, "📌 Needs you"));
+  page.append(paneTitle("📌 Needs you", "needs"));
   if (!n) { page.append(h("div", "sub", "Loading…")); pane.append(page); return; }
   const tot = ND.all && S.state.needs_all ? S.state.needs_all : n;
   page.append(h("div", "nd-total", tot.count ? `${tot.count} waiting · about ${tot.minutes || 0} min in all` : "Nothing is waiting for you. Nice."));
