@@ -265,14 +265,14 @@ impl App {
         let paused = self.is_paused(&t.ws);
         if paused || !t.key.starts_with(ORCHESTRATOR) {
             let msg = Queued { id: String::new(), text, sender, attach: vec![], fork: None };
-            if paused {
-                self.queues.lock().unwrap().entry(t.key.clone()).or_default().push_back(msg);
-                self.touch();
-            } else {
-                self.deliver(&t.key, msg, true);
-            }
+            // Paused: enqueue holds it (the worker only runs the user's own messages).
+            self.deliver(&t.key, msg, !paused);
         } else {
             self.post_news(&t.key, "@app", &text);
+        }
+        // A business target keeps its own chained record of what came in.
+        if self.is_business(&t.ws) {
+            self.audit(&t.ws, &format!("xws received {from_name}/{from_session} -> {}: {}", t.session, crate::events::clip(message)));
         }
     }
 
@@ -444,6 +444,8 @@ mod tests {
         assert!(app.needs_of(&dev).open.iter().all(|v| v.id != need), "the entry closes");
         let audit = app.store.lock().unwrap().audit.iter().map(|a| a.2.clone()).collect::<Vec<_>>().join("\n");
         assert!(audit.contains("xws request") && audit.contains("xws allowed once and delivered"), "{audit}");
+        assert!(audit.contains("xws received dev/orchestrator -> worker-a"), "the business target logs it too: {audit}");
+        assert!(app.queues.lock().unwrap()["worker-a"].iter().all(|m| !m.id.is_empty()), "held messages get an id");
     }
 
     #[tokio::test]
