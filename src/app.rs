@@ -19,8 +19,9 @@ mod xws_app;
 
 pub const ORCHESTRATOR: &str = "orchestrator";
 
-/// Settings that are gates or secrets: changed only from the window (IPC), never over HTTP.
-pub const USER_ONLY_SETTINGS: [&str; 4] = ["max_effort", "permission_default", "api_key", "clear_api_key"];
+/// Settings that are gates, secrets or spend money (the API backend, the plan/API mix):
+/// changed only from the window (IPC), never over HTTP.
+pub const USER_ONLY_SETTINGS: [&str; 7] = ["max_effort", "permission_default", "api_key", "clear_api_key", "orch_backend", "thread_backend", "api_mix"];
 
 const WORKER_APPEND: &str = "You are a worker thread managed by an orchestrator. Do the task you are \
 given end to end without asking for permission. When you finish a turn, end with a short summary of \

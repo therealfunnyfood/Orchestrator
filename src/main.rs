@@ -65,10 +65,12 @@ pub fn set_badge(n: usize) {
     }
 }
 
-/// IPC ops that act as the user (see handle_ipc). mcp.rs tests check web.rs never does these.
-const USER_OPS: [&str; 6] = ["send", "edit", "answer", "thread_create", "permission", "settings_user"];
+/// IPC ops that act as the user, spend, or can't be undone (see handle_ipc). mcp.rs tests
+/// check web.rs never does these.
+const USER_OPS: [&str; 13] = ["send", "edit", "answer", "thread_create", "permission", "settings_user",
+    "mix", "configure", "orch_reset", "thread_delete", "queue_msg", "update_install", "resolve"];
 
-fn user_op(app: &Arc<app::App>, msg: &serde_json::Value) -> Result<serde_json::Value, String> {
+async fn user_op(app: &Arc<app::App>, msg: &serde_json::Value) -> Result<serde_json::Value, String> {
     use serde_json::{json, Value};
     let s = |k: &str| msg.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     match s("op").as_str() {
@@ -129,6 +131,64 @@ fn user_op(app: &Arc<app::App>, msg: &serde_json::Value) -> Result<serde_json::V
             app.update_settings(&patch)?;
             Ok(app.settings_json())
         }
+        // This project's plan/API mix (0 = all plan, 10 = all API). default: also new projects'.
+        "mix" => {
+            let v = msg.get("value").and_then(Value::as_u64).ok_or("value 0-10 is required")?.min(10);
+            if msg.get("default").and_then(Value::as_bool) == Some(true) {
+                app.update_settings(&json!({"api_mix": v}))?;
+            }
+            app.set_mix(v as u8);
+            Ok(json!({"mix": app.mix()}))
+        }
+        // Model, effort and backend (plan / API) of a thread or the orchestrator.
+        "configure" => {
+            let key = s("key");
+            let opt = |k: &str| msg.get(k).and_then(Value::as_str).map(str::to_string);
+            let (b, m, e) = (opt("backend"), opt("model"), opt("effort"));
+            if key.starts_with(app::ORCHESTRATOR) {
+                app.configure_orchestrator(b.as_deref(), m.as_deref(), e.as_deref())?;
+            } else {
+                app.configure_thread(&key, b.as_deref(), m.as_deref(), e.as_deref())?;
+            }
+            Ok(json!({}))
+        }
+        "resolve" => {
+            let resolved = msg.get("resolved").and_then(Value::as_bool).unwrap_or(true);
+            app.set_resolved(&s("name"), resolved, &s("note"), "you")?;
+            Ok(json!({}))
+        }
+        "orch_reset" => {
+            app.reset_orchestrator();
+            Ok(app.orch_json())
+        }
+        "thread_delete" => {
+            app.delete_thread(&s("name"))?;
+            Ok(json!({}))
+        }
+        // Queued messages: remove one, run one now, or clear them all.
+        "queue_msg" => {
+            let (key, id) = (s("thread"), s("id"));
+            let ok = match s("action").as_str() {
+                "remove" => app.remove_queued(&key, &id),
+                "now" => app.send_now(&key, &id),
+                "clear" => { app.clear_queue(&key); true }
+                other => return Err(format!("unknown action {other}")),
+            };
+            Ok(json!({"ok": ok}))
+        }
+        // Download the newer release, verify it, start its installer and quit so it can update.
+        "update_install" => {
+            let update = app.update.lock().unwrap().clone().ok_or("no update available")?;
+            tokio::task::spawn_blocking(move || updates::download_and_launch(&update)).await.map_err(|e| e.to_string())??;
+            // Threads waiting out a usage limit continue after the update's restart.
+            app.save_resumes_for_update();
+            // Give the reply time to reach the page, then quit (stopping threads cleanly).
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                quit_app();
+            });
+            Ok(json!({}))
+        }
         other => Err(format!("unknown op {other}")),
     }
 }
@@ -145,7 +205,7 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
     // the user. The page awaits the reply ({"kind": "ipc_reply", "req": ...}).
     if USER_OPS.contains(&s("op").as_str()) {
         rt().spawn(async move {
-            let r = user_op(&app, &msg);
+            let r = user_op(&app, &msg).await;
             let req = msg.get("req").cloned().unwrap_or(serde_json::Value::Null);
             if req.is_null() {
                 if let Err(e) = r {

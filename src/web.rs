@@ -13,7 +13,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -87,10 +87,8 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/import", post(import))
         .route("/api/past-sessions", get(past_sessions))
         .route("/api/notes", post(notes))
-        .route("/api/mix", post(set_mix))
         .route("/api/open-url", post(open_url))
         .route("/api/check-update", post(check_update))
-        .route("/api/update/install", post(install_update))
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/install-cli", post(|| async { crate::setup::install_cli().map(|_| Json(json!({"ok": true}))).map_err(ApiError) }))
         .route("/api/setup/login", post(setup_login))
@@ -101,7 +99,6 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/lessons", post(lessons))
         .route("/api/show", post(|| async { Json(json!({"shown": crate::show_main()})) }))
         .route("/api/plan-usage/refresh", post(refresh_plan_usage))
-        .route("/api/queue", post(queue))
         .route("/api/inbox", post(inbox_drop))
         .route("/api/queue/drop", post(queue_drop))
         // Read-only business feed for a paired phone (off unless turned on per workspace).
@@ -125,8 +122,6 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/events/{key}", get(events))
         .route("/api/search", get(search))
         .route("/api/stop", post(stop))
-        .route("/api/threads/{name}", patch(patch_thread).delete(delete_thread))
-        .route("/api/orchestrator", post(patch_orchestrator))
         .route("/api/workspace", post(workspace))
         .route("/api/workspace/close", post(close_workspace))
         .route("/api/pick-folder", post(pick_folder))
@@ -190,32 +185,11 @@ async fn stop(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     Ok(Json(json!({"stopped": app.stop(s(&b, "thread").unwrap_or(""))})))
 }
 
-async fn patch_thread(State(app): State<Shared>, Path(name): Path<String>, Json(b): Json<Value>) -> ApiResult {
-    if let Some(r) = b.get("resolved").and_then(Value::as_bool) {
-        app.set_resolved(&name, r, s(&b, "note").unwrap_or(""), "you")?;
-    }
-    app.configure_thread(&name, s(&b, "backend"), s(&b, "model"), s(&b, "effort"))?;
-    Ok(Json(json!({"ok": true})))
-}
-
-async fn delete_thread(State(app): State<Shared>, Path(name): Path<String>) -> ApiResult {
-    app.delete_thread(&name)?;
-    Ok(Json(json!({"ok": true})))
-}
-
 /// Hand a chat (orchestrator or thread) off to a new session.
 async fn handoff(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     let key = s(&b, "key").unwrap_or("").to_string();
     let delivery = app.handoff(&key)?;
     Ok(Json(json!({"ok": true, "delivery": delivery})))
-}
-
-async fn patch_orchestrator(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    if b.get("reset").and_then(Value::as_bool) == Some(true) {
-        app.reset_orchestrator();
-    }
-    app.configure_orchestrator(s(&b, "backend"), s(&b, "model"), s(&b, "effort"))?;
-    Ok(Json(app.orch_json()))
 }
 
 async fn workspace(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
@@ -420,19 +394,6 @@ async fn popout(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     Ok(Json(json!({"native": crate::pop_out(&key, &title)})))
 }
 
-/// Manage queued messages: remove one, run one now, or clear them all.
-async fn queue(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let key = s(&b, "thread").unwrap_or("");
-    let id = s(&b, "id").unwrap_or("");
-    let ok = match s(&b, "action").unwrap_or("") {
-        "remove" => app.remove_queued(key, id),
-        "now" => app.send_now(key, id),
-        "clear" => { app.clear_queue(key); true }
-        other => return Err(ApiError(format!("unknown action {other}"))),
-    };
-    Ok(Json(json!({"ok": ok})))
-}
-
 /// Claude Code projects that can be imported.
 async fn claude_projects(State(app): State<Shared>) -> ApiResult {
     let mut list = tokio::task::spawn_blocking(crate::claude_projects::list_projects).await.map_err(|e| ApiError(e.to_string()))?;
@@ -462,13 +423,6 @@ async fn past_sessions(State(app): State<Shared>) -> ApiResult {
 async fn notes(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     app.save_notes(&app.workspace(), s(&b, "brief"), s(&b, "rules"));
     Ok(Json(json!({"ok": true})))
-}
-
-/// Set this project's plan/API mix (0 = all plan, 10 = all API).
-async fn set_mix(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let v = b.get("value").and_then(Value::as_u64).ok_or(ApiError("value 0-10 is required".into()))?;
-    app.set_mix(v.min(10) as u8);
-    Ok(Json(json!({"mix": app.mix()})))
 }
 
 async fn refresh_plan_usage(State(app): State<Shared>) -> ApiResult {
@@ -643,16 +597,10 @@ async fn setup_login(State(app): State<Shared>) -> ApiResult {
     Ok(Json(json!({"ok": true})))
 }
 
-/// Finish the wizard: mode is "plan", "api" or "both" and sets the starting plan/API mix.
-async fn setup_finish(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
-    let mix: u64 = match s(&b, "mode").unwrap_or("plan") {
-        "api" => 10,
-        "both" => b.get("mix").and_then(Value::as_u64).unwrap_or(3).min(10),
-        _ => 0,
-    };
-    app.update_settings(&json!({"setup_done": true, "api_mix": mix}))?;
-    app.set_mix(mix as u8);
-    // The permission level is set by the window over IPC (op permission), not here.
+/// Finish the wizard (the window sets the mix and permission level over IPC).
+async fn setup_finish(State(app): State<Shared>, Json(_b): Json<Value>) -> ApiResult {
+    app.update_settings(&json!({"setup_done": true}))?;
+    // The plan/API mix and the permission level are set by the window over IPC, not here.
     Ok(Json(json!({"ok": true})))
 }
 
@@ -720,19 +668,3 @@ fn mcp_streamed(app: Shared, key: String, body: Value, token: Value) -> Response
     Sse::new(stream).into_response()
 }
 
-/// Download the newer release, verify it, start its installer and quit so it can update.
-async fn install_update(State(app): State<Shared>) -> ApiResult {
-    let update = app.update.lock().unwrap().clone().ok_or(ApiError("no update available".into()))?;
-    tokio::task::spawn_blocking(move || crate::updates::download_and_launch(&update))
-        .await
-        .map_err(|e| ApiError(e.to_string()))??;
-    // Threads waiting out a usage limit continue after the update's restart (but not after
-    // the user closes and reopens the app).
-    app.save_resumes_for_update();
-    // Give the response time to reach the page, then quit (stopping threads cleanly).
-    tokio::spawn(async {
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        crate::quit_app();
-    });
-    Ok(Json(json!({"ok": true})))
-}

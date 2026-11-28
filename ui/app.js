@@ -87,7 +87,7 @@ function ipcReply(ev) {
   clearTimeout(w.t);
   if (ev.ok) w.resolve(ev.result || {}); else w.reject(new Error(ev.error || "failed"));
 }
-const USER_ONLY_SETTINGS = ["max_effort", "permission_default", "api_key", "clear_api_key"];
+const USER_ONLY_SETTINGS = ["max_effort", "permission_default", "api_key", "clear_api_key", "orch_backend", "thread_backend", "api_mix"];
 function saveSettings(patch) {
   return Object.keys(patch).some((k) => USER_ONLY_SETTINGS.includes(k)) ? ipcCall("settings_user", { patch }) : api("/api/settings", { body: patch });
 }
@@ -385,7 +385,7 @@ function resolvedOpen(set) {
 
 async function setResolved(name, resolved) {
   try {
-    await api(`/api/threads/${encodeURIComponent(name)}`, { method: "PATCH", body: { resolved } });
+    await ipcCall("resolve", { name, resolved });
     toast(resolved ? `resolved ${name}` : `reopened ${name}`);
     await loadState();
   } catch (e) { fail(e); }
@@ -1155,7 +1155,9 @@ async function drawSetup() {
     setupNav(box, {
       next: "Start using Orchestrator",
       onNext: async () => {
-        await api("/api/setup/finish", { body: { mode: SETUP.mode, mix: SETUP.mix } }).catch(fail);
+        const mix = SETUP.mode === "api" ? 10 : SETUP.mode === "both" ? Math.min(10, SETUP.mix ?? 3) : 0;
+        await api("/api/setup/finish", { body: {} }).catch(fail);
+        await ipcCall("mix", { value: mix, default: true }).catch(fail);
         if (SETUP.perm) await ipcCall("permission", { level: SETUP.perm, default: true }).catch(fail);
         closeSetup();
         return false;
@@ -1195,7 +1197,7 @@ function mixControl(value, onCommit) {
 }
 
 async function setMix(v) {
-  await api("/api/mix", { body: { value: v } });
+  await ipcCall("mix", { value: v });
   await loadState();
   toast(`this project: ${mixLabel(v)}`);
 }
@@ -2408,7 +2410,7 @@ function renderQueue() {
 }
 
 function queueAction(action, id) {
-  return api("/api/queue", { body: { thread: curKey(), action, id: id || "" } }).catch(fail);
+  return ipcCall("queue_msg", { thread: curKey(), action, id: id || "" }).catch(fail);
 }
 
 // ---------------------------------------------------------------- side panel & pop-outs
@@ -2501,7 +2503,7 @@ async function updateNow(upd) {
   if (it.value === "notes") return openUrl(upd.url);
   toast("Downloading the update…");
   try {
-    await api("/api/update/install", { body: {} });
+    await ipcCall("update_install");
     toast("Updating: Orchestrator will reopen in a few seconds");
   } catch (e) { fail(e); }
 }
@@ -3220,8 +3222,7 @@ function wireQi() {
 // pickers ---------------------------------------------------------
 
 async function configure(key, fields) {
-  if (isOrch(key)) await api("/api/orchestrator", { body: fields });
-  else await api("/api/threads/" + encodeURIComponent(key), { method: "PATCH", body: fields });
+  await ipcCall("configure", { ...fields, key });
   await loadState();
 }
 
@@ -3402,7 +3403,7 @@ async function stopTurn(name) {
 }
 
 async function resetOrch() {
-  await api("/api/orchestrator", { body: { reset: true } });
+  await ipcCall("orch_reset");
   await loadState();
   if (curKey() === orchKey()) loadLog(orchKey());
   else openChat(orchKey());
@@ -3415,7 +3416,7 @@ async function switchTo(path) {
 async function deleteThread(name) {
   if (!name) throw new Error("usage: /delete <thread>");
   if (!confirm(`Delete thread "${name}"?\n\nIts conversation is removed. Files it changed stay on disk.`)) return;
-  await api("/api/threads/" + encodeURIComponent(name), { method: "DELETE" }).catch(fail);
+  await ipcCall("thread_delete", { name }).catch(fail);
   await loadState();
   if (cur().type === "chat") activate(S.active);
   toast(`deleted ${name}`);
@@ -4019,7 +4020,7 @@ async function renderSettings() {
   }
   {
     const wrap = h("div", "mixset");
-    wrap.append(mixControl(s.api_mix, (v) => api("/api/settings", { body: { api_mix: v } }).then(() => toast(`new projects: ${mixLabel(v)}`))));
+    wrap.append(mixControl(s.api_mix, (v) => saveSettings({ api_mix: v }).then(() => toast(`new projects: ${mixLabel(v)}`))));
     setting("Billing", "Mix for new projects", "Starting value for projects you haven't set a mix on.", wrap);
   }
   setting("Billing", "Plan usage", "Your Claude plan's 5-hour and weekly limits, as Claude Code reports them. Updated after every plan turn.", planUsageView(() => renderSettings()));
