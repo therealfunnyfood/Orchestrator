@@ -798,7 +798,7 @@ function renderEventInner(ev, log) {
     if (ev.sender === "orchestrator" && !isOrch(ev.thread)) e.append(h("span", "who", "orchestrator →"));
     if (ev.sender === "threads") {
       // A thread's report: one calm line, the full text on click.
-      const first = (ev.text.split("\n").find((x) => x.trim()) || "").replace(/\s+/g, " ").trim();
+      const first = (ev.text.split("\n").find((x) => x.trim() && !/^\[from [^\]]*\]$/.test(x.trim())) || "").replace(/\s+/g, " ").trim();
       const from = (ev.from || []).map((x) => x.replace(/^@/, "")).join(", ");
       const c = h("div", "ev user setup thread-report");
       c.append(h("span", "who", from ? "from " + from : "from threads"), h("span", "sum", first.length > 110 ? first.slice(0, 110) + "…" : first));
@@ -3925,7 +3925,7 @@ async function renderSettings() {
       }
       setting("Phone", "Phone access (Atlas Business tab)", "Off by default. When on, the Atlas companion on this PC can read a <b>read-only</b> feed of this workspace over the local API: pending items with their exact payloads, today's deadlines and usage, money totals, schedules, attachment thumbnails, and live events. Nothing can be approved or changed through it.", lab);
     }
-    setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it with <code>run_approved</code>. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);
+    setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it after your OK. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);
   }
 
   section("Messages between workspaces");
