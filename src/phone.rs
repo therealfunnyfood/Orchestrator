@@ -110,6 +110,9 @@ pub struct DecideRequest {
     pub ts: i64,
     pub nonce: String,
     pub sig: String,
+    /// Approve a draft revision (from `revise`) instead of the item as it is: the signature
+    /// is then over the revision's payload_hash.
+    pub revision: String,
 }
 
 /// Why a phone decision was refused: (HTTP status, error code, message).
@@ -165,10 +168,95 @@ pub fn check_decide<'a>(phones: &'a [Phone], req: &DecideRequest, ws_id: &str, i
     Ok(phone)
 }
 
+/// A signed control request (unpause, or a manual task's Done): who signed, when, and the
+/// signature.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Signed {
+    pub device: String,
+    pub ts: i64,
+    pub nonce: String,
+    pub sig: String,
+}
+
+/// The string a phone signs to unpause: `target` is "outbound" or "workspace".
+pub fn unpause_message(device: &str, ws: &str, target: &str, ts: i64, nonce: &str) -> String {
+    format!("{PREFIX}|control|{device}|{ws}|unpause:{target}|{ts}|{nonce}")
+}
+
+/// The string a phone signs for a manual task's Done, over the files it uploaded.
+pub fn done_message(device: &str, ws: &str, item_id: &str, files_hash: &str, ts: i64, nonce: &str) -> String {
+    format!("{PREFIX}|done|{device}|{ws}|{item_id}|{files_hash}|{ts}|{nonce}")
+}
+
+/// SHA-256 (hex) of a manual task's file list: lines "<name>:<sha256 hex of its bytes>\n",
+/// sorted by name. Empty list -> SHA-256 of "".
+pub fn files_hash(files: &[(String, String)]) -> String {
+    let mut v: Vec<&(String, String)> = files.iter().collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    sha256_hex(&v.iter().map(|(n, h)| format!("{n}:{h}\n")).collect::<String>())
+}
+
+/// The checks every signed request shares (signature present, nonce format, enrolled and
+/// not revoked, time window, nonce unused), then the signature over `message`.
+pub fn check_signed<'a>(phones: &'a [Phone], s: &Signed, message: &str, now: f64, nonce_used: bool) -> Result<&'a Phone, Refusal> {
+    if s.sig.trim().is_empty() {
+        return Err(refuse(401, "signature_required", "this needs a signature from an enrolled phone; the instance token alone can't do it"));
+    }
+    if s.nonce.len() < 16 || s.nonce.len() > 128 || !s.nonce.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)) {
+        return Err(refuse(400, "bad_request", "nonce must be 16-128 characters of A-Z a-z 0-9 - _"));
+    }
+    let phone = phones.iter().find(|p| p.device == s.device).ok_or_else(|| refuse(401, "unknown_device", "this device isn't enrolled in Orchestrator"))?;
+    if phone.revoked_at > 0.0 {
+        return Err(refuse(401, "revoked_device", "this device was revoked"));
+    }
+    if (now - s.ts as f64).abs() > MAX_SKEW_S {
+        return Err(refuse(401, "stale_ts", format!("ts must be within {MAX_SKEW_S} s of Orchestrator's clock")));
+    }
+    if nonce_used {
+        return Err(refuse(409, "replayed_nonce", "this nonce was already used"));
+    }
+    if !verify(phone, message, &s.sig) {
+        return Err(refuse(401, "bad_signature", "the signature doesn't match this request, or wasn't made by this device"));
+    }
+    Ok(phone)
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
     use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+
+    #[test]
+    fn control_signatures_bind_their_target_and_kind() {
+        let (sk, ph) = test_phone("iphone-1", 7);
+        let ts = NOW as i64;
+        let msg = unpause_message("iphone-1", "orch-ws", "outbound", ts, NONCE);
+        let ok = Signed { device: "iphone-1".into(), ts, nonce: NONCE.into(), sig: sign(&sk, &msg) };
+        assert!(check_signed(&[ph.clone()], &ok, &msg, NOW, false).is_ok());
+        // The same signature can't unpause the workspace, another workspace, or count as a Done.
+        for other in [
+            unpause_message("iphone-1", "orch-ws", "workspace", ts, NONCE),
+            unpause_message("iphone-1", "orch-other", "outbound", ts, NONCE),
+            done_message("iphone-1", "orch-ws", "q1", &files_hash(&[]), ts, NONCE),
+            decide_message("iphone-1", "orch-ws", "q1", "approve", HASH, "", ts, NONCE),
+        ] {
+            assert_eq!(check_signed(&[ph.clone()], &ok, &other, NOW, false).unwrap_err().1, "bad_signature");
+        }
+        let unsigned = Signed { sig: String::new(), ..ok.clone() };
+        assert_eq!(check_signed(&[ph.clone()], &unsigned, &msg, NOW, false).unwrap_err().1, "signature_required");
+        assert_eq!(check_signed(&[ph], &ok, &msg, NOW, true).unwrap_err().1, "replayed_nonce");
+    }
+
+    #[test]
+    fn files_hash_is_order_independent_and_content_bound() {
+        let a = vec![("b.png".to_string(), "22".to_string()), ("a.png".to_string(), "11".to_string())];
+        let b = vec![("a.png".to_string(), "11".to_string()), ("b.png".to_string(), "22".to_string())];
+        assert_eq!(files_hash(&a), files_hash(&b));
+        assert_eq!(files_hash(&a), sha256_hex("a.png:11\nb.png:22\n"));
+        assert_ne!(files_hash(&a), files_hash(&[("a.png".to_string(), "11".to_string())]));
+        assert_eq!(files_hash(&[]), sha256_hex(""));
+    }
 
     /// A phone for tests: its key, and its enrolment.
     pub fn test_phone(device: &str, seed: u8) -> (SigningKey, Phone) {
@@ -190,6 +278,8 @@ pub mod tests {
         DecideRequest {
             item_id: item.into(), decision: decision.into(), reason: reason.into(), device: device.into(), ts, nonce: nonce.into(),
             sig: sign(sk, &decide_message(device, ws, item, decision, hash, reason, ts, nonce)),
+
+            ..Default::default()
         }
     }
 

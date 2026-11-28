@@ -48,6 +48,9 @@ pub struct QueueItem {
     /// Which fields the hash covers: 2 (0.6.1+) also covers type labels shown to the user
     /// (summary, risk, urgent); older items keep their version so approvals stay valid.
     pub hash_v: u8,
+    /// Draft revisions (edit-then-approve from the phone): proposed payloads with their
+    /// hash. Drafts never change the item; a signed decision over a draft's hash approves it.
+    pub revisions: Vec<Revision>,
     pub created_by: String,
     pub created_at: f64,
     pub status: String,
@@ -62,6 +65,22 @@ pub struct QueueItem {
     pub done_at: f64,
     /// File name of the read-only copy in queue/<status>/.
     pub file: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Revision {
+    pub id: String,
+    pub payload: String,
+    pub payload_hash: String,
+    pub created_at: f64,
+}
+
+/// The hash the item would have with `payload` instead of its own.
+pub fn revision_hash(item: &QueueItem, payload: &str) -> String {
+    let mut r = item.clone();
+    r.payload = payload.to_string();
+    content_hash(&r)
 }
 
 /// Hash of everything an approval covers. Attachments are hashed by content, so a file
@@ -121,7 +140,8 @@ pub enum Decision {
     /// looked (an attachment file, say) makes it void instead of approved.
     Approve(Option<String>),
     /// Edit the payload, then approve it as edited.
-    EditApprove(String),
+    /// With the hash of the edited item the user saw, if known (a phone's signed revision).
+    EditApprove(String, Option<String>),
     Reject(String),
 }
 
@@ -130,7 +150,7 @@ pub fn decide(item: &mut QueueItem, d: Decision, note: &str, now: f64) -> Result
     if item.status != "pending" {
         return Err(format!("item {} is already {}", item.id, item.status));
     }
-    let mut seen = None;
+    let seen;
     match d {
         Decision::Approve(expected) => {
             if let Some(h) = &expected {
@@ -140,12 +160,20 @@ pub fn decide(item: &mut QueueItem, d: Decision, note: &str, now: f64) -> Result
             }
             seen = expected;
         }
-        Decision::EditApprove(payload) => {
+        Decision::EditApprove(payload, expected) => {
             if payload.trim().is_empty() {
                 return Err("the edited payload is empty".into());
             }
-            item.edited = item.payload != payload;
-            item.payload = payload;
+            let mut edited = item.clone();
+            edited.payload = payload;
+            if let Some(h) = &expected {
+                if content_hash(&edited) != *h {
+                    return Err(format!("{} changed since the revision was made; look at it again", item.id));
+                }
+            }
+            item.edited = item.payload != edited.payload;
+            item.payload = edited.payload;
+            seen = expected;
         }
         Decision::Reject(reason) => {
             if reason.trim().is_empty() {
@@ -458,7 +486,7 @@ mod tests {
     fn edit_then_approve_covers_the_edited_payload() {
         let d = tmp("edit");
         let mut i = item(&d);
-        decide(&mut i, Decision::EditApprove("title: Cat mug\nprice: 16.00".into()), "", 1.0).unwrap();
+        decide(&mut i, Decision::EditApprove("title: Cat mug\nprice: 16.00".into(), None), "", 1.0).unwrap();
         assert!(i.edited);
         let items = vec![i.clone()];
         assert_eq!(still_approved(items.iter()).0.len(), 1);

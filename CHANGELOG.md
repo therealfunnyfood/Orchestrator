@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.3 (2026-11-28)
+
+- **Edit, then approve, from a paired phone.** The phone can draft a revised payload for a
+  pending item. The draft changes nothing until the phone signs it, and the approval then
+  applies exactly the signed revision. The audit log names the revision.
+- **Pause and resume from the phone.** Pausing outbound (the kill switch) or the whole
+  workspace needs only the app's token, because stopping is always safe. Resuming needs a
+  signature from a paired phone.
+- **Manual tasks from the phone.** The phone can add images or PDFs (up to 25 MB) to a manual
+  task, then mark it done with a signature over the exact list of files. If a file is added or
+  removed after signing, the Done is refused.
+- **Feed.** Items now carry what a phone needs to recompute their hash (attachment paths,
+  hash version, secret names), plus drafts and dropped files. New `pause_changed` and
+  `manual_file` events.
+
 ## 0.6.2 (2026-11-28)
 
 - **Business lines are data (business workspaces).** Each line, or venture, has an id, a

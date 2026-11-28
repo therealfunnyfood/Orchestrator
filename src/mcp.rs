@@ -939,8 +939,13 @@ mod tests {
         let routes: Vec<&str> = web.lines().filter(|l| l.contains(".route(\"/api/business")).collect();
         assert!(routes.len() >= 5, "feed routes not found");
         for r in routes {
-            if r.contains("/decide\"") {
-                assert!(r.contains("post(phone_decide)"), "decide must go through phone_decide: {r}");
+            // The phone's write routes: each goes through its phone_* handler, which checks a
+            // signature where it matters (decide, unpause, done) or can't decide anything
+            // (revise drafts, pause stops, file adds a file).
+            if let Some(h) = ["/decide\"", "/revise\"", "/pause\"", "/unpause\"", "/file\"", "/done\""].iter().find(|h| r.contains(*h)) {
+                let handler = match *h { "/decide\"" => "phone_decide", "/revise\"" => "phone_revise", "/pause\"" => "phone_pause",
+                    "/unpause\"" => "phone_unpause", "/file\"" => "phone_manual_file", _ => "phone_manual_done" };
+                assert!(r.contains(&format!("post({handler})")), "{h} must go through {handler}: {r}");
                 continue;
             }
             assert!(r.contains(", get(") && !r.contains("post(") && !r.contains("patch(") && !r.contains("delete("), "not read-only: {r}");

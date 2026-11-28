@@ -115,6 +115,12 @@ pub fn router(app: Shared, desktop: bool) -> Router {
         .route("/api/business/{ws}/attachment/{item}/{name}", get(feed_attachment))
         // The one route that decides: only with a signature from an enrolled phone.
         .route("/api/business/{ws}/decide", post(phone_decide))
+        // Drafts change nothing; pausing is safe; unpausing and Done are signed.
+        .route("/api/business/{ws}/revise", post(phone_revise))
+        .route("/api/business/{ws}/pause", post(phone_pause))
+        .route("/api/business/{ws}/unpause", post(phone_unpause))
+        .route("/api/business/{ws}/manual/{item}/file", post(phone_manual_file))
+        .route("/api/business/{ws}/manual/{item}/done", post(phone_manual_done))
         .route("/api/state", get(|State(a): State<Shared>| async move { Json(a.state_json()) }))
         .route("/api/all-threads", get(|State(a): State<Shared>| async move { Json(a.all_threads_json()) }))
         .route("/api/events/{key}", get(events))
@@ -602,6 +608,49 @@ async fn phone_decide(State(app): State<Shared>, Path(id): Path<String>, body: a
         Ok(v) => Json(v).into_response(),
         Err((status, code, message)) => (StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST), Json(json!({"error": code, "message": message}))).into_response(),
     }
+}
+
+fn refusal_response(r: crate::phone::Refusal) -> Response {
+    let (status, code, message) = r;
+    (StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST), Json(json!({"error": code, "message": message}))).into_response()
+}
+
+fn phone_result(r: Result<Value, crate::phone::Refusal>) -> Response {
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => refusal_response(e),
+    }
+}
+
+fn body_json(body: &[u8]) -> Result<Value, Response> {
+    serde_json::from_slice(body).map_err(|_| refusal_response((400, "bad_request", "expected a JSON body".into())))
+}
+
+async fn phone_revise(State(app): State<Shared>, Path(id): Path<String>, body: axum::body::Bytes) -> Response {
+    let b = match body_json(&body) { Ok(b) => b, Err(r) => return r };
+    phone_result(app.phone_revise(&id, s(&b, "item_id").unwrap_or(""), s(&b, "payload").unwrap_or("")))
+}
+
+async fn phone_pause(State(app): State<Shared>, Path(id): Path<String>, body: axum::body::Bytes) -> Response {
+    let b = match body_json(&body) { Ok(b) => b, Err(r) => return r };
+    phone_result(app.phone_pause(&id, s(&b, "target").unwrap_or("")))
+}
+
+async fn phone_unpause(State(app): State<Shared>, Path(id): Path<String>, body: axum::body::Bytes) -> Response {
+    let b = match body_json(&body) { Ok(b) => b, Err(r) => return r };
+    let signed: crate::phone::Signed = serde_json::from_value(b.clone()).unwrap_or_default();
+    phone_result(app.phone_unpause(&id, s(&b, "target").unwrap_or(""), &signed))
+}
+
+async fn phone_manual_file(State(app): State<Shared>, Path((id, item)): Path<(String, String)>, body: axum::body::Bytes) -> Response {
+    let b = match body_json(&body) { Ok(b) => b, Err(r) => return r };
+    phone_result(app.phone_manual_file(&id, &item, s(&b, "name").unwrap_or("file"), s(&b, "data").unwrap_or("")))
+}
+
+async fn phone_manual_done(State(app): State<Shared>, Path((id, item)): Path<(String, String)>, body: axum::body::Bytes) -> Response {
+    let b = match body_json(&body) { Ok(b) => b, Err(r) => return r };
+    let signed: crate::phone::Signed = serde_json::from_value(b).unwrap_or_default();
+    phone_result(app.phone_manual_done(&id, &item, &signed))
 }
 
 /// A file dropped on a manual task's card (saved to inbox/images/<id>/).

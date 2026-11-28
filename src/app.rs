@@ -3366,6 +3366,9 @@ impl App {
             "created_at": i.created_at, "order_id": if i.order_id.is_empty() { Value::Null } else { json!(i.order_id) },
             "est_units": i.capacity.as_ref().map(|c| c.est_units), "deadline": i.capacity.as_ref().map(|c| c.deadline),
             "capacity": i.capacity, "manual": crate::queue::is_manual(i), "command": if i.command.is_empty() { Value::Null } else { json!(i.command) },
+            "secrets": i.secrets, "hash_v": i.hash_v,
+            "revisions": i.revisions.iter().map(|r| json!({"id": r.id, "payload": r.payload, "payload_hash": r.payload_hash, "created_at": r.created_at})).collect::<Vec<_>>(),
+            "dropped": if crate::queue::is_manual(i) { json!(Self::queue_dropped(i)) } else { Value::Null },
         })
     }
 
@@ -3660,6 +3663,188 @@ impl App {
 
     // ---- signed decisions from enrolled phones (phone.rs) ----
 
+    /// POST revise: store a draft revision of a pending item's payload (unsigned; it changes
+    /// nothing until a phone signs its hash). Returns the revision and its hash.
+    pub fn phone_revise(&self, ws_id: &str, item_id: &str, payload: &str) -> Result<Value, crate::phone::Refusal> {
+        let ws = self.feed_ws(ws_id).ok_or((404, "no_feed", "no business workspace with that id has the phone feed on".to_string()))?;
+        if payload.trim().is_empty() {
+            return Err((400, "bad_request", "payload is empty".into()));
+        }
+        if let Some(name) = crate::vault::contains_secret(payload) {
+            return Err((400, "bad_request", format!("the payload contains the value of secret {name}")));
+        }
+        let (rev, original) = {
+            let mut st = self.store.lock().unwrap();
+            if !st.notes(&ws).is_some_and(|n| n.phone_decide) {
+                return Err((403, "decisions_off", "phone decisions are off for this workspace (Settings → Phone)".into()));
+            }
+            let item = st.queue.iter_mut().find(|i| i.id == item_id && same_path(&i.workspace, &ws)).ok_or((404, "no_item", "no such item in this workspace".to_string()))?;
+            if item.status != "pending" {
+                return Err((409, "not_pending", format!("the item is already {}", item.status)));
+            }
+            let n = item.revisions.len() + 1;
+            let rev = crate::queue::Revision {
+                id: format!("r{n}"), payload: payload.to_string(),
+                payload_hash: crate::queue::revision_hash(item, payload), created_at: now(),
+            };
+            item.revisions.push(rev.clone());
+            let over = item.revisions.len().saturating_sub(20);
+            item.revisions.drain(..over);
+            let original = crate::queue::content_hash(item);
+            st.save();
+            (rev, original)
+        };
+        self.audit(&ws, &format!("REVISION {} of {item_id} drafted via phone api (original #{}, revision #{})", rev.id, &original[..12], &rev.payload_hash[..12]));
+        self.touch();
+        Ok(json!({"ok": true, "item_id": item_id, "revision": rev.id, "payload": rev.payload, "payload_hash": rev.payload_hash, "original_payload_hash": original}))
+    }
+
+    fn phone_nonce_check(&self, device: &str, nonce: &str) -> bool {
+        let t = now();
+        let mut st = self.store.lock().unwrap();
+        st.phone_nonces.retain(|(_, _, at)| t - at < crate::phone::NONCE_KEEP_S);
+        st.phone_nonces.iter().any(|(d, n, _)| d == device && n == nonce)
+    }
+
+    fn phone_nonce_use(&self, device: &str, nonce: &str) {
+        let mut st = self.store.lock().unwrap();
+        st.phone_nonces.push((device.to_string(), nonce.to_string(), now()));
+        st.save();
+    }
+
+    /// POST pause: stopping is safe, so the token alone may (outbound or workspace).
+    pub fn phone_pause(self: &Arc<Self>, ws_id: &str, target: &str) -> Result<Value, crate::phone::Refusal> {
+        let ws = self.feed_ws(ws_id).ok_or((404, "no_feed", "no business workspace with that id has the phone feed on".to_string()))?;
+        match target {
+            "outbound" => {
+                {
+                    let mut st = self.store.lock().unwrap();
+                    st.notes_mut(&ws).outbound_paused = true;
+                    st.save();
+                }
+                self.audit(&ws, "OUTBOUND PAUSED via=phone api (kill switch on)");
+                self.post_news(&orch_key(&ws), "@app", "The user PAUSED OUTBOUND from their phone (kill switch). Nothing may be executed, sent or published until they resume it.");
+            }
+            "workspace" => {
+                {
+                    let mut st = self.store.lock().unwrap();
+                    st.notes_mut(&ws).paused = true;
+                    st.save();
+                }
+                self.audit(&ws, "WORKSPACE PAUSED via=phone api (all turns stopped)");
+                let mut keys = self.thread_names_here(&ws);
+                keys.push(orch_key(&ws));
+                for k in &keys {
+                    self.resumes.lock().unwrap().remove(k);
+                    self.stop(k);
+                }
+            }
+            _ => return Err((400, "bad_request", "target must be outbound or workspace".into())),
+        }
+        self.business_event(&ws, "pause_changed", None, json!({"target": target, "paused": true, "via": "phone"}));
+        self.touch();
+        Ok(json!({"ok": true, "target": target, "paused": true}))
+    }
+
+    /// POST unpause: starting is signed.
+    pub fn phone_unpause(self: &Arc<Self>, ws_id: &str, target: &str, s: &crate::phone::Signed) -> Result<Value, crate::phone::Refusal> {
+        let ws = self.feed_ws(ws_id).ok_or((404, "no_feed", "no business workspace with that id has the phone feed on".to_string()))?;
+        if !["outbound", "workspace"].contains(&target) {
+            return Err((400, "bad_request", "target must be outbound or workspace".into()));
+        }
+        let phone = {
+            let st = self.store.lock().unwrap();
+            if !st.notes(&ws).is_some_and(|n| n.phone_decide) {
+                return Err((403, "decisions_off", "phone decisions are off for this workspace (Settings → Phone)".into()));
+            }
+            let phones = st.phones.clone();
+            drop(st);
+            let used = self.phone_nonce_check(&s.device, &s.nonce);
+            let msg = crate::phone::unpause_message(&s.device, ws_id, target, s.ts, &s.nonce);
+            crate::phone::check_signed(&phones, s, &msg, now(), used)?.clone()
+        };
+        self.phone_nonce_use(&s.device, &s.nonce);
+        let via = format!("phone:{}", phone.fingerprint);
+        if target == "outbound" {
+            {
+                let mut st = self.store.lock().unwrap();
+                st.notes_mut(&ws).outbound_paused = false;
+                st.save();
+            }
+            self.audit(&ws, &format!("OUTBOUND RESUMED by=user via={via}"));
+            self.post_news(&orch_key(&ws), "@app", "The user resumed outbound from their phone: approved items are available in list_approved again.");
+        } else {
+            {
+                let mut st = self.store.lock().unwrap();
+                st.notes_mut(&ws).paused = false;
+                st.save();
+            }
+            self.audit(&ws, &format!("WORKSPACE RESUMED by=user via={via}"));
+            let mut keys = self.thread_names_here(&ws);
+            keys.push(orch_key(&ws));
+            for k in &keys {
+                self.kick(k);
+            }
+            self.post_news(&orch_key(&ws), "@app", "The user resumed this workspace from their phone after a pause. Check where things stood and carry on.");
+        }
+        self.business_event(&ws, "pause_changed", None, json!({"target": target, "paused": false, "via": via}));
+        self.touch();
+        Ok(json!({"ok": true, "target": target, "paused": false, "via": via}))
+    }
+
+    /// POST manual/{item}/file: a file from the phone for a manual task (images and PDF, 25 MB).
+    pub fn phone_manual_file(&self, ws_id: &str, item_id: &str, name: &str, b64: &str) -> Result<Value, crate::phone::Refusal> {
+        use base64::Engine;
+        let ws = self.feed_ws(ws_id).ok_or((404, "no_feed", "no business workspace with that id has the phone feed on".to_string()))?;
+        let owned = self.store.lock().unwrap().queue.iter().any(|i| i.id == item_id && same_path(&i.workspace, &ws));
+        if !owned {
+            return Err((404, "no_item", "no such item in this workspace".into()));
+        }
+        let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
+        if !["png", "jpg", "jpeg", "webp", "gif", "pdf"].contains(&ext.as_str()) {
+            return Err((415, "bad_type", "only images (png, jpg, webp, gif) and PDF".into()));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64.trim()).map_err(|e| (400, "bad_request", format!("bad file data: {e}")))?;
+        if bytes.len() > 25 * 1024 * 1024 {
+            return Err((413, "too_large", "files over 25 MB aren't taken".into()));
+        }
+        let path = self.queue_drop_file(item_id, name, &base64::engine::general_purpose::STANDARD.encode(&bytes)).map_err(|e| (409, "not_manual", e))?;
+        self.business_event(&ws, "manual_file", None, json!({"item_id": item_id, "name": crate::queue::safe_file_name(name)}));
+        Ok(json!({"ok": true, "item_id": item_id, "name": crate::queue::safe_file_name(name), "path": path}))
+    }
+
+    /// The file list of a manual task: (name, sha256 hex).
+    fn manual_files(&self, item: &crate::queue::QueueItem) -> Vec<(String, String)> {
+        use sha2::{Digest, Sha256};
+        let dir = crate::queue::drop_dir(item);
+        Self::queue_dropped(item).into_iter().map(|n| {
+            let h = std::fs::read(dir.join(&n)).map(|b| format!("{:x}", Sha256::digest(&b))).unwrap_or_default();
+            (n, h)
+        }).collect()
+    }
+
+    /// POST manual/{item}/done: the phone's signed Done over the exact file list.
+    pub fn phone_manual_done(self: &Arc<Self>, ws_id: &str, item_id: &str, s: &crate::phone::Signed) -> Result<Value, crate::phone::Refusal> {
+        let ws = self.feed_ws(ws_id).ok_or((404, "no_feed", "no business workspace with that id has the phone feed on".to_string()))?;
+        let (item, phones, on) = {
+            let st = self.store.lock().unwrap();
+            let item = st.queue.iter().find(|i| i.id == item_id && same_path(&i.workspace, &ws)).cloned();
+            (item, st.phones.clone(), st.notes(&ws).is_some_and(|n| n.phone_decide))
+        };
+        if !on {
+            return Err((403, "decisions_off", "phone decisions are off for this workspace (Settings → Phone)".into()));
+        }
+        let item = item.ok_or((404, "no_item", "no such item in this workspace".to_string()))?;
+        let files = self.manual_files(&item);
+        let used = self.phone_nonce_check(&s.device, &s.nonce);
+        let msg = crate::phone::done_message(&s.device, ws_id, item_id, &crate::phone::files_hash(&files), s.ts, &s.nonce);
+        let phone = crate::phone::check_signed(&phones, s, &msg, now(), used)?.clone();
+        self.phone_nonce_use(&s.device, &s.nonce);
+        self.queue_user_done(item_id).map_err(|e| (409, "not_manual", e))?;
+        self.audit(&ws, &format!("DONE confirmed via=phone:{} for {item_id} ({} file(s))", phone.fingerprint, files.len()));
+        Ok(json!({"ok": true, "item_id": item_id, "files": files.iter().map(|(n, h)| json!({"name": n, "sha256": h})).collect::<Vec<_>>(), "via": format!("phone:{}", phone.fingerprint)}))
+    }
+
     /// The user pasted a phone's bundle (window only): parse it and show its fingerprint
     /// for confirmation. Nothing is enrolled yet.
     pub fn phone_enroll_begin(&self, bundle: &str) -> Result<(), String> {
@@ -3736,7 +3921,7 @@ impl App {
     pub fn phone_decide(self: &Arc<Self>, ws_id: &str, req: &crate::phone::DecideRequest) -> Result<Value, crate::phone::Refusal> {
         let ws = self.feed_ws(ws_id).ok_or((404, "no_feed", "no business workspace with that id has the phone feed on".to_string()))?;
         let t = now();
-        let (phone, capacity_failed, signed_hash) = {
+        let (phone, capacity_failed, signed_hash, revision) = {
             let mut st = self.store.lock().unwrap();
             if !st.notes(&ws).is_some_and(|n| n.phone_decide) {
                 return Err((403, "decisions_off", "phone decisions are off for this workspace (Settings → Phone)".into()));
@@ -3744,21 +3929,40 @@ impl App {
             st.phone_nonces.retain(|(_, _, at)| t - at < crate::phone::NONCE_KEEP_S);
             let used = st.phone_nonces.iter().any(|(d, n, _)| *d == req.device && *n == req.nonce);
             let found = st.queue.iter().find(|i| i.id == req.item_id && same_path(&i.workspace, &ws)).cloned();
-            let item = found.as_ref().map(|i| crate::phone::ItemNow { status: &i.status, payload_hash: crate::queue::content_hash(i) });
+            // A signed draft revision: the signature must cover that draft's hash, recomputed
+            // now from the item as it is (so a changed attachment still fails).
+            if !req.revision.is_empty() && !found.as_ref().is_some_and(|i| i.revisions.iter().any(|r| r.id == req.revision)) {
+                return Err((404, "no_revision", "no such revision of this item".into()));
+            }
+            let revision = found.as_ref().and_then(|i| i.revisions.iter().find(|r| r.id == req.revision).cloned());
+            let item = found.as_ref().map(|i| crate::phone::ItemNow {
+                status: &i.status,
+                payload_hash: match &revision {
+                    Some(r) => crate::queue::revision_hash(i, &r.payload),
+                    None => crate::queue::content_hash(i),
+                },
+            });
             let signed_hash = item.as_ref().map(|i| i.payload_hash.clone());
             let phone = crate::phone::check_decide(&st.phones, req, ws_id, item, t, used)?.clone();
             // Single use: remembered before anything is decided.
             st.phone_nonces.push((req.device.clone(), req.nonce.clone(), t));
             st.save();
-            (phone, found.is_some_and(|i| i.capacity.as_ref().is_some_and(|c| !c.ok)), signed_hash)
+            (phone, found.is_some_and(|i| i.capacity.as_ref().is_some_and(|c| !c.ok)), signed_hash, revision)
         };
         if capacity_failed && req.decision == "approve" {
             return Err((409, "capacity_failed", "this item failed the capacity check: approve it in the Orchestrator window (it needs a second, explicit click)".into()));
         }
-        let via = format!("phone:{}", phone.fingerprint);
+        let mut via = format!("phone:{}", phone.fingerprint);
         // The hash the signature covers is what gets approved (an attachment swapped since
-        // then voids the item instead).
-        self.queue_decide(&req.item_id, &req.decision, &req.reason, None, false, &via, signed_hash.as_deref()).map_err(|e| (409, "decide_failed", e))?;
+        // then voids the item instead). A revision approves its edited payload.
+        let (action, payload) = match (&revision, req.decision.as_str()) {
+            (Some(r), "approve") => {
+                via = format!("{via} revision={}", r.id);
+                ("edit_approve", Some(r.payload.as_str()))
+            }
+            _ => (req.decision.as_str(), None),
+        };
+        self.queue_decide(&req.item_id, action, &req.reason, payload, false, &via, signed_hash.as_deref()).map_err(|e| (409, "decide_failed", e))?;
         let status = self.store.lock().unwrap().queue.iter().find(|i| i.id == req.item_id).map(|i| i.status.clone()).unwrap_or_default();
         Ok(json!({"ok": true, "item_id": req.item_id, "status": status, "via": via}))
     }
@@ -4203,7 +4407,7 @@ impl App {
     pub fn queue_decide(self: &Arc<Self>, id: &str, action: &str, reason: &str, payload: Option<&str>, force: bool, via: &str, seen_hash: Option<&str>) -> Result<(), String> {
         let decision = match action {
             "approve" => crate::queue::Decision::Approve(seen_hash.filter(|h| !h.is_empty()).map(str::to_string)),
-            "edit_approve" => crate::queue::Decision::EditApprove(payload.unwrap_or("").to_string()),
+            "edit_approve" => crate::queue::Decision::EditApprove(payload.unwrap_or("").to_string(), seen_hash.filter(|h| !h.is_empty()).map(str::to_string)),
             "reject" => crate::queue::Decision::Reject(reason.to_string()),
             _ => return Err(format!("unknown action {action}")),
         };
@@ -4485,6 +4689,7 @@ mod phone_decide_tests {
         crate::phone::DecideRequest {
             item_id: item.into(), decision: "approve".into(), reason: String::new(), device: "iphone-1".into(), ts, nonce: nonce.into(),
             sig: sign(sk, &crate::phone::decide_message("iphone-1", ws_id, item, "approve", hash, "", ts, nonce)),
+            ..Default::default()
         }
     }
 
@@ -4549,5 +4754,93 @@ mod phone_decide_tests {
         assert_eq!(app.phone_decide(&id, &signed(&sk, &id, &item, &hash, "nonce-off-0123456789ab")).unwrap_err().1, "decisions_off");
         app.store.lock().unwrap().notes_mut(&ws).phone_feed = false;
         assert_eq!(app.phone_decide(&id, &signed(&sk, &id, &item, &hash, "nonce-off2-0123456789a")).unwrap_err().1, "no_feed");
+    }
+
+    fn signed_with(sk: &p256::ecdsa::SigningKey, msg: impl Fn(i64) -> String, nonce: &str) -> crate::phone::Signed {
+        let ts = now() as i64;
+        crate::phone::Signed { device: "iphone-1".into(), ts, nonce: nonce.into(), sig: sign(sk, &msg(ts)) }
+    }
+
+    #[tokio::test]
+    async fn a_signed_revision_approves_the_revised_payload() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, ws, id) = app("revise");
+        let (sk, phone) = test_phone("iphone-1", 7);
+        app.store.lock().unwrap().phones.push(phone);
+        let item = queue(&app, &ws, "pin to revise");
+        let rev = app.phone_revise(&id, &item, "board: revised").unwrap();
+        // A draft changes nothing.
+        let original = app.store.lock().unwrap().queue.iter().find(|x| x.id == item).cloned().unwrap();
+        assert_eq!(original.payload, "board: tests");
+        assert_eq!(original.status, "pending");
+        // Signing the original hash with the revision named fails; the revision's hash passes.
+        let rid = rev["revision"].as_str().unwrap().to_string();
+        let mut wrong = signed(&sk, &id, &item, &crate::queue::content_hash(&original), "nonce-rev-wrong-01234567");
+        wrong.revision = rid.clone();
+        assert!(app.phone_decide(&id, &wrong).is_err());
+        let mut req = signed(&sk, &id, &item, rev["payload_hash"].as_str().unwrap(), "nonce-rev-good-012345678");
+        req.revision = rid.clone();
+        app.phone_decide(&id, &req).unwrap();
+        let now_item = app.store.lock().unwrap().queue.iter().find(|x| x.id == item).cloned().unwrap();
+        assert_eq!(now_item.status, "approved");
+        assert_eq!(now_item.payload, "board: revised");
+        assert!(now_item.edited);
+        assert_eq!(now_item.approved_hash, rev["payload_hash"].as_str().unwrap());
+        let audit = std::fs::read_to_string(std::path::Path::new(&ws).join("queue/audit.log")).unwrap();
+        assert!(audit.contains(&format!("revision={rid}")), "{audit}");
+        // No revising once decided, and no unknown revisions.
+        assert_eq!(app.phone_revise(&id, &item, "board: again").unwrap_err().1, "not_pending");
+        let other = queue(&app, &ws, "another");
+        let mut ghost = signed(&sk, &id, &other, "x", "nonce-rev-ghost-01234567");
+        ghost.revision = "r9".into();
+        assert_eq!(app.phone_decide(&id, &ghost).unwrap_err().1, "no_revision");
+    }
+
+    #[tokio::test]
+    async fn pause_needs_no_signature_but_unpause_does() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, ws, id) = app("pause");
+        let (sk, phone) = test_phone("iphone-1", 7);
+        app.store.lock().unwrap().phones.push(phone);
+        app.phone_pause(&id, "outbound").unwrap();
+        assert!(app.store.lock().unwrap().notes(&ws).unwrap().outbound_paused);
+        assert_eq!(app.phone_pause(&id, "everything").unwrap_err().1, "bad_request");
+        let unsigned = crate::phone::Signed { device: "iphone-1".into(), ts: now() as i64, nonce: "nonce-unp-unsigned-0123".into(), sig: String::new() };
+        assert_eq!(app.phone_unpause(&id, "outbound", &unsigned).unwrap_err().1, "signature_required");
+        // A signature for the other target doesn't carry over.
+        let other = signed_with(&sk, |ts| crate::phone::unpause_message("iphone-1", &id, "workspace", ts, "nonce-unp-other-0123456"), "nonce-unp-other-0123456");
+        assert!(app.phone_unpause(&id, "outbound", &other).is_err());
+        assert!(app.store.lock().unwrap().notes(&ws).unwrap().outbound_paused);
+        let good = signed_with(&sk, |ts| crate::phone::unpause_message("iphone-1", &id, "outbound", ts, "nonce-unp-good-01234567"), "nonce-unp-good-01234567");
+        app.phone_unpause(&id, "outbound", &good).unwrap();
+        assert!(!app.store.lock().unwrap().notes(&ws).unwrap().outbound_paused);
+        assert_eq!(app.phone_unpause(&id, "outbound", &good).unwrap_err().1, "replayed_nonce");
+        let audit = std::fs::read_to_string(std::path::Path::new(&ws).join("queue/audit.log")).unwrap();
+        assert!(audit.contains("OUTBOUND PAUSED via=phone api") && audit.contains("OUTBOUND RESUMED by=user via=phone:"), "{audit}");
+    }
+
+    #[tokio::test]
+    async fn done_is_bound_to_the_exact_files() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, ws, id) = app("done");
+        let (sk, phone) = test_phone("iphone-1", 7);
+        app.store.lock().unwrap().phones.push(phone);
+        let out = app.queue_add(&orch_key(&ws), &json!({"type": "post_pin", "line": "C", "summary": "upload pins by hand", "payload": "board: tests", "risk": "low", "who_executes": "user"}), vec![]).unwrap();
+        let item = out.split_whitespace().nth(1).unwrap().to_string();
+        use base64::Engine;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        assert_eq!(app.phone_manual_file(&id, &item, "notes.exe", &b64(b"x")).unwrap_err().1, "bad_type");
+        app.phone_manual_file(&id, &item, "shot.png", &b64(b"first")).unwrap();
+        let files = vec![("shot.png".to_string(), format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b"first")))];
+        let fh = crate::phone::files_hash(&files);
+        let s = signed_with(&sk, |ts| crate::phone::done_message("iphone-1", &id, &item, &fh, ts, "nonce-done-a-0123456789"), "nonce-done-a-0123456789");
+        // A second file arrives after the phone signed: the signed list no longer matches.
+        app.phone_manual_file(&id, &item, "more.jpg", &b64(b"second")).unwrap();
+        assert!(app.phone_manual_done(&id, &item, &s).is_err());
+        assert_eq!(app.store.lock().unwrap().queue.iter().find(|x| x.id == item).unwrap().status, "pending");
+        std::fs::remove_file(std::path::Path::new(&ws).join("inbox/images").join(&item).join("more.jpg")).unwrap();
+        let s2 = signed_with(&sk, |ts| crate::phone::done_message("iphone-1", &id, &item, &fh, ts, "nonce-done-b-0123456789"), "nonce-done-b-0123456789");
+        app.phone_manual_done(&id, &item, &s2).unwrap();
+        assert_eq!(app.store.lock().unwrap().queue.iter().find(|x| x.id == item).unwrap().status, "done");
     }
 }

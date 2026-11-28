@@ -145,6 +145,8 @@ pub fn attachment_info(path: &str) -> Value {
     let (w, h) = image::image_dimensions(p).map(|(w, h)| (Some(w), Some(h))).unwrap_or((None, None));
     json!({
         "name": name,
+        // The full path is part of the payload_hash (see the hash recipe in the API doc).
+        "path": path,
         "sha256": bytes.as_ref().map(|b| format!("{:x}", Sha256::digest(b))),
         "size": bytes.as_ref().map(|b| b.len()),
         "width": w, "height": h,
