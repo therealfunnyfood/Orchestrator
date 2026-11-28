@@ -130,6 +130,7 @@ is still going.",
             "inputSchema": {"type": "object", "properties": {
                 "time": {"type": "string", "description": "HH:MM, 24-hour, the user's local time"},
                 "days": {"type": "string"}, "message": {"type": "string"},
+                "thread": {"type": "string", "description": "optional: wake this standing thread directly (e.g. market-watch) instead of you; its report then comes to you"},
                 "reason": {"type": "string", "description": "why this routine is worth it (shown to the user)"},
             }, "required": ["time", "message"]},
         },
@@ -701,6 +702,7 @@ Each thread's messages and final report start your next turn.".into());
             arg(args, "time").ok_or("time is required")?,
             arg(args, "days").unwrap_or("daily"),
             arg(args, "message").ok_or("message is required")?,
+            arg(args, "thread").unwrap_or(""),
             arg(args, "reason").unwrap_or(""),
         ),
         "queue_item" => {
@@ -749,6 +751,9 @@ Each thread's messages and final report start your next turn.".into());
         "resolve_thread" => {
             let n = arg(args, "name").ok_or("name is required")?;
             let reopen = args.get("reopen").and_then(Value::as_bool).unwrap_or(false);
+            if !reopen && app.store.lock().unwrap().get(n).is_some_and(|r| r.standing) {
+                return Err(format!("{n} is a standing thread (a schedule wakes it), so it stays open; the user can resolve it or delete its schedule"));
+            }
             app.set_resolved(n, !reopen, arg(args, "note").unwrap_or(""), "orchestrator")?;
             Ok(if reopen { format!("reopened {n}") } else { format!("resolved {n}") })
         }

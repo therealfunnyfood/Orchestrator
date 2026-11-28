@@ -43,6 +43,8 @@ pub struct ThreadRow {
     pub resolved_note: String,
     /// "paid-order" threads always run, whatever the budget or usage gates say.
     pub priority: String,
+    /// Woken by a schedule (a standing thread): never auto-resolved.
+    pub standing: bool,
 }
 
 impl Default for ThreadRow {
@@ -70,6 +72,7 @@ impl Default for ThreadRow {
             resolved_at: 0.0,
             resolved_note: String::new(),
             priority: String::new(),
+            standing: false,
         }
     }
 }

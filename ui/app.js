@@ -395,13 +395,18 @@ function node({ key, name, cls, status, meta, row }) {
   const n = h("div", "node" + (cls ? " " + cls : ""));
   n.classList.toggle("on", curKey() === key);
   n.classList.toggle("unread", S.unread.has(key));
-  n.append(h("span", "st " + status), h("span", "nm", name));
+  n.append(h("span", "st " + status), h("span", "nm", (row?.standing ? "🔁 " : "") + name));
   if (row?.needs_input) { const q = h("span", "q-badge", "?"); q.title = "Waiting for your answer"; n.append(q); }
   const prog = row?.busy && planProgress(row.plan);
   if (prog) n.append(h("span", "prog", prog));
   if (row?.estimate) n.append(estBadge(row.estimate, true));
-  else n.append(h("span", "meta", meta));
-  n.title = `${name} · ${status}`;
+  else if (row?.standing && !row.busy) {
+    const next = row.next_run ? new Date(row.next_run * 1000) : null;
+    const sameDay = next && next.toDateString() === new Date().toDateString();
+    const when = next ? (sameDay ? "" : next.toLocaleDateString([], { weekday: "short" }) + " ") + next.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "no run scheduled";
+    n.append(h("span", "meta", `${when} · $${(row.week_cost || 0).toFixed(2)}/wk`));
+  } else n.append(h("span", "meta", meta));
+  n.title = `${name} · ${status}` + (row?.standing ? `\nstanding thread: woken by a schedule${row.next_run ? `, next ${new Date(row.next_run * 1000).toLocaleString()}` : ""}; $${(row.week_cost || 0).toFixed(2)} at API rates this week` : "");
   n.onmousedown = (e) => {
     if (e.button !== 0) return;
     if (SOLO) return;
@@ -2716,7 +2721,7 @@ async function renderSettings() {
       const box = h("div", "secrets");
       for (const sc of S.state.schedules || []) {
         const r = h("div", "row secret-row");
-        r.append(h("span", "mono", `${sc.time} · ${sc.days_text}`), h("span", null, sc.message));
+        r.append(h("span", "mono", `${sc.time} · ${sc.days_text}`), h("span", null, (sc.thread ? `🔁 ${sc.thread}: ` : "") + sc.message));
         if (!sc.confirmed) {
           const cb = h("button", "btn primary", "Confirm");
           cb.title = `Proposed by the ${sc.created_by}${sc.reason ? ": " + sc.reason : ""}`;
@@ -2724,7 +2729,7 @@ async function renderSettings() {
           r.append(h("span", "qchip you", "proposed: needs your OK"), cb);
         } else {
           const on = h("button", "btn", sc.enabled ? "Disable" : "Enable");
-          on.onclick = () => { if (sendIpc({ op: "schedule", action: "save", id: sc.id, time: sc.time, days: sc.days_text, message: sc.message, enabled: !sc.enabled })) setTimeout(() => loadState().then(renderSettings), 500); };
+          on.onclick = () => { if (sendIpc({ op: "schedule", action: "save", id: sc.id, time: sc.time, days: sc.days_text, message: sc.message, thread: sc.thread || "", enabled: !sc.enabled })) setTimeout(() => loadState().then(renderSettings), 500); };
           r.append(h("span", "qchip" + (sc.enabled ? "" : " st-void"), sc.enabled ? "on" : "off"), on);
         }
         if (sc.last_result) r.title = `last: ${sc.last_result} (${new Date(sc.last_at * 1000).toLocaleString()})`;
@@ -2738,13 +2743,16 @@ async function renderSettings() {
       const time = h("input"); time.type = "time"; time.value = "08:00";
       const days = h("select");
       for (const d of ["daily", "weekdays", "weekends", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]) { const o = h("option", null, d); o.value = d; days.append(o); }
-      const msg = h("input"); msg.placeholder = "message to the orchestrator, e.g. morning run"; msg.style.flex = "1";
+      const target = h("select");
+      target.title = "Who gets the message: the orchestrator, or a standing thread directly";
+      for (const [v, l] of [["", "→ orchestrator"], ...(S.state.threads || []).map((t) => [t.name, "→ 🔁 " + t.name])]) { const o = h("option", null, l); o.value = v; target.append(o); }
+      const msg = h("input"); msg.placeholder = "message, e.g. morning run"; msg.style.flex = "1";
       const b = h("button", "btn primary", "Add");
       b.onclick = () => {
         if (!msg.value.trim()) return toast("a message is required", true);
-        if (sendIpc({ op: "schedule", action: "save", id: "", time: time.value, days: days.value, message: msg.value.trim(), enabled: true })) { msg.value = ""; setTimeout(() => loadState().then(renderSettings), 500); }
+        if (sendIpc({ op: "schedule", action: "save", id: "", time: time.value, days: days.value, message: msg.value.trim(), thread: target.value, enabled: true })) { msg.value = ""; setTimeout(() => loadState().then(renderSettings), 500); }
       };
-      add.append(time, days, msg, b);
+      add.append(time, days, target, msg, b);
       box.append(add);
       setting("Schedules", "Scheduled routines", "Send the orchestrator a message at set times (your local time), e.g. 08:00 every day: <i>morning run</i>. The orchestrator can propose schedules; they only run once you confirm them here. A run is skipped, and the skip logged, if this workspace is paused, its budget is spent, or the previous run is still going. Runs need the app open or in the tray (see <b>Start at sign-in</b>). Missed times aren't caught up.", box);
     }

@@ -93,9 +93,9 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
         }
         "schedule" => {
             let enabled = msg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-            let (op, id, time, days, message) = (s("action"), s("id"), s("time"), s("days"), s("message"));
+            let (op, id, time, days, message, thread) = (s("action"), s("id"), s("time"), s("days"), s("message"), s("thread"));
             rt().spawn(async move {
-                if let Err(e) = app.schedule_user(&op, &id, &time, &days, &message, enabled) {
+                if let Err(e) = app.schedule_user(&op, &id, &time, &days, &message, &thread, enabled) {
                     app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
                 }
             });

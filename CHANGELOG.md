@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.5 (2026-11-28)
+
+- **Standing threads (business workspaces).** A schedule can now wake a named thread
+  directly instead of the orchestrator, for example `market-watch` every day at 06:00.
+  Pick the thread under **Settings → Schedules → send to**, or have the orchestrator
+  propose it with `propose_schedule(thread=...)`.
+- When a standing thread finishes a scheduled run, its report goes to the orchestrator.
+- Standing threads show 🔁 in the sidebar with their next run time and this week's usage.
+  The orchestrator can't resolve them, but you still can.
+
 ## 0.5.4 (2026-11-28)
 
 - **Scheduled routines (business workspaces).** In **Settings → Schedules**, have the app send

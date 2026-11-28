@@ -14,8 +14,10 @@ pub struct Schedule {
     pub time: String,
     /// Days it runs, 0 = Monday ... 6 = Sunday. Empty = every day.
     pub days: Vec<u8>,
-    /// What's sent to the orchestrator.
+    /// What's sent (to the orchestrator, or to `thread`).
     pub message: String,
+    /// A standing thread to wake directly ("" = the orchestrator).
+    pub thread: String,
     pub enabled: bool,
     /// The user confirmed it (schedules the orchestrator proposes start unconfirmed).
     pub confirmed: bool,
@@ -104,6 +106,23 @@ pub fn check(s: &Schedule, now: f64, window_s: f64, paused: bool, budget_spent: 
     Due::Run(key)
 }
 
+/// The next time (Unix seconds) a schedule is due after `now`, if it's on.
+pub fn next_run(s: &Schedule, now: f64) -> Option<f64> {
+    if !s.enabled || !s.confirmed {
+        return None;
+    }
+    let (h, m) = parse_time(&s.time)?;
+    let today = Local.timestamp_opt(now as i64, 0).single()?.date_naive();
+    (0..8).find_map(|d| {
+        let day = today + chrono::Duration::days(d);
+        if !s.days.is_empty() && !s.days.contains(&(day.weekday().num_days_from_monday() as u8)) {
+            return None;
+        }
+        let t = Local.from_local_datetime(&day.and_hms_opt(h, m, 0)?).earliest()?.timestamp() as f64;
+        (t > now).then_some(t)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +171,17 @@ mod tests {
         // 2026-11-25 is a Wednesday, 11-29 a Sunday.
         assert_eq!(check(&sunday, at(2026, 11, 25, 8, 0), 90.0, false, None, false), Due::NotDue);
         assert!(matches!(check(&sunday, at(2026, 11, 29, 8, 0), 90.0, false, None, false), Due::Run(_)));
+    }
+
+    #[test]
+    fn next_run_finds_the_next_matching_day() {
+        let mut s = morning();
+        assert_eq!(next_run(&s, at(2026, 11, 25, 7, 0)), Some(at(2026, 11, 25, 8, 0)));
+        assert_eq!(next_run(&s, at(2026, 11, 25, 9, 0)), Some(at(2026, 11, 26, 8, 0)));
+        s.days = parse_days("Mon").unwrap();
+        assert_eq!(next_run(&s, at(2026, 11, 25, 9, 0)), Some(at(2026, 11, 30, 8, 0)));
+        s.enabled = false;
+        assert_eq!(next_run(&s, at(2026, 11, 25, 9, 0)), None);
     }
 
     #[test]

@@ -147,7 +147,10 @@ workspaces are unaffected.
   message at set times, for example "08:00 every day: morning run". The orchestrator can
   propose schedules with `propose_schedule`, but they only run once you confirm them. A run
   is skipped (and the skip logged) when the workspace is paused, its budget is spent, or the
-  previous run is still going. Schedules run while the app is in the tray. To keep them
+  previous run is still going. A schedule can also wake a **standing thread** directly,
+  for example `market-watch` every day at 06:00. Its report then goes to the orchestrator.
+  Standing threads show 🔁, their next run and their usage this week in the sidebar, and
+  the orchestrator doesn't resolve them. Schedules run while the app is in the tray. To keep them
   going after a restart, tick **Settings → About → Start at sign-in**, which starts the app
   minimized when you sign in to Windows.
 - **Audit log.** `<workspace>/queue/audit.log` records every item queued, approved,
