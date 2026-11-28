@@ -796,7 +796,19 @@ function renderEventInner(ev, log) {
     }
     const e = h("div", "ev user" + (ev.sender === "orchestrator" ? " from-orch" : "") + (ev.imported ? " imported" : ""));
     if (ev.sender === "orchestrator" && !isOrch(ev.thread)) e.append(h("span", "who", "orchestrator →"));
-    if (ev.sender === "threads") { e.classList.add("from-orch"); e.append(h("span", "who", "from threads →")); }
+    if (ev.sender === "threads") {
+      // A thread's report: one calm line, the full text on click.
+      const first = (ev.text.split("\n").find((x) => x.trim()) || "").replace(/\s+/g, " ").trim();
+      const from = (ev.from || []).map((x) => x.replace(/^@/, "")).join(", ");
+      const c = h("div", "ev user setup thread-report");
+      c.append(h("span", "who", from ? "from " + from : "from threads"), h("span", "sum", first.length > 110 ? first.slice(0, 110) + "…" : first));
+      c.append(h("div", "body", ev.text));
+      c.onclick = () => c.classList.toggle("open");
+      c.title = "Click to read the whole report";
+      c.dataset.ts = String(ev.ts);
+      log.append(c);
+      return;
+    }
     if (ev.imported) e.append(h("span", "who", "from Claude Code"));
     if (ev.injected) {
       const tag = h("span", "who injected", "↪ mid-turn");
@@ -1343,7 +1355,8 @@ function renderQueuePane() {
   const q = S.state.queue;
   // Don't wipe a card the user is editing or rejecting.
   if ($(".qcard.editing", pane)) return;
-  if (!changed("queue", [q, S.state.workspace, S.state.project?.outbound_paused, S.state.project?.paused]) && $(".page", pane)) return;
+  if (!changed("queue", [q, S.state.workspace, S.state.project?.outbound_paused, S.state.project?.paused, S.state.needs, SW.active && SW.pane === "queue", SW.rev]) && $(".page", pane)) return;
+  if (SW.active && SW.pane === "queue" && q) { renderSweep(pane); return; }
   const keep = scrollState(pane);
   pane.textContent = "";
   const page = h("div", "page queue-page");
@@ -1376,6 +1389,8 @@ function renderQueuePane() {
     ctl.append(wb);
     page.append(ctl);
   }
+  const sweep = swButton("queue");
+  if (sweep) { const sb = h("div", "row qbar"); sb.append(sweep); page.append(sb); }
   const low = q.pending.filter((i) => i.risk === "low" && !i.manual && !(i.capacity && !i.capacity.ok));
   if (low.length > 1) {
     const b = h("button", "btn", `Approve all low-risk (${low.length})`);
@@ -1396,7 +1411,7 @@ function renderQueuePane() {
     for (const i of q.decided) {
       const r = h("div", "qrow");
       r.append(h("span", "qchip st-" + i.status, i.status + (i.edited ? " (edited)" : "")), h("span", "qid", i.id), h("span", "qsum", `${i.type} · ${i.summary}`));
-      if (i.void || i.status === "void") { const v = h("span", "qchip risk-high", "changed after approval"); v.title = "The payload or an attachment changed after you approved it, so it won't be executed."; r.insertBefore(v, r.children[1]); }
+      if (i.void || i.status === "void") { const v = h("span", "qchip risk-high", "changed after approval"); v.title = "The text or an attachment changed after you approved it, so it won't be executed."; r.insertBefore(v, r.children[1]); }
       const more = i.status === "rejected" ? i.note : i.status === "done" ? i.result : i.note;
       if (more) r.append(h("div", "qmore", more));
       r.title = `${i.id} · ${i.type} · line ${i.line || "-"}\nby ${i.created_by}`;
@@ -1431,8 +1446,8 @@ function manualTask(i) {
       box.append(row);
     });
   } else {
-    const copy = h("button", "btn", "Copy payload");
-    copy.onclick = async () => { if (await copyText(text)) { copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy payload"), 1200); } };
+    const copy = h("button", "btn", "Copy the text");
+    copy.onclick = async () => { if (await copyText(text)) { copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy the text"), 1200); } };
     box.append(copy);
   }
   const drop = h("div", "drop");
@@ -1570,7 +1585,7 @@ function ndDecision(v, acts, c) {
   const rec = v.recommend;
   const approve = h("button", "btn" + (rec === "approve" && !v.careful ? " primary" : ""), overCap ? "Approve anyway…" : "Approve");
   approve.onclick = () => {
-    if (overCap && !confirm(`This failed the capacity check:\n\n${q.capacity.note}\n\nApprove anyway?`)) return;
+    if (overCap && !confirm(`This might not fit in your usage:\n\n${q.capacity.note}\n\nApprove anyway?`)) return;
     if (v.careful && !confirm("You are approving exactly what is shown above. Go ahead?")) return;
     if (sendIpc({ op: "queue_decide", id: v.queue_item, action: "approve", force: !!overCap, hash: q.payload_hash })) $$("button", acts).forEach((b) => { b.disabled = true; });
   };
@@ -1792,6 +1807,176 @@ function renderNeedsPlayer(pane) {
   }
 }
 
+// ---- sweep (focus mode): one card at a time, full width, big buttons.
+// TL;DR first, then what I'd do, then the details under More. Same IPC paths as the cards.
+const SW = { active: false, pane: "needs", ids: [], skipped: new Set(), gone: new Set(), more: false, reject: false, rev: 0 };
+const SW_ASK = { approve: "approve it", reject: "reject it", edit: "edit it first", do: "do it", skip: "skip it" };
+const swView = (id) => { const v = ndFind(id); return v && v.status === "open" ? v : null; };
+const swLeft = () => SW.ids.filter((id) => !SW.gone.has(id) && !SW.skipped.has(id) && swView(id));
+function swRefresh() { SW.rev++; lastSig.needs = null; lastSig.queue = null; if (SW.pane === "queue") renderQueuePane(); else renderNeedsPane(true); }
+function swCandidates(pane) {
+  const open = (S.state.needs?.open || []).filter((v) => ndSameWs(v) && ndCan(v));
+  return pane === "queue" ? open.filter((v) => v.kind === "decision" || v.kind === "manual") : open;
+}
+function swStart(pane) {
+  const all = swCandidates(pane);
+  if (!all.length) return;
+  const pick = [];
+  let mins = 0;
+  for (const v of all) { if (pick.length && mins + (v.minutes || 2) > 10) break; pick.push(v.id); mins += v.minutes || 2; }
+  Object.assign(SW, { active: true, pane, ids: pick, skipped: new Set(), gone: new Set(), more: false, reject: false });
+  swRefresh();
+}
+function swStop() { SW.active = false; SW.reject = false; swRefresh(); }
+function swDid(v, ok) { if (ok) { SW.gone.add(v.id); SW.more = false; SW.reject = false; swRefresh(); } return ok; }
+function swSkip(v) { SW.skipped.add(v.id); SW.more = false; SW.reject = false; swRefresh(); }
+// What Enter does: the same checks as the click, and never on a careful item.
+function swEnter() {
+  const left = swLeft();
+  const v = left.length && swView(left[0]);
+  if (!v) return;
+  if (v.careful) return toast("This one needs a click. Read it first.", true);
+  const rec = v.recommend;
+  if (v.kind === "decision" && rec === "approve") return swApprove(v);
+  if (v.kind === "heads_up") return swDid(v, needIpc(v, { action: "done", id: v.id }));
+  if (rec === "skip") return swSkip(v);
+  toast("Nothing for Enter to do here. Click a button.", true);
+}
+function swApprove(v) {
+  const q = v.queue || {};
+  const overCap = q.capacity && !q.capacity.ok;
+  if (overCap && !confirm(`This might not fit in your usage:\n\n${q.capacity.note}\n\nApprove anyway?`)) return;
+  if (v.careful && !confirm("You are approving exactly what is shown. Go ahead?")) return;
+  swDid(v, sendIpc({ op: "queue_decide", id: v.queue_item, action: "approve", force: !!overCap, hash: q.payload_hash }));
+}
+
+function renderSweep(pane) {
+  const keep = scrollState(pane);
+  pane.textContent = "";
+  const page = h("div", "page nd-page");
+  const box = h("div", "nd-player nd-sweep");
+  page.append(box);
+  pane.append(page);
+  const left = swLeft();
+  const total = SW.ids.length;
+  const exit = h("button", "btn quiet", "Stop (Esc)");
+  exit.onclick = swStop;
+  if (!left.length) {
+    box.append(h("div", "nd-pdo", total ? "That's everything for now." : "Nothing to do."));
+    box.append(h("div", "nd-pexp", SW.skipped.size ? `The ${SW.skipped.size} you skipped ${SW.skipped.size === 1 ? "is" : "are"} still in the list.` : "Take a break."));
+    const nav = h("div", "nd-pnav");
+    const b = h("button", "btn primary", "Back to the list");
+    b.onclick = swStop;
+    nav.append(b);
+    box.append(nav);
+    return;
+  }
+  const v = swView(left[0]);
+  const mins = left.reduce((a, id) => a + (swView(id)?.minutes || 2), 0);
+  const top = h("div", "nd-sweephead");
+  top.append(h("span", "nd-pstep", `${total - left.length + 1} of ${total} · about ${mins} min left`), h("span", "sp"), exit);
+  box.append(top);
+  const bar = h("div", "nd-bar");
+  const fill = h("i");
+  fill.style.width = ((total - left.length) / total) * 100 + "%";
+  bar.append(fill);
+  box.append(bar);
+  box.dataset.anchor = v.id;
+  box.append(ndChips(v, false));
+  box.append(h("div", "nd-pdo", v.tldr || v.title));
+  const q = v.queue || {};
+  if (v.careful) box.append(h("div", "nd-stuck", "Check this one carefully. Read it below, then click."));
+  if (v.recommend && v.kind !== "question") {
+    const r = h("div", "nd-pexp");
+    r.append(document.createTextNode("I'd suggest: "), h("b", null, SW_ASK[v.recommend] || v.recommend));
+    box.append(r);
+  }
+  if (v.why) box.append(h("div", "nd-pstep", v.why));
+  if (q.capacity) box.append(h("div", "nd-pstep", (q.capacity.ok ? "✓ " : "✗ ") + q.capacity.note));
+  if ((v.careful || SW.more) && q.payload) box.append(h("pre", "qpayload", q.payload));
+  if (SW.more) {
+    const parts = [v.details, v.steps].filter(Boolean);
+    if (parts.length) box.append(h("div", "nd-more", parts.join("\n\n")));
+  }
+  const nav = h("div", "nd-pnav");
+  const doneBtn = (label, msg, cls = "btn primary") => { const b = h("button", cls, label); b.onclick = () => { b.disabled = true; swDid(v, needIpc(v, msg)); }; return b; };
+  if (v.kind === "question") {
+    const qs = Array.isArray(v.questions) ? v.questions : [];
+    const one = qs.length === 1 && !qs[0].multi_select ? qs[0] : null;
+    if (one) {
+      box.append(h("div", "nd-pstep", one.question || ""));
+      for (const o of one.options || []) {
+        const b = h("button", "btn", o.label);
+        if (o.description) b.title = o.description;
+        b.onclick = () => { b.disabled = true; swDid(v, needIpc(v, { action: "answer", id: v.id, answers: [{ selected: [o.label], other: "" }] })); };
+        nav.append(b);
+      }
+    } else {
+      const wrap = h("div", "ndcard");
+      wrap.append(ndQuestion(v));
+      box.append(wrap);
+    }
+  } else if (v.kind === "decision") {
+    const overCap = q.capacity && !q.capacity.ok;
+    const ap = h("button", "btn" + (v.recommend === "approve" && !v.careful ? " primary" : ""), overCap ? "Approve anyway…" : "Approve");
+    ap.onclick = () => swApprove(v);
+    const rj = h("button", "btn" + (v.recommend === "reject" ? " primary" : " danger"), "Reject…");
+    rj.onclick = () => { SW.reject = true; swRefresh(); };
+    const ed = h("button", "btn", "Edit…");
+    ed.title = "Edit it in the Queue";
+    ed.onclick = () => { SW.active = false; openQueue(); };
+    nav.append(ap, rj, ed);
+  } else if (v.kind === "manual") {
+    nav.append(doneBtn("I did it", { action: "done", id: v.id }));
+  } else if (v.kind === "action") {
+    if (v.plan) {
+      const n = ndSteps(v).length;
+      const b = h("button", "btn primary", v.step > 0 ? `Continue at step ${Math.min(v.step, n - 1) + 1} of ${n}` : `Start · ${n} step${n === 1 ? "" : "s"}`);
+      b.onclick = () => { SW.active = false; openNeeds(); ndStart(v); };
+      nav.append(b);
+    } else if (v.link) {
+      const lb = h("button", "btn", "Open");
+      lb.onclick = () => (/^https?:/i.test(v.link) ? openUrl(v.link) : openPath(v.link, "default"));
+      nav.append(lb);
+    }
+    nav.append(doneBtn("I did it", { action: "done", id: v.id }, v.plan ? "btn" : "btn primary"));
+  } else if (v.kind === "heads_up") {
+    nav.append(doneBtn("Got it", { action: "done", id: v.id }));
+  }
+  if (nav.children.length) box.append(nav);
+  if (SW.reject && v.kind === "decision") {
+    const m = h("div", "nd-menu");
+    const inp = h("input", "nd-in");
+    inp.placeholder = "Why? (one line: how the agents learn your taste)";
+    const ok = h("button", "btn danger", "Reject");
+    const go = () => {
+      if (!inp.value.trim()) { inp.focus(); return toast("Add a short reason", true); }
+      swDid(v, sendIpc({ op: "queue_decide", id: v.queue_item, action: "reject", reason: inp.value.trim() }));
+    };
+    ok.onclick = go;
+    inp.onkeydown = (e) => { if (e.key === "Enter") go(); if (e.key === "Escape") { e.stopPropagation(); SW.reject = false; swRefresh(); } };
+    m.append(inp, ok);
+    box.append(m);
+    setTimeout(() => inp.focus());
+  }
+  const sec = h("div", "nd-pnav");
+  const sk = h("button", "btn", "Skip for now");
+  sk.onclick = () => swSkip(v);
+  const mb = h("button", "btn quiet", SW.more ? "Less" : "More");
+  mb.onclick = () => { SW.more = !SW.more; swRefresh(); };
+  sec.append(sk, mb);
+  box.append(sec);
+  if (!v.careful && v.kind === "decision" && v.recommend === "approve") box.append(h("div", "sub", "Enter approves it."));
+  restoreScroll(pane, keep);
+}
+function swButton(pane) {
+  if (!swCandidates(pane).length) return null;
+  const b = h("button", "btn primary nd-sweepgo", "▶ Start a 10-min sweep");
+  b.title = "One card at a time. Esc stops.";
+  b.onclick = () => swStart(pane);
+  return b;
+}
+
 // ---- the tab
 function ndGroups() {
   if (ND.all && S.state.needs_all) return S.state.needs_all.workspaces.filter((w) => w.count || w.current);
@@ -1806,7 +1991,8 @@ function renderNeedsPane(force) {
   const act = document.activeElement;
   // Don't wipe an answer or note the user is typing.
   if (!force && act && pane.contains(act) && /^(INPUT|TEXTAREA)$/.test(act.tagName) && act.value) return;
-  if (!changed("needs", [n, S.state.needs_all, ND.all, ND.later, ND.done, [...ND.more], ND.menu, ND.dismiss, ND.reject, ND.player, S.state.workspace]) && $(".page", pane)) return;
+  if (!changed("needs", [n, S.state.needs_all, ND.all, ND.later, ND.done, [...ND.more], ND.menu, ND.dismiss, ND.reject, ND.player, S.state.workspace, SW.active && SW.pane === "needs", SW.rev]) && $(".page", pane)) return;
+  if (SW.active && SW.pane === "needs") { renderSweep(pane); return; }
   const keep = scrollState(pane);
   if (ND.player) { renderNeedsPlayer(pane); restoreScroll(pane, keep); return; }
   pane.textContent = "";
@@ -1815,6 +2001,8 @@ function renderNeedsPane(force) {
   if (!n) { page.append(h("div", "sub", "Loading…")); pane.append(page); return; }
   const tot = ND.all && S.state.needs_all ? S.state.needs_all : n;
   page.append(h("div", "nd-total", tot.count ? `${tot.count} waiting · about ${tot.minutes || 0} min in all` : "Nothing is waiting for you. Nice."));
+  const sweep = swButton("needs");
+  if (sweep) { const sr = h("div", "nd-tools"); sr.append(sweep); page.append(sr); }
   const multi = (S.state.needs_all?.workspaces || []).length > 1;
   if (multi) {
     const tools = h("div", "nd-tools");
@@ -2013,14 +2201,14 @@ function queueCard(i) {
   c.append(head, h("div", "qsummary", i.summary), h("div", "qmeta", `${i.id} · from ${i.created_by} · ${relTime(i.created_at) === "now" ? "just now" : relTime(i.created_at) + " ago"}`));
   if (i.capacity) {
     const cap = h("div", "qcap " + (i.capacity.ok ? "ok" : "bad"));
-    cap.textContent = (i.capacity.ok ? "✓ Capacity: " : "✗ Capacity check failed: ") + i.capacity.note + (i.order_id ? ` (order ${i.order_id})` : "");
+    cap.textContent = (i.capacity.ok ? "✓ Fits your usage: " : "✗ Might not fit your usage: ") + i.capacity.note + (i.order_id ? ` (order ${i.order_id})` : "");
     c.append(cap);
   }
   const pre = h("pre", "qpayload", i.payload);
   c.append(pre);
   if (i.manual) c.append(manualTask(i));
   if (i.command) {
-    c.append(h("div", "qmeta", `runs with run_approved${i.secrets?.length ? ` · gets secrets: ${i.secrets.join(", ")}` : ""}`), h("pre", "qpayload qcmd", i.command));
+    c.append(h("div", "qmeta", `runs once you approve${i.secrets?.length ? ` · uses your saved secrets: ${i.secrets.join(", ")}` : ""}`), h("pre", "qpayload qcmd", i.command));
   }
   if (i.attachments?.length) {
     const g = h("div", "qatt");
@@ -2049,7 +2237,7 @@ function queueCard(i) {
   const overCap = i.capacity && !i.capacity.ok;
   if (overCap) { approve.textContent = "Approve anyway…"; approve.className = "btn danger"; }
   approve.onclick = () => {
-    if (overCap && !confirm(`${i.id} failed the capacity check:\n\n${i.capacity.note}\n\nTaking it risks a late delivery. Approve anyway?`)) return;
+    if (overCap && !confirm(`${i.id} might not fit in your usage:\n\n${i.capacity.note}\n\nTaking it risks a late delivery. Approve anyway?`)) return;
     if (sendIpc({ op: "queue_decide", id: i.id, action: "approve", force: overCap, hash: i.payload_hash })) busy(approve);
   };
   edit.onclick = () => {
@@ -2062,7 +2250,7 @@ function queueCard(i) {
     const ok = h("button", "btn primary", "Approve edited");
     const cancel = h("button", "btn", "Cancel");
     ok.onclick = () => {
-      if (overCap && !confirm(`${i.id} failed the capacity check:\n\n${i.capacity.note}\n\nApprove the edited item anyway?`)) return;
+      if (overCap && !confirm(`${i.id} might not fit in your usage:\n\n${i.capacity.note}\n\nApprove the edited item anyway?`)) return;
       if (sendIpc({ op: "queue_decide", id: i.id, action: "edit_approve", payload: ta.value, force: overCap })) { c.classList.remove("editing"); busy(ok); }
     };
     cancel.onclick = () => { c.classList.remove("editing"); lastSig.queue = null; renderQueuePane(); };
@@ -2673,6 +2861,87 @@ function renderChips() {
   c.append(keys);
 }
 
+// ---------------------------------------------------------------- quieter chat: filter + search
+const CHAT_FILTERS = [["all", "All"], ["needs", "Needs you"], ["me", "Messages to me"]];
+let chatFilter = localStorage.getItem("chatFilter") || "all";
+function applyChatFilter() {
+  const log = $("#log");
+  log.classList.toggle("f-needs", chatFilter === "needs");
+  log.classList.toggle("f-me", chatFilter === "me");
+  for (const b of $$("#chatbar .cf")) b.classList.toggle("on", b.dataset.f === chatFilter);
+}
+async function jumpToChat(key, ts) {
+  await openChat(key);
+  // The log may still be loading; try for a moment.
+  for (let i = 0; i < 20; i++) {
+    const nodes = $$("#log [data-ts]");
+    const t = nodes.find((x) => +x.dataset.ts >= ts - 1e-6);
+    if (t) { chatFilter = "all"; localStorage.setItem("chatFilter", "all"); applyChatFilter(); t.scrollIntoView({ block: "center" }); t.classList.add("flash"); setTimeout(() => t.classList.remove("flash"), 2000); return; }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+function initChatBar() {
+  const bar = $("#chatbar");
+  if (!bar) return;
+  for (const [f, l] of CHAT_FILTERS) {
+    const b = h("button", "cf", l);
+    b.dataset.f = f;
+    b.onclick = () => { chatFilter = f; localStorage.setItem("chatFilter", f); applyChatFilter(); scrollEnd(true); };
+    bar.append(b);
+  }
+  bar.append(h("span", "sp"));
+  const inp = h("input", "cs");
+  inp.placeholder = "Search this workspace's chat…";
+  inp.spellcheck = false;
+  const res = h("div", "cs-res hidden");
+  bar.append(inp, res);
+  let timer = null, gen = 0;
+  const run = async () => {
+    const q = inp.value.trim();
+    res.textContent = "";
+    if (q.length < 2) return res.classList.add("hidden");
+    const my = ++gen;
+    let data;
+    try { data = await api("/api/search?q=" + encodeURIComponent(q) + "&limit=30"); } catch (e) { return fail(e); }
+    if (my !== gen) return;
+    res.classList.remove("hidden");
+    if (!data.hits.length) res.append(h("div", "sub", "Nothing found."));
+    for (const x of data.hits) {
+      const r = h("div", "cs-hit");
+      r.append(h("span", "qchip", x.thread), h("span", "sn", x.snippet), h("span", "sub", relTime(x.ts) === "now" ? "just now" : relTime(x.ts) + " ago"));
+      r.onclick = () => { res.classList.add("hidden"); jumpToChat(x.key, x.ts); };
+      res.append(r);
+    }
+    if (data.truncated) res.append(h("div", "sub", "There are more. Try a longer search."));
+  };
+  inp.oninput = () => { clearTimeout(timer); timer = setTimeout(run, 300); };
+  inp.onkeydown = (e) => { if (e.key === "Escape") { inp.value = ""; res.classList.add("hidden"); inp.blur(); } if (e.key === "Enter") { clearTimeout(timer); run(); } };
+  document.addEventListener("mousedown", (e) => { if (!bar.contains(e.target)) res.classList.add("hidden"); });
+  applyChatFilter();
+}
+
+// ---------------------------------------------------------------- busy mode
+function busyPopover(anchor) {
+  const pop = $("#mixpop");
+  if (!pop.classList.contains("hidden") && pop.dataset.kind === "busy") { pop.classList.add("hidden"); return; }
+  pop.dataset.kind = "busy";
+  pop.textContent = "";
+  pop.append(h("div", "mix-title", "I'm busy"), h("div", "mix-sub", "Holds every notification except an order about to miss its deadline. You get one summary when it ends."));
+  const row = h("div", "row");
+  for (const [l, m] of [["1 hour", 60], ["2 hours", 120], ["Until I turn it off", 0]]) {
+    const b = h("button", "btn", l);
+    b.onclick = () => { pop.classList.add("hidden"); sendIpc({ op: "busy_set", on: true, minutes: m }); };
+    row.append(b);
+  }
+  pop.append(row);
+  pop.classList.remove("hidden");
+  const a = anchor.getBoundingClientRect();
+  const w = 340;
+  pop.style.left = Math.max(8, Math.min(innerWidth - w - 8, a.left)) + "px";
+  pop.style.top = "";
+  pop.style.bottom = (innerHeight - a.top + 6) + "px";
+}
+
 function renderStatus() {
   const s = $("#status");
   s.textContent = "";
@@ -2724,6 +2993,20 @@ function renderStatus() {
     else item(pj.outbound_paused ? "pu-full" : "", pj.outbound_paused ? "⏸ outbound paused" : "⏸ pause outbound",
       () => sendIpc({ op: "set_outbound_paused", paused: !pj.outbound_paused }),
       pj.outbound_paused ? "Kill switch is on: agents get no approved items. Click to resume." : "Kill switch: stop agents from executing or sending anything until you resume");
+  }
+  {
+    const bz = S.state.busy_mode;
+    if (bz?.on) {
+      const until = bz.until ? ` until ${new Date(bz.until * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
+      item("pu-warn", `🔕 busy${esc(until)}${bz.held ? ` · ${bz.held} held` : ""}`, () => sendIpc({ op: "busy_set", on: false }), "Busy mode is on: notifications are held (except an order about to miss its deadline). Click to turn it off and get one summary.");
+    } else {
+      const b = item("", "🔕 busy?", null, "Hold notifications while you focus");
+      b.onclick = () => busyPopover(b);
+    }
+    if (pj.kind === "business" && pj.held) {
+      const nx = pj.next_digest ? ` · next ${new Date(pj.next_digest * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : "";
+      item("", `⏳ ${pj.held} held${esc(nx)}`, () => openSettings(), "Notifications waiting for the next summary. Change the times in Settings.");
+    }
   }
   item(S.state.permission === "bypassPermissions" ? "perm-open" : "", `🛡 ${esc(permLabel(S.state.permission))}`, () => pickPermission(orchKey()), "Permission level for this project");
   const mixItem = item("", `⚖ <span class="mono">${esc(mixLabel(u.mix))}</span>`, null, "Plan/API mix for this project");
@@ -3488,7 +3771,7 @@ async function renderSettings() {
       const row2 = h("div", "row");
       row2.append(lab("Paid orders may finish on the API when the plan runs out", fb), lab("cap", capv), b);
       const box = h("div"); box.append(row, row2);
-      setting("Usage", "Usage gates (this workspace runs on your plan)", `Keeps paid work deliverable. At the first two percentages only <code>priority: "paid-order"</code> threads start; at the third, running non-paid threads are asked to checkpoint and stop. Offers, accepted orders and new gigs carry an app-made capacity check: reserved orders plus the new one must fit in the share of weekly usage projected to be left before its deadline, or the card shows it in red and needs a second click. The API fallback (needs an API key) only ever applies to paid-order threads, up to the cap per order.`, box);
+      setting("Usage", "Usage gates (this workspace runs on your plan)", `Keeps paid work deliverable. At the first two percentages only <code>priority: "paid-order"</code> threads start; at the third, running non-paid threads are asked to checkpoint and stop. Offers, accepted orders and new gigs get a usage check: the orders you already took plus the new one must fit in the share of your weekly usage that should be left before its deadline. If not, the card says so in red and needs a second click. The API fallback (needs an API key) only ever applies to paid-order threads, up to the cap per order.`, box);
     }
     {
       const pj = S.state.project;
@@ -3510,6 +3793,27 @@ async function renderSettings() {
       test.onclick = () => sendIpc({ op: "notify_test" });
       row.append(phone, save, test);
       box.append(row);
+      // Summaries: non-urgent notifications wait and arrive together at these times.
+      const times = Array.isArray(pj.digest_times) ? pj.digest_times : ["09:00", "13:00", "19:00"];
+      const drow = h("div", "row");
+      drow.append(h("span", "sub", "Send a summary at:"));
+      const tin = [0, 1, 2].map((i) => { const t = h("input"); t.type = "time"; t.value = times[i] || ""; return t; });
+      const dsave = h("button", "btn primary", "Save times");
+      dsave.onclick = () => { if (sendIpc({ op: "set_digests", times: tin.map((t) => t.value).filter(Boolean) })) setTimeout(loadState, 500); };
+      const doff = h("button", "btn", "No summaries");
+      doff.title = "Send everything straight away";
+      doff.onclick = () => { if (sendIpc({ op: "set_digests", times: [] })) { tin.forEach((t) => { t.value = ""; }); setTimeout(loadState, 500); } };
+      drow.append(...tin, dsave, doff);
+      box.append(drow);
+      box.append(h("div", "sub", times.length ? "Urgent things (a late order, an urgent approval, a usage stop) still arrive right away." : "Summaries are off: every notification arrives right away."));
+      if (pj.held) {
+        const hrow = h("div", "row");
+        const now = h("button", "btn", `Send the ${pj.held} held now`);
+        now.onclick = () => { if (sendIpc({ op: "digest_now" })) { now.disabled = true; setTimeout(loadState, 500); } };
+        hrow.append(now);
+        box.append(hrow);
+        for (const x of pj.held_items || []) box.append(h("div", "sub", `• ${x.title}${x.body ? " — " + x.body : ""}`));
+      }
       setting("Notifications", "Notifications", "Windows notifications for the events you tick, and optionally a push to your phone through <a href='https://ntfy.sh' target='_blank' rel='noopener'>ntfy.sh</a> or your own Telegram bot (add its topic or token under Secrets below, approved-actions-only scope is fine). Only a one-line summary is sent, with secrets redacted, never an item's payload.", box);
     }
     {
@@ -3535,7 +3839,7 @@ async function renderSettings() {
         if (ph.pending) {
           const r = h("div", "qbanner");
           r.textContent = `Check that your phone shows this fingerprint: ${ph.pending.fingerprint}  (${ph.pending.name}, device ${ph.pending.device})`;
-          const ok = h("button", "btn primary", "It matches: enrol");
+          const ok = h("button", "btn primary", "It matches: add phone");
           ok.onclick = () => { if (sendIpc({ op: "phone_enroll_confirm", device: ph.pending.device, fingerprint: ph.pending.fingerprint })) setTimeout(() => loadState().then(renderSettings), 500); };
           const no = h("button", "btn", "Cancel");
           no.onclick = () => { sendIpc({ op: "phone_enroll_cancel" }); setTimeout(() => loadState().then(renderSettings), 400); };
@@ -3554,7 +3858,7 @@ async function renderSettings() {
         cb2.onchange = () => { if (sendIpc({ op: "set_phone_decide", on: cb2.checked })) setTimeout(loadState, 500); else cb2.checked = !cb2.checked; };
         lab.append(cb2, document.createTextNode("Allow approve / reject from paired phones in this workspace (each decision signed with Face ID)"));
         box.append(lab);
-        setting("Phone", "Paired phones", "A phone can only approve or reject when it signs the decision with a key you enrolled here: Orchestrator checks the signature, the item's current hash, the time and a one-time nonce. The local API token alone can never decide (agents have it). Enrol by pasting the bundle your phone shows and checking the fingerprint matches.", box);
+        setting("Phone", "Paired phones", "A phone can only approve or reject when it signs the decision with a key you paired here: Orchestrator checks that it is really your phone, that it is the same item you saw, and that the answer is fresh. Agents can never approve things themselves. Add a phone by pasting the code it shows, then check the fingerprint matches.", box);
       }
       setting("Phone", "Phone access (Atlas Business tab)", "Off by default. When on, the Atlas companion on this PC can read a <b>read-only</b> feed of this workspace over the local API: pending items with their exact payloads, today's deadlines and usage, money totals, schedules, attachment thumbnails, and live events. Nothing can be approved or changed through it.", lab);
     }
@@ -3753,6 +4057,7 @@ function wire() {
   }, true);
   wireSplit();
   $("#side-new").onclick = () => newThread("");
+  initChatBar();
   $("#side-collapse").onclick = toggleSide;
   for (const a of $$(".act")) a.onclick = () => {
     const act = a.dataset.act;
@@ -3776,6 +4081,10 @@ function wire() {
     const k = e.key.toLowerCase();
     if (e.key === "Escape" && !$("#dlg-bg").classList.contains("hidden")) return closeDialog();
     if (e.key === "Escape" && !$("#lightbox").classList.contains("hidden")) return $("#lightbox").classList.add("hidden");
+    if (SW.active && cur()?.type === SW.pane) {
+      if (e.key === "Escape") { e.preventDefault(); return swStop(); }
+      if (e.key === "Enter" && !ctrl && !/^(INPUT|TEXTAREA|BUTTON|SELECT)$/.test(document.activeElement?.tagName || "")) { e.preventDefault(); return swEnter(); }
+    }
     // 1-9 picks an option on a single open question when the composer is empty
     if (/^[1-9]$/.test(e.key) && !ctrl && document.activeElement?.id === "input" && !$("#input").value) {
       const open = $$(".ev.question:not(.done)");
