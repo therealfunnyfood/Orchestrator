@@ -31,9 +31,11 @@ impl Hub {
         self.dir.join(format!("{key}.jsonl"))
     }
 
-    /// Record an event in a thread's transcript and send it to live windows.
-    pub fn emit(&self, key: &str, mut event: Value) {
-        event["ts"] = json!(now());
+    /// Record an event in a thread's transcript and send it to live windows. Returns its
+    /// time stamp (the chat anchor for "Jump to chat").
+    pub fn emit(&self, key: &str, mut event: Value) -> f64 {
+        let ts = now();
+        event["ts"] = json!(ts);
         event["thread"] = json!(key);
         // Secret values never reach a transcript or the window.
         let line = crate::vault::redact(&event.to_string());
@@ -41,6 +43,7 @@ impl Hub {
             let _ = writeln!(f, "{line}");
         }
         let _ = self.tx.send(line);
+        ts
     }
 
     /// Send a transient event (not saved): state changes, streaming text.

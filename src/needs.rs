@@ -179,8 +179,9 @@ pub struct View {
     /// action / manual: the step-by-step plan and the step the user is on.
     pub plan: Option<Plan>,
     pub step: usize,
-    /// decision / manual: the queue item.
+    /// decision / manual: the queue item id, and the item as the Queue tab shows it.
     pub queue_item: String,
+    pub queue: Value,
     /// High risk, spending or a failed capacity check: never a one-key approve.
     pub careful: bool,
     pub pin: i8,

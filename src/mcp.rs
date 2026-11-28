@@ -62,6 +62,49 @@ decide something now (say exactly what): the orchestrator is then made to tell t
             }, "required": ["message"]},
         },
         {
+            "name": "request_user_action",
+            "description": "Put a task the user must do by hand (create an account, install something, sign in, a manual \
+upload) on their 📌 Needs you list, as precise steps they follow one at a time. Never put such a task in chat text. \
+Each step: do (one exact action) and expect (what they should see after it); add copy (text for a copy button), url \
+(an open button) or user_types_this (what they type themselves, e.g. a password). At most 12 steps: split longer \
+tasks. You're told when they finish, get stuck (with their note) or dismiss it.",
+            "inputSchema": {"type": "object", "properties": {
+                "goal": {"type": "string", "description": "what this achieves, e.g. 'Create the itch.io account'"},
+                "tldr": {"type": "string", "description": "one plain line: what the user does"},
+                "why": {"type": "string", "description": "one line: what it unlocks"},
+                "recommend": {"type": "string", "enum": ["do", "skip"], "description": "default do"},
+                "minutes": {"type": "number", "description": "minutes of the user's time"},
+                "priority": {"type": "string", "enum": ["urgent", "today", "week", "whenever"]},
+                "before_you_start": {"type": "string", "description": "what they need ready (a card, a code, a file)"},
+                "steps": {"type": "array", "maxItems": 12, "items": {"type": "object", "properties": {
+                    "do": {"type": "string"}, "expect": {"type": "string"}, "copy": {"type": "string"},
+                    "url": {"type": "string"}, "user_types_this": {"type": "string"},
+                }, "required": ["do", "expect"]}},
+                "done_when": {"type": "string", "description": "how they can tell it worked (asked on the finish screen)"},
+                "if_stuck": {"type": "string", "description": "what to try if a step doesn't look right"},
+                "link": {"type": "string", "description": "optional URL or workspace file with more detail"},
+            }, "required": ["goal", "tldr", "why", "steps", "done_when"]},
+        },
+        {
+            "name": "list_needs_you",
+            "description": "What's on the user's 📌 Needs you list in this workspace: open questions (including timed-out \
+ones and the default you went ahead with), decisions waiting in the queue, manual tasks, action steps and heads-ups, \
+with Today's picks, snoozed entries and what was done or dismissed today (with notes). Check it before asking the user \
+anything, so you never ask twice. Orchestrator only: today=[up to 3 ids] sets your picks for Today (the user's pins \
+come first).",
+            "inputSchema": {"type": "object", "properties": {
+                "today": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
+            }},
+        },
+        {
+            "name": "dismiss_need",
+            "description": "Close one of your own Needs you entries (a question, action step or heads-up) that's no longer \
+needed. The reason is shown to the user. Queue items can't be dismissed: only the user decides them.",
+            "inputSchema": {"type": "object", "properties": {
+                "id": {"type": "string"}, "reason": {"type": "string", "description": "one line, shown to the user"},
+            }, "required": ["id", "reason"]},
+        },
+        {
             "name": "show_media",
             "description": "Show the user a file inline in their chat: an image (png, jpg, gif, webp, svg), video \
 (mp4, webm), audio (mp3, wav, ogg) or PDF. Use it for screenshots, charts, generated images, recordings or \
@@ -91,13 +134,25 @@ fn queue_tools() -> Value {
                 "risk": {"type": "string", "enum": ["low", "medium", "high"]},
                 "who_executes": {"type": "string", "enum": ["agent", "user"], "description": "user = no API, the user does it by hand"},
                 "urgent": {"type": "boolean"},
+                "tldr": {"type": "string", "description": "one plain line the user decides from (part of what's approved)"},
+                "recommend": {"type": "string", "enum": ["approve", "reject", "edit"], "description": "your one suggestion"},
+                "why": {"type": "string", "description": "one line: why you suggest it (the numbers behind it)"},
+                "minutes": {"type": "number", "description": "minutes of the user's time it takes"},
+                "goal": {"type": "string", "description": "who_executes user: what doing it achieves (default: summary)"},
+                "before_you_start": {"type": "string"},
+                "steps": {"type": "array", "maxItems": 12, "description": "who_executes user (required): precise steps, as in request_user_action", "items": {"type": "object", "properties": {
+                    "do": {"type": "string"}, "expect": {"type": "string"}, "copy": {"type": "string"},
+                    "url": {"type": "string"}, "user_types_this": {"type": "string"},
+                }, "required": ["do", "expect"]}},
+                "done_when": {"type": "string", "description": "who_executes user (required): how they can tell it worked"},
+                "if_stuck": {"type": "string"},
                 "attachments": {"type": "array", "items": {"type": "string"}, "description": "files the user should see (images, PDFs...); part of what's approved"},
                 "command": {"type": "string", "description": "optional PowerShell command that run_approved will run after approval (e.g. python tools/pinterest.py post ...); part of what's approved"},
                 "secrets": {"type": "array", "items": {"type": "string"}, "description": "names of vault secrets the command needs; they're set as environment variables ($env:NAME) only for that run. Never put a secret's value anywhere."},
                 "order_id": {"type": "string", "description": "send_offer, accept_order and publish_gig: the order it commits to"},
                 "est_units": {"type": "number", "description": "send_offer, accept_order and publish_gig: weekly plan points the order will use (see usage_status)"},
                 "deadline": {"type": "string", "description": "send_offer, accept_order and publish_gig: delivery deadline, YYYY-MM-DD HH:MM local time"},
-            }, "required": ["type", "summary", "payload", "risk"]},
+            }, "required": ["type", "summary", "payload", "risk", "tldr", "recommend", "why"]},
         },
         {
             "name": "list_approved",
@@ -253,8 +308,15 @@ the actual times, and your recent estimates. Use it to give realistic timelines.
             "name": "tell_user",
             "description": "Show the user a message in the chat, right now. Use it to reply to them, give status, \
 and tell them what you're about to wait for. It's the sure way they hear from you: your thinking and tool \
-calls are invisible to them, so a reply you only think doesn't reach them.",
-            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+calls are invisible to them, so a reply you only think doesn't reach them. important=true also puts it on their \
+📌 Needs you list as a heads-up (for things they must not miss; give tldr and why).",
+            "inputSchema": {"type": "object", "properties": {
+                "text": {"type": "string"},
+                "important": {"type": "boolean"},
+                "tldr": {"type": "string", "description": "important: one plain line for the list"},
+                "why": {"type": "string"},
+                "priority": {"type": "string", "enum": ["urgent", "today", "week", "whenever"]},
+            }, "required": ["text"]},
         },
         {
             "name": "wait_for_threads",
@@ -425,7 +487,7 @@ fn session_cwd(app: &App, key: &str) -> String {
     app.store.lock().unwrap().get(key).map(|t| t.cwd.clone()).unwrap_or_else(|| app.ws_of(key))
 }
 
-fn answer_text(questions: &Value, answers: &Value) -> String {
+pub(crate) fn answer_text(questions: &Value, answers: &Value) -> String {
     let qs = questions.as_array().cloned().unwrap_or_default();
     let ans = answers.as_array().cloned().unwrap_or_default();
     let mut out = vec![];
@@ -459,7 +521,7 @@ async fn approved_effort(app: &Arc<App>, key: &str, thread: &str, requested: Opt
             {"label": format!("No, use {cap}"), "description": "Keep usage down"},
         ],
     }]);
-    let answer = app.ask_user(key, questions).await?;
+    let answer = app.ask_user_with(key, questions, json!({"effort": e})).await?;
     let yes = answer.pointer("/0/selected").and_then(Value::as_array)
         .is_some_and(|s| s.iter().any(|v| v.as_str().is_some_and(|t| t.starts_with("Yes"))));
     Ok(Some(if yes { e.to_string() } else { cap }))
@@ -748,9 +810,19 @@ Each thread's messages and final report start your next turn.".into());
         }
         "tell_user" => {
             let t = arg(args, "text").filter(|t| !t.trim().is_empty()).ok_or("text is required")?;
-            app.tell_user(key, t);
+            let ts = app.tell_user(key, t);
+            if args.get("important").and_then(Value::as_bool).unwrap_or(false) {
+                let id = app.need_heads_up(key, t, args, ts);
+                return Ok(format!("shown to the user and added to Needs you as {id}"));
+            }
             Ok("shown to the user".into())
         }
+        "request_user_action" => app.need_action(key, args),
+        "list_needs_you" => {
+            let today = args.get("today").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect());
+            app.need_list(key, today)
+        }
+        "dismiss_need" => app.need_dismiss_agent(key, arg(args, "id").ok_or("id is required")?, arg(args, "reason").unwrap_or("")),
         "save_lessons" => {
             let own = app.ws_of(key);
             let ws = match arg(args, "project").map(str::trim).filter(|p| !p.is_empty()) {
@@ -885,7 +957,7 @@ pub async fn handle(app: &Arc<App>, key: &str, msg: &Value) -> Option<Value> {
                 }}));
             }
             let allowed = key.starts_with(ORCHESTRATOR)
-                || ["update_plan", "ask_user", "show_media", "message_orchestrator"].contains(&name)
+                || ["update_plan", "ask_user", "show_media", "message_orchestrator", "request_user_action", "list_needs_you", "dismiss_need"].contains(&name)
                 || QUEUE_TOOLS.contains(&name);
             let outcome = if allowed { call(app, key, name, &args).await } else { Err(format!("{name} is only available to the orchestrator")) };
             match outcome {
@@ -960,7 +1032,7 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide", "line_user"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user", "set_capacity_settings", "inbox_from_clipboard", "set_notify", "queue_user_done", "set_phone_feed", "phone_enroll", "phone_revoke", "set_phone_decide", "line_user", "need_user", "need_answer"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

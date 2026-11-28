@@ -17,8 +17,6 @@ mod events;
 mod inbox;
 mod lines;
 mod mcp;
-// "Needs you" data model; wired into the app in 0.6.6 (see HANDOFF.md).
-#[allow(dead_code)]
 mod needs;
 mod migrate;
 mod notify;
@@ -254,6 +252,15 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
                 }
             });
         }
+        // Needs you buttons: done, snooze, unsnooze, dismiss, pin, answer, step, stuck.
+        "need" => {
+            let (action, id, ws) = (s("action"), s("id"), s("ws"));
+            rt().spawn(async move {
+                if let Err(e) = app.need_user(&action, &id, Some(&ws), &msg) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
+        }
         "queue_approve_low_risk" => {
             let shown: Vec<(String, String)> = msg.get("items").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|x| {
                 Some((x.get("id")?.as_str()?.to_string(), x.get("hash")?.as_str()?.to_string()))
@@ -378,6 +385,7 @@ async fn start(desktop: bool, port: u16) -> (Arc<app::App>, String) {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             a.schedule_tick();
             a.business_tick();
+            a.needs_tick();
         }
     });
     // Update check: at startup, then twice a day.

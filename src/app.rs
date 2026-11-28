@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::{oneshot, watch, Notify};
 
+mod needs_app;
+
 pub const ORCHESTRATOR: &str = "orchestrator";
 
 const WORKER_APPEND: &str = "You are a worker thread managed by an orchestrator. Do the task you are \
@@ -42,7 +44,10 @@ You have tools from the `app` MCP server, shown to the user in their window:
 - ask_user: when a decision genuinely belongs to the user, ask multiple-choice questions and
   wait for the answer. Don't ask about things you can decide or look up yourself.
 - show_media: show the user an image, video, audio file or PDF (for example a screenshot or a
-  chart you made) by its path.";
+  chart you made) by its path.
+- request_user_action: a task the user must do by hand, as exact steps (never only in chat text).
+  Check list_needs_you before asking anything. If ask_user times out, go ahead with the
+  recommended option and say so in your summary.";
 
 /// Sender of a handoff request; when that turn ends, the session is replaced by a new
 /// one that starts from the handoff the agent wrote.
@@ -91,6 +96,10 @@ short waits (at most 5 minutes) when you'll act on the result right away.
 - Link threads when you mention them: [thread-name](thread:thread-name) opens it beside the chat.
 - Also: update_plan (a live task list they see), ask_user (multiple-choice, only for decisions that are
   genuinely theirs), show_media (images, video, audio, PDFs). Threads have these too.
+- Anything that needs the user goes on their 📌 Needs you list, never only in chat text: ask_user,
+  request_user_action (exact steps they do by hand), the queue, or tell_user with important=true. Give
+  each a tldr, one recommendation and a why. Check list_needs_you first so you never ask twice. If
+  ask_user times out, go ahead with the recommended option and say so.
 - Usage limits: the app restarts you and any stopped threads a minute after the limit resets, with a
   note to carry on, so "carry on when my usage comes back" needs nothing from the user.
 - Each message starts with the current time ([now: ...]); trust it over times in older messages.
@@ -249,7 +258,7 @@ impl App {
         let hub = Hub::new(paths.data_dir.join("transcripts"), paths.data_dir.join("media"));
         hub.mark_interrupted();
         let vault = crate::vault::Vault::load(paths.config_dir.join("vault.json"));
-        Arc::new(App {
+        let app = Arc::new(App {
             hub,
             paths,
             settings: RwLock::new(settings),
@@ -278,7 +287,10 @@ impl App {
             sessions_index: claude_projects::Index::new(),
             update: Mutex::new(None),
             vault,
-        })
+        });
+        app.needs_after_restart();
+        app.store.lock().unwrap().save();
+        app
     }
 
     pub fn settings(&self) -> Settings {
@@ -408,6 +420,7 @@ impl App {
             })
         };
         let queue = if self.is_business(&ws) { self.queue_json(&ws) } else { Value::Null };
+        let (needs, needs_all, needs_counts) = self.needs_push(queue.get("pending"));
         let phones = {
             let st = self.store.lock().unwrap();
             json!({"enrolled": st.phones, "pending": st.pending_phone})
@@ -418,11 +431,13 @@ impl App {
             vec![]
         };
         json!({
-            "workspace": ws, "recent_workspaces": recent, "open_workspaces": self.open_workspaces_json(), "orchestrator": self.orch_json(),
+            "workspace": ws, "recent_workspaces": recent, "open_workspaces": self.open_workspaces_json(&needs_counts), "orchestrator": self.orch_json(),
             "threads": threads, "running": running, "waiting": waiting,
             "project": project, "queue": queue, "secrets": secrets,
             "schedules": if self.is_business(&ws) { self.schedules_json(&ws) } else { json!([]) },
             "phones": phones,
+            "needs": needs,
+            "needs_all": needs_all,
             "spend": if self.is_business(&ws) { let (_, s) = self.budget(&ws); json!({"day": s.day, "week": s.week}) } else { Value::Null },
             "defaults": {
                 "thread_backend": s.thread_backend, "thread_model": s.thread_model,
@@ -439,7 +454,7 @@ impl App {
     }
 
     /// The workspace tabs, with what's happening in each.
-    fn open_workspaces_json(&self) -> Value {
+    fn open_workspaces_json(&self, needs: &[(String, usize, usize)]) -> Value {
         let (open, current, threads) = {
             let st = self.store.lock().unwrap();
             (st.open_workspaces.clone(), st.workspace.clone(), st.threads.clone())
@@ -450,7 +465,9 @@ impl App {
             let mine: Vec<&ThreadRow> = threads.iter().filter(|t| same_path(&t.workspace, w)).collect();
             let running = mine.iter().filter(|t| self.busy(&t.name)).count();
             let needs_input = questions.iter().any(|q| *q == key || mine.iter().any(|t| t.name == *q));
+            let (needs_count, needs_urgent) = needs.iter().find(|(p, ..)| same_path(p, w)).map(|(_, c, u)| (*c, *u)).unwrap_or((0, 0));
             json!({
+                "needs_count": needs_count, "needs_urgent": needs_urgent,
                 "path": w, "key": key, "current": same_path(w, &current),
                 "busy": self.busy(&key), "running_threads": running, "needs_input": needs_input,
                 "queue_pending": self.queue_pending(w),
@@ -1112,11 +1129,12 @@ Pick up where it left off. Check the current state before relying on anything ab
     }
 
     /// The orchestrator's tell_user: show `text` in its chat as its own words.
-    pub fn tell_user(&self, key: &str, text: &str) {
-        self.hub.emit(key, json!({"kind": "text", "text": text.trim(), "sub": false}));
+    pub fn tell_user(&self, key: &str, text: &str) -> f64 {
+        let ts = self.hub.emit(key, json!({"kind": "text", "text": text.trim(), "sub": false}));
         self.owes_reply.lock().unwrap().remove(key);
         self.last_text.lock().unwrap().insert(key.to_string(), now());
         self.touch();
+        ts
     }
 
     /// Seconds since the orchestrator last wrote the user any text in this turn, the
@@ -1478,9 +1496,9 @@ wait for. Then act on it."
                     self.finish_handoff(key, &r.text);
                 }
             }
-            Err(TurnError::Stopped) => self.hub.emit(key, json!({"kind": "notice", "text": "stopped"})),
+            Err(TurnError::Stopped) => { self.hub.emit(key, json!({"kind": "notice", "text": "stopped"})); }
             Err(TurnError::Failed(e)) => {
-                self.hub.emit(key, json!({"kind": "notice", "text": format!("failed: {e}"), "is_error": true}))
+                self.hub.emit(key, json!({"kind": "notice", "text": format!("failed: {e}"), "is_error": true}));
             }
         }
     }
@@ -1708,13 +1726,20 @@ wait for. Then act on it."
         let id = format!("q{}-{:04x}", (now() * 1000.0) as u64, rand::random::<u16>());
         let (tx, rx) = oneshot::channel();
         self.questions.lock().unwrap().insert(id.clone(), PendingQuestion { key: key.into(), tx });
-        let mut ev = json!({"kind": "question", "id": id, "questions": questions});
+        // Every question is a Needs you entry until it's answered (permission and effort
+        // prompts close when they expire; real questions stay, with their default).
+        let permission = extra.get("permission").is_some() || extra.get("effort").is_some();
+        let need_id = self.need_question(key, &id, &questions, permission, 0.0);
+        let mut ev = json!({"kind": "question", "id": id, "questions": questions, "need_id": need_id});
         if let Some(obj) = extra.as_object() {
             for (k, v) in obj {
                 ev[k] = v.clone();
             }
         }
-        self.hub.emit(key, ev);
+        let ts = self.hub.emit(key, ev);
+        if let Some(n) = self.store.lock().unwrap().needs.iter_mut().find(|n| n.id == need_id) {
+            n.msg_ts = ts;
+        }
         self.touch();
         crate::attention();
 
@@ -1726,6 +1751,7 @@ wait for. Then act on it."
                 let answered = self.0.answered_ids.lock().unwrap().contains(&self.1);
                 if was_waiting || !answered {
                     self.0.hub.emit(&self.2, json!({"kind": "answer", "id": self.1, "cancelled": true}));
+                    self.0.need_question_dropped(&self.1);
                     self.0.touch();
                 }
             }
@@ -1738,6 +1764,7 @@ wait for. Then act on it."
         let q = self.questions.lock().unwrap().remove(id).ok_or("that question is no longer waiting")?;
         self.answered_ids.lock().unwrap().insert(id.to_string());
         self.hub.emit(&q.key, json!({"kind": "answer", "id": id, "answers": answers}));
+        self.need_question_answered(id, &answers);
         let _ = q.tx.send(answers);
         self.touch();
         Ok(())
@@ -2855,7 +2882,9 @@ Anything that leaves this computer (publishing, posting, messaging, offers, spen
 needs an item the user approved. Propose it with queue_item, with the exact payload. Only the user can approve or \
 reject, in the app's Queue tab; you'll get a message with each decision (rejections come with a reason). Execute only \
 what list_approved returns, exactly as written, then record the result with complete_item. The files in queue/ are \
-read-only copies the app writes: editing or moving them changes nothing.
+read-only copies the app writes: editing or moving them changes nothing. Every item needs tldr (one plain \
+line), recommend (approve, reject or edit) and why; who_executes user items also need steps ({do, expect}) and \
+done_when, like request_user_action.
 Secrets (API keys, tokens) live in the app's vault. Never ask for, print, store or put a secret's value anywhere. When \
 an action needs one, give the item a command (PowerShell) that reads it as $env:NAME and list NAME in secrets; once \
 approved, run_approved runs exactly that command with the secret set. Some harmless keys are set as environment \
@@ -3547,7 +3576,8 @@ impl App {
             "created_at": i.created_at, "order_id": if i.order_id.is_empty() { Value::Null } else { json!(i.order_id) },
             "est_units": i.capacity.as_ref().map(|c| c.est_units), "deadline": i.capacity.as_ref().map(|c| c.deadline),
             "capacity": i.capacity, "manual": crate::queue::is_manual(i), "command": if i.command.is_empty() { Value::Null } else { json!(i.command) },
-            "secrets": i.secrets, "hash_v": i.hash_v,
+            "secrets": i.secrets, "hash_v": i.hash_v, "tldr": i.tldr, "recommend": i.recommend, "why": i.why,
+            "plan": i.plan, "minutes": i.minutes,
             "revisions": i.revisions.iter().map(|r| json!({"id": r.id, "payload": r.payload, "payload_hash": r.payload_hash, "created_at": r.created_at})).collect::<Vec<_>>(),
             "dropped": if crate::queue::is_manual(i) { json!(Self::queue_dropped(i)) } else { Value::Null },
         })
@@ -3574,6 +3604,7 @@ impl App {
             "generated_at": t,
             "paused": {"outbound": n.outbound_paused || outbound_all, "outbound_all": outbound_all, "workspace": n.paused},
             "pending": items.iter().map(Self::feed_item).collect::<Vec<_>>(),
+            "needs_you": self.needs_feed(ws),
             "today": {
                 "reservations": reservations.iter().map(|r| json!({
                     "order_id": r.order_id, "est_units": r.est_units, "remaining_units": r.remaining_units,
@@ -3762,6 +3793,8 @@ impl App {
         self.queue_add(key, &json!({
             "type": "new_venture", "line": line.id, "summary": format!("Start {} \"{}\"{}", line.status, line.name, if why.is_empty() { String::new() } else { format!(": {why}") }),
             "payload": payload, "risk": "medium", "expected_value_usd": args.get("expected_value_usd").cloned().unwrap_or(json!(0)),
+            "tldr": format!("Start testing a new line: {}", line.name), "recommend": "approve",
+            "why": if why.is_empty() { format!("kill criteria: {}", line.kill_criteria) } else { why.to_string() },
         }), vec![])
     }
 
@@ -3779,6 +3812,7 @@ impl App {
         self.queue_add(key, &json!({
             "type": "line_status", "line": id, "summary": format!("Set line {} \"{}\" from {} to {status}", id, line.name, line.status),
             "payload": payload, "risk": if status == "killed" { "high" } else { "medium" },
+            "tldr": format!("Set line {} to {status}", line.name), "recommend": "approve", "why": reason,
         }), vec![])
     }
 
@@ -4200,7 +4234,7 @@ impl App {
             item.id, item.kind, if item.line.is_empty() { "-" } else { &item.line }, item.summary,
             if files.is_empty() { "\nNo files were dropped in.".to_string() } else { format!("\nTheir files are in {rel}: {}. Pick them up from there.", files.join(", ")) }
         ));
-        self.queue_changed();
+        self.queue_changed(&item.workspace);
         Ok(())
     }
 
@@ -4426,6 +4460,25 @@ impl App {
         if !["agent", "user"].contains(&who.as_str()) {
             return Err("who_executes must be agent or user".into());
         }
+        // What the user decides from: one plain line, one suggestion, and why.
+        let (tldr, recommend, why) = (s("tldr"), s("recommend").to_lowercase(), s("why"));
+        if tldr.is_empty() || recommend.is_empty() || why.is_empty() {
+            return Err("tldr (one plain line), recommend (approve, reject or edit) and why (one line) are required".into());
+        }
+        if !["approve", "reject", "edit"].contains(&recommend.as_str()) {
+            return Err("recommend must be approve, reject or edit".into());
+        }
+        // The user does it by hand: precise steps, the same as request_user_action.
+        let plan = if who == "user" {
+            let mut a = args.clone();
+            if a.get("goal").and_then(Value::as_str).is_none_or(|g| g.trim().is_empty()) {
+                a["goal"] = json!(summary);
+            }
+            Some(crate::needs::parse_plan(&a).map_err(|e| format!("who_executes user needs a step-by-step plan: {e}"))?)
+        } else {
+            None
+        };
+        let minutes = args.get("minutes").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 600.0) as u32;
         let command = s("command");
         let secrets: Vec<String> = args.get("secrets").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
         if !secrets.is_empty() && command.is_empty() {
@@ -4449,7 +4502,7 @@ impl App {
         } else {
             (s("order_id"), None)
         };
-        for text in [&summary, &payload, &command] {
+        for text in [&summary, &payload, &command, &tldr, &why] {
             if let Some(name) = crate::vault::contains_secret(text) {
                 return Err(format!("the item contains the value of secret {name}: never put secret values in an item; name the secret in secrets and use $env:{name} in command"));
             }
@@ -4482,7 +4535,12 @@ impl App {
             secrets,
             order_id,
             capacity: capacity.clone(),
-            hash_v: 2,
+            hash_v: 3,
+            tldr,
+            recommend,
+            why,
+            minutes,
+            plan,
             created_by: if key.starts_with(ORCHESTRATOR) { "orchestrator".into() } else { key.to_string() },
             created_at: now_t,
             status: "pending".into(),
@@ -4499,7 +4557,7 @@ impl App {
         drop(st);
         self.business_event(&ws, "item_created", None, json!({"item": created}));
         self.audit(&ws, &audit_line);
-        self.queue_changed();
+        self.queue_changed(&ws);
         if urgent {
             crate::attention();
             self.notify(&ws, "urgent", "Urgent: waiting for your approval", &summary_for_notice);
@@ -4579,7 +4637,7 @@ impl App {
         drop(st);
         self.audit(&ws, &audit_line);
         self.business_event(&ws, "item_completed", None, json!({"item_id": id}));
-        self.queue_changed();
+        self.queue_changed(&ws);
         Ok(format!("{id} marked done"))
     }
 
@@ -4617,7 +4675,7 @@ impl App {
             self.apply_line_item(&item);
         }
         self.queue_news(&ws, &[item]);
-        self.queue_changed();
+        self.queue_changed(&ws);
         Ok(())
     }
 
@@ -4644,7 +4702,7 @@ impl App {
         }
         if !done.is_empty() {
             self.queue_news(&ws, &done);
-            self.queue_changed();
+            self.queue_changed(&ws);
         }
         Ok(done.len())
     }
@@ -4715,10 +4773,11 @@ impl App {
         self.store.lock().unwrap().queue.iter().filter(|i| i.status == "pending" && same_path(&i.workspace, ws)).count()
     }
 
-    fn queue_changed(&self) {
+    fn queue_changed(&self, ws: &str) {
         let total = self.store.lock().unwrap().queue.iter().filter(|i| i.status == "pending").count();
         crate::set_badge(total);
-        self.touch();
+        // Decisions and manual tasks in Needs you are read from the queue.
+        self.needs_changed(ws);
     }
 }
 
@@ -4882,7 +4941,8 @@ mod phone_decide_tests {
     }
 
     fn queue(app: &Arc<App>, ws: &str, summary: &str) -> String {
-        let out = app.queue_add(&orch_key(ws), &json!({"type": "post_pin", "line": "C", "summary": summary, "payload": "board: tests", "risk": "low"}), vec![]).unwrap();
+        let out = app.queue_add(&orch_key(ws), &json!({"type": "post_pin", "line": "C", "summary": summary, "payload": "board: tests", "risk": "low",
+            "tldr": summary, "recommend": "approve", "why": "tests"}), vec![]).unwrap();
         out.split_whitespace().nth(1).unwrap().to_string()
     }
 
@@ -5027,7 +5087,9 @@ mod phone_decide_tests {
         let (app, ws, id) = app("done");
         let (sk, phone) = test_phone("iphone-1", 7);
         app.store.lock().unwrap().phones.push(phone);
-        let out = app.queue_add(&orch_key(&ws), &json!({"type": "post_pin", "line": "C", "summary": "upload pins by hand", "payload": "board: tests", "risk": "low", "who_executes": "user"}), vec![]).unwrap();
+        let out = app.queue_add(&orch_key(&ws), &json!({"type": "post_pin", "line": "C", "summary": "upload pins by hand", "payload": "board: tests", "risk": "low", "who_executes": "user",
+            "tldr": "Upload the pins", "recommend": "approve", "why": "tests", "done_when": "The pins show on the board",
+            "steps": [{"do": "Open the board", "expect": "The board page"}]}), vec![]).unwrap();
         let item = out.split_whitespace().nth(1).unwrap().to_string();
         use base64::Engine;
         let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);

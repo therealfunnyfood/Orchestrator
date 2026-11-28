@@ -168,6 +168,12 @@ pub struct Store {
     pub phone_nonces: Vec<(String, String, f64)>,
     /// User messages to the orchestrator since it last reviewed its lessons.
     pub since_lessons: u32,
+    /// "Needs you" entries (questions, action steps, heads-ups), all workspaces. Decisions
+    /// and manual tasks aren't stored: they're read from the queue (see needs.rs).
+    pub needs: Vec<crate::needs::Need>,
+    pub need_seq: u64,
+    /// Per-entry marks (snooze, Today pin, step progress), by entry id; queue entries too.
+    pub need_marks: BTreeMap<String, crate::needs::Mark>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -286,6 +292,8 @@ pub struct ProjectNotes {
     pub phone_decide: bool,
     /// Business lines (lines.rs).
     pub lines: Vec<crate::lines::Line>,
+    /// Day (YYYY-MM-DD) the daily "Needs you" summary last went out.
+    pub needs_summary_day: String,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }

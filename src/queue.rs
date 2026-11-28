@@ -46,11 +46,21 @@ pub struct QueueItem {
     pub order_id: String,
     pub capacity: Option<crate::capacity::Check>,
     /// Which fields the hash covers: 2 (0.6.1+) also covers type labels shown to the user
-    /// (summary, risk, urgent); older items keep their version so approvals stay valid.
+    /// (summary, risk, urgent); 3 (0.6.6+) also the tldr. Older items keep their version
+    /// so approvals stay valid.
     pub hash_v: u8,
     /// Draft revisions (edit-then-approve from the phone): proposed payloads with their
     /// hash. Drafts never change the item; a signed decision over a draft's hash approves it.
     pub revisions: Vec<Revision>,
+    /// One plain line for the user (part of the hash from version 3), the suggested
+    /// decision (approve, reject or edit) and why.
+    pub tldr: String,
+    pub recommend: String,
+    pub why: String,
+    /// Minutes of the user's time it takes (0 = the default).
+    pub minutes: u32,
+    /// who_executes user: the step-by-step plan the user follows.
+    pub plan: Option<crate::needs::Plan>,
     pub created_by: String,
     pub created_at: f64,
     pub status: String,
@@ -100,6 +110,12 @@ pub fn content_hash(item: &QueueItem) -> String {
         h.update((item.risk.len() as u64).to_le_bytes());
         h.update(item.risk.as_bytes());
         h.update([item.urgent as u8]);
+    }
+    // Version 3: the one-line TL;DR the user decides from is approved too.
+    if item.hash_v >= 3 {
+        h.update(b"v3");
+        h.update((item.tldr.len() as u64).to_le_bytes());
+        h.update(item.tldr.as_bytes());
     }
     // Only when set, so items approved before these fields existed keep their hash.
     if !item.command.is_empty() || !item.secrets.is_empty() {
@@ -307,7 +323,7 @@ pub fn mirror(item: &QueueItem) {
     set_readonly(&p, true);
 }
 
-fn set_readonly(p: &Path, ro: bool) {
+pub(crate) fn set_readonly(p: &Path, ro: bool) {
     if let Ok(m) = std::fs::metadata(p) {
         let mut perm = m.permissions();
         perm.set_readonly(ro);
@@ -604,6 +620,45 @@ mod tests {
         let v1 = content_hash(&old);
         old.summary = "changed".into();
         assert_eq!(content_hash(&old), v1);
+    }
+
+    #[test]
+    fn hash_v3_covers_the_tldr_and_older_versions_stay_valid() {
+        let d = tmp("hashv3");
+        let mut i = item(&d);
+        i.hash_v = 3;
+        i.tldr = "List the cat mug at $14".into();
+        let base = content_hash(&i);
+        let mut j = i.clone();
+        j.tldr = "List the cat mug at $4".into();
+        assert_ne!(content_hash(&j), base, "a changed TL;DR changes the hash");
+        // A v2 item ignores the tldr, so approvals made under v2 keep matching.
+        let mut v2 = i.clone();
+        v2.hash_v = 2;
+        let h2 = content_hash(&v2);
+        v2.tldr = "anything".into();
+        assert_eq!(content_hash(&v2), h2);
+        // v3 = v2 bytes + "v3" + len-prefixed tldr (the phone recipe).
+        let mut manual = Sha256::new();
+        for part in [&i.kind, &i.line, &i.payload, &i.who_executes] {
+            manual.update((part.len() as u64).to_le_bytes());
+            manual.update(part.as_bytes());
+        }
+        manual.update(b"v2");
+        for part in [&i.summary, &i.risk] {
+            manual.update((part.len() as u64).to_le_bytes());
+            manual.update(part.as_bytes());
+        }
+        manual.update([i.urgent as u8]);
+        manual.update(b"v3");
+        manual.update((i.tldr.len() as u64).to_le_bytes());
+        manual.update(i.tldr.as_bytes());
+        for a in &i.attachments {
+            manual.update((a.len() as u64).to_le_bytes());
+            manual.update(a.as_bytes());
+            manual.update(Sha256::digest(std::fs::read(a).unwrap()));
+        }
+        assert_eq!(format!("{:x}", manual.finalize()), base);
     }
 
     #[test]
