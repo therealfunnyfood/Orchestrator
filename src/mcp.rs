@@ -118,6 +118,24 @@ then record the result with complete_item.",
     ])
 }
 
+/// Orchestrator tools only business workspaces get.
+fn business_orch_tools() -> Value {
+    json!([
+        {
+            "name": "propose_schedule",
+            "description": "Business workspaces: propose a routine that sends you a message on a schedule (e.g. time \"08:00\", \
+days \"daily\", message \"morning run\"). days: daily, weekdays, weekends, or names like \"Mon,Wed,Fri\". It only runs once the user \
+confirms it in Settings → Schedules. Runs are skipped while the workspace is paused, its budget is spent, or the previous run \
+is still going.",
+            "inputSchema": {"type": "object", "properties": {
+                "time": {"type": "string", "description": "HH:MM, 24-hour, the user's local time"},
+                "days": {"type": "string"}, "message": {"type": "string"},
+                "reason": {"type": "string", "description": "why this routine is worth it (shown to the user)"},
+            }, "required": ["time", "message"]},
+        },
+    ])
+}
+
 /// A thread task's estimate from spawn_thread / send_to_thread arguments.
 fn task_estimate(args: &Value, task: &str) -> Option<crate::app::Estimate> {
     let low = args.get("estimate_minutes").and_then(Value::as_f64)?;
@@ -678,6 +696,13 @@ Each thread's messages and final report start your next turn.".into());
             };
             app.save_lessons(key, arg(args, "lessons"), arg(args, "project_lessons").map(|l| (ws.as_str(), l)))
         }
+        "propose_schedule" => app.schedule_propose(
+            key,
+            arg(args, "time").ok_or("time is required")?,
+            arg(args, "days").unwrap_or("daily"),
+            arg(args, "message").ok_or("message is required")?,
+            arg(args, "reason").unwrap_or(""),
+        ),
         "queue_item" => {
             let cwd = session_cwd(app, key);
             let mut files = vec![];
@@ -754,6 +779,9 @@ pub async fn handle(app: &Arc<App>, key: &str, msg: &Value) -> Option<Value> {
             }
             if app.is_business(&app.ws_of(key)) {
                 tools.extend(queue_tools().as_array().cloned().unwrap_or_default());
+                if key.starts_with(ORCHESTRATOR) {
+                    tools.extend(business_orch_tools().as_array().cloned().unwrap_or_default());
+                }
             }
             json!({"tools": tools})
         }
@@ -796,7 +824,7 @@ mod tests {
     /// HTTP API. Neither may be able to approve or reject a queue item.
     #[test]
     fn no_agent_tool_can_decide_a_queue_item() {
-        let all: Vec<String> = [ui_tools(), thread_tools(), queue_tools()].into_iter().flat_map(names).collect();
+        let all: Vec<String> = [ui_tools(), thread_tools(), queue_tools(), business_orch_tools()].into_iter().flat_map(names).collect();
         for n in &all {
             // "approve" is Claude Code's permission-prompt tool (tool approvals in the
             // chat), unrelated to the queue.
@@ -822,7 +850,7 @@ mod tests {
     #[test]
     fn http_api_has_no_route_to_queue_decisions() {
         let web = include_str!("web.rs");
-        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget"] {
+        for f in ["queue_decide", "queue_approve_low_risk", "set_workspace_kind", "set_outbound_paused", "set_workspace_paused", "vault_set", "vault_remove", "set_budget", "schedule_user"] {
             assert!(!web.contains(f), "web.rs must not call {f}: agents can reach the HTTP API");
         }
     }

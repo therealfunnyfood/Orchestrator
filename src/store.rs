@@ -225,6 +225,8 @@ pub struct ProjectNotes {
     pub budget_week: f64,
     /// Budget alerts already sent (period:threshold keys), so each goes out once.
     pub budget_alerts: Vec<String>,
+    /// Scheduled routines (business workspaces).
+    pub schedules: Vec<crate::schedule::Schedule>,
     pub imported_at: Option<f64>,
     pub updated_at: f64,
 }

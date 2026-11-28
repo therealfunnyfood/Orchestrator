@@ -143,6 +143,13 @@ workspaces are unaffected.
   work's cost at API rates, on the plan or the API. The status bar shows today's spend
   against the cap. At 80% you're notified. At 100%, new threads only start for paid orders
   (`spawn_thread` with `priority: "paid-order"`), and the orchestrator is told why.
+- **Scheduled routines.** In **Settings → Schedules**, have the app send the orchestrator a
+  message at set times, for example "08:00 every day: morning run". The orchestrator can
+  propose schedules with `propose_schedule`, but they only run once you confirm them. A run
+  is skipped (and the skip logged) when the workspace is paused, its budget is spent, or the
+  previous run is still going. Schedules run while the app is in the tray. To keep them
+  going after a restart, tick **Settings → About → Start at sign-in**, which starts the app
+  minimized when you sign in to Windows.
 - **Audit log.** `<workspace>/queue/audit.log` records every item queued, approved,
   rejected, executed or voided, and every pause and resume. Each line ends with a hash
   that chains it to the line before. The file is read-only, and if anything edits it

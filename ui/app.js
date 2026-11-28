@@ -2712,6 +2712,42 @@ async function renderSettings() {
       const sp = S.state.spend || { day: 0, week: 0 };
       setting("Budget", "Budget caps", `Daily and weekly caps on this workspace's cost at API rates (plan and API turns both count; blank or 0 = no cap). Spent so far: <b>$${sp.day.toFixed(2)}</b> today, <b>$${sp.week.toFixed(2)}</b> this week. At 80% you're notified; at 100% new threads only start for paid orders (<code>priority: "paid-order"</code>), and the orchestrator is told why. Can only be changed in this window.`, row);
     }
+    {
+      const box = h("div", "secrets");
+      for (const sc of S.state.schedules || []) {
+        const r = h("div", "row secret-row");
+        r.append(h("span", "mono", `${sc.time} · ${sc.days_text}`), h("span", null, sc.message));
+        if (!sc.confirmed) {
+          const cb = h("button", "btn primary", "Confirm");
+          cb.title = `Proposed by the ${sc.created_by}${sc.reason ? ": " + sc.reason : ""}`;
+          cb.onclick = () => { if (sendIpc({ op: "schedule", action: "confirm", id: sc.id })) setTimeout(() => loadState().then(renderSettings), 500); };
+          r.append(h("span", "qchip you", "proposed: needs your OK"), cb);
+        } else {
+          const on = h("button", "btn", sc.enabled ? "Disable" : "Enable");
+          on.onclick = () => { if (sendIpc({ op: "schedule", action: "save", id: sc.id, time: sc.time, days: sc.days_text, message: sc.message, enabled: !sc.enabled })) setTimeout(() => loadState().then(renderSettings), 500); };
+          r.append(h("span", "qchip" + (sc.enabled ? "" : " st-void"), sc.enabled ? "on" : "off"), on);
+        }
+        if (sc.last_result) r.title = `last: ${sc.last_result} (${new Date(sc.last_at * 1000).toLocaleString()})`;
+        const del = h("button", "btn danger", "Delete");
+        del.onclick = () => { if (sendIpc({ op: "schedule", action: "delete", id: sc.id })) setTimeout(() => loadState().then(renderSettings), 500); };
+        r.append(del);
+        box.append(r);
+      }
+      if (!(S.state.schedules || []).length) box.append(h("div", "sub", "No schedules yet."));
+      const add = h("div", "row");
+      const time = h("input"); time.type = "time"; time.value = "08:00";
+      const days = h("select");
+      for (const d of ["daily", "weekdays", "weekends", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]) { const o = h("option", null, d); o.value = d; days.append(o); }
+      const msg = h("input"); msg.placeholder = "message to the orchestrator, e.g. morning run"; msg.style.flex = "1";
+      const b = h("button", "btn primary", "Add");
+      b.onclick = () => {
+        if (!msg.value.trim()) return toast("a message is required", true);
+        if (sendIpc({ op: "schedule", action: "save", id: "", time: time.value, days: days.value, message: msg.value.trim(), enabled: true })) { msg.value = ""; setTimeout(() => loadState().then(renderSettings), 500); }
+      };
+      add.append(time, days, msg, b);
+      box.append(add);
+      setting("Schedules", "Scheduled routines", "Send the orchestrator a message at set times (your local time), e.g. 08:00 every day: <i>morning run</i>. The orchestrator can propose schedules; they only run once you confirm them here. A run is skipped, and the skip logged, if this workspace is paused, its budget is spent, or the previous run is still going. Runs need the app open or in the tray (see <b>Start at sign-in</b>). Missed times aren't caught up.", box);
+    }
     setting("Secrets", "Secrets for this workspace", "Encrypted with your Windows account (DPAPI), kept out of the app's state file, and redacted from every transcript and log. <b>Approved actions only</b> (recommended): a secret is only given to the command of an item you approved, when an agent runs it with <code>run_approved</code>. <b>All sessions</b>: set as an environment variable in every thread, so agents can use it without asking. Only for harmless keys. Can only be changed in this window.", box);
   }
 
@@ -2811,6 +2847,16 @@ async function renderSettings() {
     row.append(chk, auto);
     wrap.append(line, row);
     setting("About", "Version", "Update checks ask GitHub for the latest release; nothing else is sent.", wrap);
+  }
+  {
+    const lab = h("label");
+    lab.style.cssText = "display:flex;gap:6px;align-items:center";
+    const cb = h("input");
+    cb.type = "checkbox";
+    cb.checked = !!s.start_at_login;
+    cb.onchange = () => save({ start_at_login: cb.checked }, cb.checked ? "starts at sign-in, in the tray" : "won't start at sign-in");
+    lab.append(cb, document.createTextNode("Start Orchestrator when I sign in to Windows (minimized to the tray)"));
+    setting("About", "Start at sign-in", "Keeps scheduled routines and running work going without opening the window first.", lab);
   }
   const about = h("div", "d");
   about.innerHTML = `Data: <code>${esc(s.data_dir)}</code><br>Threads run Claude Code with permissions bypassed. Pick workspaces you're OK with them changing.`;

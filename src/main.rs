@@ -16,6 +16,7 @@ mod mcp;
 mod migrate;
 mod queue;
 mod runner;
+mod schedule;
 mod setup;
 mod store;
 mod uninstall;
@@ -89,6 +90,15 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
         "vault_remove" => {
             let name = s("name");
             rt().spawn(async move { app.vault_remove(&name) });
+        }
+        "schedule" => {
+            let enabled = msg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let (op, id, time, days, message) = (s("action"), s("id"), s("time"), s("days"), s("message"));
+            rt().spawn(async move {
+                if let Err(e) = app.schedule_user(&op, &id, &time, &days, &message, enabled) {
+                    app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+                }
+            });
         }
         "set_budget" => {
             let n = |k: &str| msg.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -221,6 +231,14 @@ async fn start(desktop: bool, port: u16) -> (Arc<app::App>, String) {
     tokio::spawn(async move {
         axum::serve(listener, router).await.ok();
     });
+    // Scheduled routines of business workspaces (checked every 30 s).
+    let a = app.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            a.schedule_tick();
+        }
+    });
     // Update check: at startup, then twice a day.
     let a = app.clone();
     tokio::spawn(async move {
@@ -285,10 +303,11 @@ fn main() {
             let _ = tokio::task::spawn_blocking(move || a.import_project(&path)).await;
         });
     }
-    run_windows(app, url);
+    // --minimized: started at sign-in; stay in the tray until the user opens the window.
+    run_windows(app, url, args.iter().any(|a| a == "--minimized"));
 }
 
-fn run_windows(app: Arc<app::App>, url: String) {
+fn run_windows(app: Arc<app::App>, url: String, minimized: bool) {
     use tao::dpi::LogicalSize;
     use tao::event::{Event, WindowEvent};
     use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopWindowTarget};
@@ -335,6 +354,9 @@ fn run_windows(app: Arc<app::App>, url: String) {
 
     let (main_window, main_view) = make(&event_loop, &mut context, "Orchestrator", &url, 1400.0, 900.0);
     let main_id = main_window.id();
+    if minimized {
+        main_window.set_visible(false);
+    }
 
     // Tray icon: the app keeps running when the window is closed.
     use tray_icon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};

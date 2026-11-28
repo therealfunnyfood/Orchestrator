@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.4 (2026-11-28)
+
+- **Scheduled routines (business workspaces).** In **Settings → Schedules**, have the app send
+  the orchestrator a message at set local times, for example "08:00 every day: morning run"
+  or "Sunday 18:00: weekly review". Choose daily, weekdays, weekends or single days.
+- The orchestrator can propose a schedule with the new `propose_schedule` tool, but it only
+  runs once you confirm it.
+- A run is skipped when the workspace is paused, its budget is spent, or the previous run
+  is still going. Each skip is shown in the chat and written to the audit log. Missed times
+  aren't caught up later. If a run hits the plan's usage limit, it continues after the
+  reset as usual.
+- **Start at sign-in.** Settings → About has a new option to start Orchestrator minimized to
+  the tray when you sign in to Windows, so routines keep running.
+
 ## 0.5.3 (2026-11-28)
 
 - **Budget caps (business workspaces).** Set daily and weekly dollar caps in **Settings →

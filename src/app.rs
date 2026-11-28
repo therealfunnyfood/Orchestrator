@@ -389,6 +389,7 @@ impl App {
             "workspace": ws, "recent_workspaces": recent, "open_workspaces": self.open_workspaces_json(), "orchestrator": self.orch_json(),
             "threads": threads, "running": running, "waiting": waiting,
             "project": project, "queue": queue, "secrets": secrets,
+            "schedules": if self.is_business(&ws) { self.schedules_json(&ws) } else { json!([]) },
             "spend": if self.is_business(&ws) { let (_, s) = self.budget(&ws); json!({"day": s.day, "week": s.week}) } else { Value::Null },
             "defaults": {
                 "thread_backend": s.thread_backend, "thread_model": s.thread_model,
@@ -1549,6 +1550,9 @@ wait for. Then act on it."
         if let Some(v) = patch.get("check_updates").and_then(Value::as_bool) {
             s.check_updates = v;
         }
+        if let Some(v) = patch.get("start_at_login").and_then(Value::as_bool) {
+            set_start_at_login(v)?;
+        }
         if let Some(v) = patch.get("permission_default").and_then(Value::as_str) {
             check_permission(v)?;
             s.permission_default = v.into();
@@ -1578,6 +1582,7 @@ wait for. Then act on it."
             "api_mix": s.api_mix,
             "max_effort": s.max_effort,
             "check_updates": s.check_updates,
+            "start_at_login": start_at_login(),
             "permission_default": s.permission_default,
             "usage": self.usage_json(),
             "permission": self.project_permission(),
@@ -2496,6 +2501,37 @@ fn short_minutes(s: f64) -> String {
     if m < 10.0 { format!("{:.1}", m).trim_end_matches(".0").to_string() } else { format!("{:.0}", m) }
 }
 
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+fn reg(args: &[&str]) -> bool {
+    let mut c = std::process::Command::new("reg");
+    c.args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    c.status().is_ok_and(|s| s.success())
+}
+
+/// Whether Windows starts Orchestrator (minimized to the tray) at sign-in.
+pub fn start_at_login() -> bool {
+    reg(&["query", RUN_KEY, "/v", "Orchestrator"])
+}
+
+pub fn set_start_at_login(on: bool) -> Result<(), String> {
+    if on {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let cmd = format!("\"{}\" --minimized", exe.display());
+        if !reg(&["add", RUN_KEY, "/v", "Orchestrator", "/t", "REG_SZ", "/d", &cmd, "/f"]) {
+            return Err("couldn't add Orchestrator to the sign-in apps".into());
+        }
+    } else if start_at_login() && !reg(&["delete", RUN_KEY, "/v", "Orchestrator", "/f"]) {
+        return Err("couldn't remove Orchestrator from the sign-in apps".into());
+    }
+    Ok(())
+}
+
 /// A Unix time as a local clock time, e.g. "8:31 PM" (with the day if it isn't today).
 pub fn clock_time(t: f64) -> String {
     use chrono::TimeZone;
@@ -2526,6 +2562,8 @@ Secrets (API keys, tokens) live in the app's vault. Never ask for, print, store 
 an action needs one, give the item a command (PowerShell) that reads it as $env:NAME and list NAME in secrets; once \
 approved, run_approved runs exactly that command with the secret set. Some harmless keys are set as environment \
 variables in every session; the user decides which.
+Routines: the orchestrator can propose a recurring message to itself (e.g. 08:00 daily \"morning run\") with \
+propose_schedule; it runs once the user confirms it. Messages that start with [Scheduled run ...] come from one.
 ";
 
 impl App {
@@ -2693,6 +2731,139 @@ impl App {
             r.priority = priority.to_string();
         }
         st.save();
+    }
+
+    /// propose_schedule: the orchestrator suggests a routine; it runs once the user confirms it.
+    pub fn schedule_propose(&self, key: &str, time: &str, days: &str, message: &str, reason: &str) -> Result<String, String> {
+        let ws = self.ws_of(key);
+        if !self.is_business(&ws) {
+            return Err("schedules are for business workspaces".into());
+        }
+        let s = self.schedule_new(&ws, None, time, days, message, true, false, "orchestrator", reason)?;
+        self.audit(&ws, &format!("SCHEDULE PROPOSED {} {} ({}) by=orchestrator :: {}", s.id, s.time, crate::schedule::describe_days(&s.days), s.message));
+        crate::attention();
+        Ok(format!("proposed schedule {}: {} {} -> \"{}\". It runs once the user confirms it in Settings → Schedules.", s.id, s.time, crate::schedule::describe_days(&s.days), s.message))
+    }
+
+    /// Add (id None) or change a schedule. Returns it.
+    #[allow(clippy::too_many_arguments)]
+    fn schedule_new(&self, ws: &str, id: Option<&str>, time: &str, days: &str, message: &str, enabled: bool, confirmed: bool, by: &str, reason: &str) -> Result<crate::schedule::Schedule, String> {
+        if crate::schedule::parse_time(time).is_none() {
+            return Err("time must be HH:MM (24-hour, local time)".into());
+        }
+        let days = crate::schedule::parse_days(days)?;
+        if message.trim().is_empty() {
+            return Err("message is required".into());
+        }
+        let mut st = self.store.lock().unwrap();
+        let n = st.notes_mut(ws);
+        let sched = match id {
+            Some(id) => {
+                let s = n.schedules.iter_mut().find(|s| s.id == id).ok_or(format!("no schedule {id}"))?;
+                s.time = time.trim().into();
+                s.days = days;
+                s.message = message.trim().into();
+                s.enabled = enabled;
+                s.confirmed |= confirmed;
+                s.clone()
+            }
+            None => {
+                let next = n.schedules.iter().filter_map(|s| s.id.strip_prefix('s').and_then(|x| x.parse::<u32>().ok())).max().unwrap_or(0) + 1;
+                let s = crate::schedule::Schedule {
+                    id: format!("s{next}"), time: time.trim().into(), days, message: message.trim().into(), enabled, confirmed,
+                    created_by: by.into(), reason: reason.trim().into(), ..Default::default()
+                };
+                n.schedules.push(s.clone());
+                s
+            }
+        };
+        st.save();
+        drop(st);
+        self.touch();
+        Ok(sched)
+    }
+
+    /// The user adds, changes, confirms or deletes a schedule (from the window only).
+    pub fn schedule_user(&self, op: &str, id: &str, time: &str, days: &str, message: &str, enabled: bool) -> Result<(), String> {
+        let ws = self.workspace();
+        if !self.is_business(&ws) {
+            return Err("schedules are for business workspaces".into());
+        }
+        match op {
+            "save" => {
+                let s = self.schedule_new(&ws, (!id.is_empty()).then_some(id), time, days, message, enabled, true, "user", "")?;
+                self.audit(&ws, &format!("SCHEDULE SAVED {} {} ({}) enabled={} by=user :: {}", s.id, s.time, crate::schedule::describe_days(&s.days), s.enabled, s.message));
+            }
+            "confirm" => {
+                {
+                    let mut st = self.store.lock().unwrap();
+                    let s = st.notes_mut(&ws).schedules.iter_mut().find(|s| s.id == id).ok_or(format!("no schedule {id}"))?;
+                    s.confirmed = true;
+                    s.enabled = true;
+                    st.save();
+                }
+                self.audit(&ws, &format!("SCHEDULE CONFIRMED {id} by=user"));
+            }
+            "delete" => {
+                {
+                    let mut st = self.store.lock().unwrap();
+                    st.notes_mut(&ws).schedules.retain(|s| s.id != id);
+                    st.save();
+                }
+                self.audit(&ws, &format!("SCHEDULE DELETED {id} by=user"));
+            }
+            _ => return Err(format!("unknown schedule op {op}")),
+        }
+        self.touch();
+        Ok(())
+    }
+
+    /// Every 30 s: run (or skip, and log why) the schedules that are due.
+    pub fn schedule_tick(self: &Arc<Self>) {
+        let items: Vec<(String, crate::schedule::Schedule)> = {
+            let st = self.store.lock().unwrap();
+            st.projects.iter().filter(|(_, n)| n.kind == "business").flat_map(|(ws, n)| n.schedules.iter().map(move |s| (ws.clone(), s.clone()))).collect()
+        };
+        for (ws, s) in items {
+            let (caps, spend) = self.budget(&ws);
+            let spent = crate::budget::exceeded(caps, spend);
+            let key = orch_key(&ws);
+            let due = crate::schedule::check(&s, now(), 120.0, self.is_paused(&ws), spent.as_deref(), self.busy(&key));
+            let (period, result) = match due {
+                crate::schedule::Due::NotDue => continue,
+                crate::schedule::Due::Run(p) => (p, "ran".to_string()),
+                crate::schedule::Due::Skip(p, why) => (p, format!("skipped: {why}")),
+            };
+            {
+                let mut st = self.store.lock().unwrap();
+                if let Some(x) = st.notes_mut(&ws).schedules.iter_mut().find(|x| x.id == s.id) {
+                    x.last_key = period;
+                    x.last_result = result.clone();
+                    x.last_at = now();
+                }
+                st.save();
+            }
+            let when = format!("{} {}", s.time, crate::schedule::describe_days(&s.days));
+            if result == "ran" {
+                self.audit(&ws, &format!("SCHEDULE RUN {} ({when}) :: {}", s.id, s.message));
+                self.claim_orchestrator(&ws);
+                let text = format!("[Scheduled run {} ({when}), started by the app, not typed by the user just now]\n{}", s.id, s.message);
+                self.enqueue(&key, Queued { id: String::new(), text, sender: "schedule".into(), attach: vec![], fork: None }, false);
+            } else {
+                self.audit(&ws, &format!("SCHEDULE SKIPPED {} ({when}) :: {}", s.id, &result["skipped: ".len()..]));
+                self.hub.emit(&key, json!({"kind": "notice", "text": format!("⏰ scheduled run {} ({when}) {result}", s.id)}));
+            }
+            self.touch();
+        }
+    }
+
+    pub fn schedules_json(&self, ws: &str) -> Value {
+        let st = self.store.lock().unwrap();
+        json!(st.notes(ws).map(|n| n.schedules.iter().map(|s| {
+            let mut v = json!(s);
+            v["days_text"] = json!(crate::schedule::describe_days(&s.days));
+            v
+        }).collect::<Vec<_>>()).unwrap_or_default())
     }
 
     pub fn is_paused(&self, ws: &str) -> bool {
