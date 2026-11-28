@@ -179,6 +179,11 @@ fn handle_ipc(app: &Arc<app::App>, body: &str) {
                 }
             });
         }
+        "set_lesson_scope" => {
+            if let Err(e) = app.set_lesson_scope(&s("scope")) {
+                app.hub.broadcast(serde_json::json!({"kind": "toast", "text": e}));
+            }
+        }
         "set_workspace_kind" => {
             let kind = s("kind");
             rt().spawn(async move {

@@ -628,6 +628,8 @@ function toolArg(name, input) {
     const n = (s) => (typeof s === "string" ? s.split("\n").filter((l) => l.trim()).length : null);
     const parts = [];
     if (n(o.lessons) !== null) parts.push(`${n(o.lessons)} lessons`);
+    if (n(o.dev_lessons) !== null) parts.push(`${n(o.dev_lessons)} dev lessons`);
+    if (n(o.business_lessons) !== null) parts.push(`${n(o.business_lessons)} business lessons`);
     if (n(o.project_lessons) !== null) parts.push(`${n(o.project_lessons)} project lessons${o.project ? " for " + o.project.split(/[\\/]/).pop() : ""}`);
     return parts.join(", ");
   }
@@ -704,6 +706,14 @@ function applyFork(at) {
 function renderEventInner(ev, log) {
   $(".welcome", log)?.remove();
   const k = ev.kind;
+  if (k === "lessons_sorted") {
+    const e = h("div", "ev user setup");
+    e.append(h("span", "who", "📋 lessons sorted"), h("span", "sum", `${ev.text} Click to see every moved lesson.`));
+    e.append(h("div", "body", (ev.moves || []).map((m) => `→ ${m.to}: ${m.lesson}`).join("\n") || "(nothing moved)"));
+    e.onclick = () => e.classList.toggle("open");
+    log.append(e);
+    return;
+  }
   if (k === "user") {
     if (ev.sender === "handoff" || ev.sender === "handoff-resume") {
       const req = ev.sender === "handoff";
@@ -1212,8 +1222,13 @@ function renderBrief() {
   const page = h("div", "page brief-page");
   const p = S.state.project || {};
   page.append(h("h1", null, "Project brief"), h("div", "sub", S.state.workspace + (p.updated_at ? ` · updated ${relTime(p.updated_at)} ago` : "")));
+  const biz = p.kind === "business";
+  const scope = p.lesson_scope || "";
+  const names = { lessons: "lessons about you", [biz ? "business_lessons" : "dev_lessons"]: biz ? "business lessons" : "development lessons", project_lessons: "lessons for this project" };
+  const reaches = (f) => f === "project_lessons" || (scope !== "none" && (f === "lessons" || (scope === "" && f === (biz ? "business_lessons" : "dev_lessons"))));
   const section = (title, field, desc) => {
-    page.append(h("div", "set-section", title));
+    const off = ["lessons", "dev_lessons", "business_lessons"].includes(field) && !reaches(field);
+    page.append(h("div", "set-section", title + (off ? " (doesn't reach this workspace)" : "")));
     page.append(h("div", "sub", desc));
     const view = h("div", "md");
     view.innerHTML = md(p[field] || "_(empty)_");
@@ -1226,7 +1241,7 @@ function renderBrief() {
     edit.onclick = () => { view.classList.toggle("hidden"); ta.classList.toggle("hidden"); saveB.classList.toggle("hidden"); edit.textContent = ta.classList.contains("hidden") ? "Edit" : "Cancel"; };
     saveB.onclick = async () => {
       if (field === "tuning") await api("/api/tuning", { body: { notes: ta.value } }).catch(fail);
-      else if (field === "lessons" || field === "project_lessons") await api("/api/lessons", { body: { [field]: ta.value } }).catch(fail);
+      else if (["lessons", "dev_lessons", "business_lessons", "project_lessons"].includes(field)) await api("/api/lessons", { body: { [field]: ta.value } }).catch(fail);
       else await api("/api/notes", { body: { [field]: ta.value } }).catch(fail);
       await loadState();
       renderBrief();
@@ -1235,11 +1250,19 @@ function renderBrief() {
     row.append(edit, saveB);
     page.append(view, ta, row);
   };
-  section("Lessons about you", "lessons", "What the orchestrator has learned about working with you: how you talk and work, and mistakes it shouldn't repeat. Shared across all your projects. It updates these itself; you can edit them too.");
+  page.append(h("div", "sub", "Reaching this workspace's orchestrator: " + Object.keys(names).filter(reaches).map((f) => names[f]).join(", ") + "." +
+    (scope ? " (Overridden in Settings → Workspace → Shared lessons.)" : "") +
+    (p.lessons_scoped ? "" : " The shared lessons haven't been sorted by type yet; that happens on the next message in a development workspace.") +
+    " To move a lesson, cut it from one list and paste it into another."));
+  section("Lessons about you", "lessons", "About you as a person: how you talk, what you want reported, privacy, your setup. Every workspace gets these. The orchestrator updates them itself; you can edit them too.");
+  if (biz) section("Business lessons", "business_lessons", "How you like business work done. Only business workspaces get these.");
+  else section("Development lessons", "dev_lessons", "How you like development work done: models and reviews, testing, QA, deploys, git. Only development workspaces get these.");
   section("Lessons for this project", "project_lessons", "Lessons that only matter in this workspace.");
   section("Rules", "rules", "Added to every thread's instructions in this workspace.");
   section("Tuning notes", "tuning", "The orchestrator's own lessons about which model and effort fit which work in this project. It updates these from the efficiency stats; you can edit them too.");
   section("Brief", "brief", "Shown to the orchestrator in every conversation in this workspace.");
+  if (biz) section("Development lessons", "dev_lessons", "How you like development work done. Only development workspaces get these.");
+  else section("Business lessons", "business_lessons", "How you like business work done. Only business workspaces get these.");
   pane.append(page);
 }
 
@@ -2868,6 +2891,13 @@ async function renderSettings() {
     el.value = S.state.project?.kind || "development";
     el.onchange = () => { if (sendIpc({ op: "set_workspace_kind", kind: el.value })) { toast(`this workspace is now a ${el.value} workspace`); setTimeout(loadState, 400); } else el.value = S.state.project?.kind || "development"; };
     setting("Workspace", "Workspace type", "<b>Business</b> turns on the business features for this workspace: the approval queue (agents propose anything outbound with <code>queue_item</code>, and only you approve it, in the ✓ Queue tab). <b>Development</b> (the default) works as before. Can only be changed in this window.", el);
+  }
+  {
+    const el = h("select");
+    for (const [v, l] of [["", "By workspace type (default)"], ["about_me", "Only lessons about me"], ["none", "None"]]) { const o = h("option", null, l); o.value = v; el.append(o); }
+    el.value = S.state.project?.lesson_scope || "";
+    el.onchange = () => { if (sendIpc({ op: "set_lesson_scope", scope: el.value })) { toast("saved"); setTimeout(loadState, 400); } else el.value = S.state.project?.lesson_scope || ""; };
+    setting("Workspace", "Shared lessons", "Which shared lessons this workspace's orchestrator gets. <b>By workspace type</b>: lessons about you, plus the development or business lessons. <b>Only lessons about me</b> and <b>None</b> are for odd workspaces. This project's own lessons always apply. See them all on the 📋 brief page.", el);
   }
 
   if (S.state.project?.kind === "business") {

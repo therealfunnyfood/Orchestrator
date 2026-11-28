@@ -512,7 +512,10 @@ async fn refresh_plan_usage(State(app): State<Shared>) -> ApiResult {
 
 async fn lessons(State(app): State<Shared>, Json(b): Json<Value>) -> ApiResult {
     let ws = app.workspace();
-    app.save_lessons("", s(&b, "lessons"), s(&b, "project_lessons").map(|l| (ws.as_str(), l))).map_err(ApiError)?;
+    app.save_lessons("", None, crate::app::Lessons {
+        general: s(&b, "lessons"), dev: s(&b, "dev_lessons"), business: s(&b, "business_lessons"),
+        project: s(&b, "project_lessons").map(|l| (ws.as_str(), l)),
+    }).map_err(ApiError)?;
     Ok(Json(json!({"ok": true})))
 }
 

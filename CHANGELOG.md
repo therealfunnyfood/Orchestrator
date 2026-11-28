@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.6.4 (2026-11-28)
+
+- **Shared lessons are scoped by workspace type.** There are now three shared lists, plus each
+  project's own:
+  - **lessons about you**, for every workspace;
+  - **development lessons** (models and reviews, testing, QA, deploys, git), for development
+    workspaces only;
+  - **business lessons**, for business workspaces only.
+
+  Each orchestrator sees only the lists for its workspace type, and `save_lessons` refuses the
+  other type's list.
+- **Order of precedence.** The orchestrator's instructions now say which guidance wins: your
+  newer words, then project rules, then project lessons, then lessons for this workspace type,
+  then lessons about you, then its defaults.
+- **A one-time sort, done for you.** On the next message in a development workspace, the
+  orchestrator sorts the old shared lessons:
+  - Lessons about you stay where they are.
+  - Lessons about development work move to the development lessons.
+  - Lessons about one project move to that project's lessons.
+
+  A backup is saved first (`notes-backup-before-lesson-sort.json`). The app refuses the save if
+  any line is dropped or reworded. The chat shows the before and after counts, with every moved
+  lesson in a collapsible list. Business workspaces never run the sort. Until it has run, they
+  see the old list marked as unsorted.
+- **Settings → Workspace → Shared lessons:** by workspace type (the default), only lessons
+  about you, or none. Project lessons always apply.
+- **📋 brief page.** It shows which lists reach this workspace, and every list can be edited
+  there, so you can move a lesson by hand.
+
 ## 0.6.3 (2026-11-28)
 
 - **Edit, then approve, from a paired phone.** The phone can draft a revised payload for a

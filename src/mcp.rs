@@ -304,13 +304,15 @@ stronger model/effort) or too_strong (a cheaper one would have done). note: a fe
         },
         {
             "name": "save_lessons",
-            "description": "Save your lessons. lessons: about the user, for all their projects (how they talk, what \
-they want, how they work, mistakes not to repeat). project_lessons: ones that only matter in this project (or in \
-the project folder given as project). Each list you pass replaces the saved one, so merge new lessons into it, one \
-or two lines each. Limits: lessons 5000 characters, project_lessons 4000. Shown to you in every future \
-conversation; the user can read and edit them.",
+            "description": "Save your lessons. lessons: about the user as a person, for every workspace (how they \
+talk, what they want, privacy, their setup, mistakes not to repeat). dev_lessons: how they like development work \
+done (development workspaces only). business_lessons: how they like business work done (business workspaces only). \
+Only this workspace type's list is accepted. project_lessons: ones that only matter in this project (or in the \
+project folder given as project). Each list you pass replaces the saved one, so merge new lessons into it, one or two \
+lines each. Limits: lessons 5000 characters, the others 4000 each. The user can read and edit them.",
             "inputSchema": {"type": "object", "properties": {
-                "lessons": {"type": "string"}, "project_lessons": {"type": "string"},
+                "lessons": {"type": "string"}, "dev_lessons": {"type": "string"}, "business_lessons": {"type": "string"},
+                "project_lessons": {"type": "string"},
                 "project": {"type": "string", "description": "project folder for project_lessons; default: yours"},
             }},
         },
@@ -754,9 +756,12 @@ Each thread's messages and final report start your next turn.".into());
             let ws = match arg(args, "project").map(str::trim).filter(|p| !p.is_empty()) {
                 Some(p) if std::path::Path::new(p).is_dir() => p.to_string(),
                 Some(p) => return Err(format!("no such project folder: {p}")),
-                None => own,
+                None => own.clone(),
             };
-            app.save_lessons(key, arg(args, "lessons"), arg(args, "project_lessons").map(|l| (ws.as_str(), l)))
+            app.save_lessons(key, Some(&own), crate::app::Lessons {
+                general: arg(args, "lessons"), dev: arg(args, "dev_lessons"), business: arg(args, "business_lessons"),
+                project: arg(args, "project_lessons").map(|l| (ws.as_str(), l)),
+            })
         }
         "list_lines" => Ok(serde_json::to_string_pretty(&app.money_json(&app.ws_of(key))).unwrap_or_default()),
         "propose_line" => app.line_propose(key, args),

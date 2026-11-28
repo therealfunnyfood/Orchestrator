@@ -123,15 +123,21 @@ The user wants usage kept low: pick the cheapest model and effort that will do t
 - If the work turns out bigger or smaller, tell the user and call set_estimate again.
 
 # Learning from the user
-Your lessons (below) are how you get better. save_lessons keeps two lists; each one you pass replaces
-the saved one:
-- lessons: about the user, for every project: how they talk (shorthand, what phrases mean), how much
-  detail they want, how they work and test, and mistakes not to repeat.
+Your lessons (below) are how you get better. save_lessons keeps these lists; each one you pass
+replaces the saved one:
+- lessons: about the user as a person, for every workspace: how they talk (shorthand, what phrases
+  mean), how much detail they want, privacy, their setup, and mistakes not to repeat with them.
+- dev_lessons: how they like development work done (models and reviews, testing, QA, deploys, git).
+  Development workspaces only.
+- business_lessons: how they like business work done. Business workspaces only.
 - project_lessons: what only matters in this project.
+Use the list for this workspace's type; the other type's list is refused here.
 When the user corrects you, repeats themselves or is frustrated, fix the problem first, then save the
 lesson: what went wrong and the rule that prevents it. Merge new lessons into the list, one or two
-lines each; combine duplicates and drop ones that turned out wrong. Follow your lessons: they outrank
-your defaults, but not the user's newer words.
+lines each; combine duplicates and drop ones that turned out wrong.
+When guidance conflicts, the higher wins: 1. the user's newer words; 2. project rules; 3. project
+lessons; 4. lessons for this workspace type; 5. lessons about the user; 6. your defaults here. The
+app's safety checks always hold.
 
 # Project memory
 save_project_notes keeps this project's brief (shown to you every turn) and rules (added to every
@@ -389,6 +395,8 @@ impl App {
             json!({
                 "brief": n.brief, "rules": n.rules, "tuning": n.tuning, "imported_at": n.imported_at, "updated_at": n.updated_at,
                 "lessons": st.lessons, "lessons_updated_at": st.lessons_updated_at, "project_lessons": n.lessons,
+                "dev_lessons": st.dev_lessons, "business_lessons": st.business_lessons, "lesson_scope": n.lesson_scope,
+                "lessons_scoped": st.lessons_scoped || st.lessons.trim().is_empty(),
                 "kind": if n.kind == "business" { "business" } else { "development" },
                 "outbound_paused": n.outbound_paused || st.outbound_paused_all, "outbound_paused_all": st.outbound_paused_all,
                 "paused": n.kind == "business" && n.paused,
@@ -1962,8 +1970,27 @@ Mention it only if the user asks about cost or usage.{}\n",
                 p += &format!("\n# Your tuning notes (model/effort lessons for this project)\n{}\n", n.tuning.trim());
             }
         }
-        if !st.lessons.trim().is_empty() {
-            p += &format!("\n# Lessons about this user (all projects; save_lessons lessons)\n{}\n", st.lessons.trim());
+        // Shared lessons: about the user everywhere, plus the list for this workspace's type,
+        // unless the workspace overrides it.
+        let scope = st.notes(ws).map(|n| n.lesson_scope.clone()).unwrap_or_default();
+        if scope != "none" && !st.lessons.trim().is_empty() {
+            let head = if business && !st.lessons_scoped {
+                "Lessons about this user (every workspace; save_lessons lessons). Not sorted yet: some are about \
+development work (models and reviews, QA, deploys, git, worktrees); those don't apply in this business workspace"
+            } else {
+                "Lessons about this user (every workspace; save_lessons lessons)"
+            };
+            p += &format!("\n# {head}\n{}\n", st.lessons.trim());
+        }
+        if scope.is_empty() {
+            let (head, list) = if business {
+                ("Lessons for business work (business workspaces only; save_lessons business_lessons)", &st.business_lessons)
+            } else {
+                ("Lessons for development work (development workspaces only; save_lessons dev_lessons)", &st.dev_lessons)
+            };
+            if !list.trim().is_empty() {
+                p += &format!("\n# {head}\n{}\n", list.trim());
+            }
         }
         if let Some(l) = st.notes(ws).map(|n| n.lessons.trim()).filter(|l| !l.is_empty()) {
             p += &format!("\n# Lessons for this project (save_lessons project_lessons)\n{l}\n");
@@ -1978,27 +2005,49 @@ Mention it only if the user asks about cost or usage.{}\n",
     fn housekeeping_note(&self, ws: &str) -> Option<String> {
         let note = self.housekeeping_text(ws)?;
         // The orchestrator is about to rewrite notes the user may care about: keep a copy of
-        // all notes and lessons as they were (one per day).
+        // all notes and lessons as they were (one per day, and one before the lesson sort).
         let day = chrono::Local::now().format("%Y-%m-%d");
+        let mut st = self.store.lock().unwrap();
+        let copy = json!({"lessons": st.lessons, "dev_lessons": st.dev_lessons, "business_lessons": st.business_lessons, "projects": st.projects});
+        let copy = serde_json::to_string_pretty(&copy).unwrap_or_default();
         let backup = self.paths.data_dir.join(format!("notes-backup-{day}.json"));
         if !backup.exists() {
-            let st = self.store.lock().unwrap();
-            let copy = json!({"lessons": st.lessons, "projects": st.projects});
-            let _ = std::fs::write(&backup, serde_json::to_string_pretty(&copy).unwrap_or_default());
+            let _ = std::fs::write(&backup, &copy);
+        }
+        if Self::lesson_sort_due(&st, ws) {
+            let before = self.paths.data_dir.join("notes-backup-before-lesson-sort.json");
+            if !before.exists() {
+                let _ = std::fs::write(&before, &copy);
+            }
+            if st.lesson_sort_before.is_empty() {
+                st.lesson_sort_before = lesson_lines(&st.lessons);
+                st.save();
+            }
         }
         Some(note)
+    }
+
+    /// The one-time sort of the old shared lessons runs in development workspaces only.
+    fn lesson_sort_due(st: &crate::store::Store, ws: &str) -> bool {
+        st.lessons_split && !st.lessons_scoped && !st.lessons.trim().is_empty() && !st.notes(ws).is_some_and(|n| n.kind == "business")
     }
 
     fn housekeeping_text(&self, ws: &str) -> Option<String> {
         let st = self.store.lock().unwrap();
         let mut over = vec![];
         let n = st.notes(ws).cloned().unwrap_or_default();
+        let (typed, typed_len, typed_max) = if n.kind == "business" {
+            ("business lessons", st.business_lessons.chars().count(), LIMIT_BUSINESS_LESSONS)
+        } else {
+            ("dev lessons", st.dev_lessons.chars().count(), LIMIT_DEV_LESSONS)
+        };
         for (what, len, max) in [
             ("project brief", n.brief.chars().count(), LIMIT_BRIEF),
             ("project rules", n.rules.chars().count(), LIMIT_RULES),
             ("tuning notes", n.tuning.chars().count(), LIMIT_TUNING),
             ("lessons about the user", st.lessons.chars().count(), LIMIT_LESSONS),
             ("project lessons", n.lessons.chars().count(), LIMIT_PROJECT_LESSONS),
+            (typed, typed_len, typed_max),
         ] {
             if len > max {
                 over.push(format!("- {what}: {len} characters (limit {max})"));
@@ -2015,6 +2064,28 @@ and project_lessons set to the ones about this project. For lessons about anothe
 with project set to that project's folder and project_lessons set to its lessons (projects: {}). Don't drop any \
 lesson in the move.",
                 projects.join(", ")
+            ));
+        }
+        if Self::lesson_sort_due(&st, ws) {
+            let projects: Vec<String> = st.projects.keys().filter(|p| !same_path(p, ws)).cloned().collect();
+            // A save replaces a project's whole list, so show what each one holds now.
+            let current: String = st.projects.iter().filter(|(p, n)| !same_path(p, ws) && n.kind != "business")
+                .map(|(p, n)| format!("\n\nCurrent project_lessons of {p}:\n{}", if n.lessons.trim().is_empty() { "(empty)" } else { n.lessons.trim() }))
+                .collect();
+            return Some(format!(
+                "[Automatic note from the Orchestrator app, not from the user. Do this in this turn, after you've handled the \
+message above (reply first), without mentioning it to the user; the app shows them the result.]\n\
+One-time task: shared lessons are now split by workspace type, so business workspaces stop getting development \
+lessons. Sort every line of \"Lessons about this user\" into:\n\
+- lessons: about the user as a person, true in any workspace (how they talk, what they want reported and how, \
+privacy, their hardware, money and sign-ups, not idling);\n\
+- dev_lessons: how they like development work done (models and reviews, testing, QA, deploys, git, worktrees);\n\
+- project_lessons of the one project a lesson is about (one app's server or box, a particular machine or session, a \
+project's QA watcher or design bar). Save those first: save_lessons with project set to that project's folder and \
+project_lessons set to its current list plus the moved lines (projects: {}; this one is {ws}).\n\
+Then save lessons and dev_lessons together in one call. Copy each line unchanged: the app checks that every line \
+is kept, word for word, and refuses the save otherwise. Nothing goes into business_lessons here.{current}",
+                if projects.is_empty() { "none other".to_string() } else { projects.join(", ") }
             ));
         }
         if !over.is_empty() {
@@ -2053,24 +2124,73 @@ The user may be looking at another workspace while you work; carry on regardless
         p
     }
 
-    /// Replace the orchestrator's lessons: `general` (about the user, all projects) and/or
-    /// `project` (lessons for one workspace). Each list is saved whole; the result says what
-    /// changed, line by line, so the chat shows the new lesson rather than the list's first line.
-    pub fn save_lessons(&self, key: &str, general: Option<&str>, project: Option<(&str, &str)>) -> Result<String, String> {
-        if general.is_none() && project.is_none() {
-            return Err("pass lessons and/or project_lessons".into());
+    /// Replace the orchestrator's lessons: about the user (every workspace), development or
+    /// business work (that type's workspaces), and/or one project's. Each list is saved whole;
+    /// the result says what changed, line by line, so the chat shows the new lesson rather
+    /// than the list's first line. `from` is the calling orchestrator's workspace (None: the
+    /// user, from the window), which may only write its own type's list.
+    pub fn save_lessons(&self, key: &str, from: Option<&str>, l: Lessons) -> Result<String, String> {
+        if l.general.is_none() && l.dev.is_none() && l.business.is_none() && l.project.is_none() {
+            return Err("pass lessons, dev_lessons, business_lessons and/or project_lessons".into());
+        }
+        let from_business = from.map(|ws| self.store.lock().unwrap().notes(ws).is_some_and(|n| n.kind == "business"));
+        if from_business == Some(true) && l.dev.is_some() {
+            return Err("dev_lessons are for development workspaces, and this is a business workspace. Save how the user \
+likes business work done in business_lessons, and lessons about the user as a person in lessons.".into());
+        }
+        if from_business == Some(false) && l.business.is_some() {
+            return Err("business_lessons are for business workspaces, and this is a development workspace. Save how the \
+user likes development work done in dev_lessons, and lessons about the user as a person in lessons.".into());
         }
         let too_long = |what: &str, s: &str, max: usize| {
             let n = s.trim().chars().count();
             (n > max).then(|| format!("{what} too long ({n} characters, limit {max}): merge duplicates, drop outdated ones, and save again"))
         };
-        if let Some(e) = general.and_then(|g| too_long("lessons", g, LIMIT_LESSONS)) {
-            return Err(e);
+        for (what, v, max) in [("lessons", l.general, LIMIT_LESSONS), ("dev_lessons", l.dev, LIMIT_DEV_LESSONS),
+            ("business_lessons", l.business, LIMIT_BUSINESS_LESSONS), ("project_lessons", l.project.map(|p| p.1), LIMIT_PROJECT_LESSONS)] {
+            if let Some(e) = v.and_then(|v| too_long(what, v, max)) {
+                return Err(e);
+            }
         }
-        if let Some(e) = project.and_then(|(_, l)| too_long("project_lessons", l, LIMIT_PROJECT_LESSONS)) {
-            return Err(e);
-        }
-        let lines = |s: &str| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>();
+        let lines = lesson_lines;
+        let sort = {
+            let st = self.store.lock().unwrap();
+            // The one-time sort ends with an orchestrator in a development workspace saving
+            // dev_lessons; every line of the old list must land in some list, unchanged.
+            if from_business == Some(false) && l.dev.is_some() && from.is_some_and(|ws| Self::lesson_sort_due(&st, ws)) {
+                let before = if st.lesson_sort_before.is_empty() { lines(&st.lessons) } else { st.lesson_sort_before.clone() };
+                let general = l.general.map(lines).unwrap_or_else(|| lines(&st.lessons));
+                let dev = l.dev.map(lines).unwrap_or_default();
+                let business = l.business.map(lines).unwrap_or_else(|| lines(&st.business_lessons));
+                let mut projects: Vec<(String, Vec<String>)> = st.projects.iter().map(|(p, n)| (p.clone(), lines(&n.lessons))).collect();
+                if let Some((ws, pl)) = l.project {
+                    match projects.iter_mut().find(|(p, _)| same_path(p, ws)) {
+                        Some(e) => e.1 = lines(pl),
+                        None => projects.push((ws.to_string(), lines(pl))),
+                    }
+                }
+                let place = |x: &String| -> Option<String> {
+                    if general.contains(x) {
+                        Some("lessons".into())
+                    } else if dev.contains(x) {
+                        Some("dev_lessons".into())
+                    } else if business.contains(x) {
+                        Some("business_lessons".into())
+                    } else {
+                        projects.iter().find(|(_, v)| v.contains(x)).map(|(p, _)| format!("project_lessons:{}", folder_name(p)))
+                    }
+                };
+                let placed: Vec<(String, Option<String>)> = before.iter().map(|x| (x.clone(), place(x))).collect();
+                let missing: Vec<String> = placed.iter().filter(|(_, p)| p.is_none()).map(|(x, _)| format!("- {x}")).collect();
+                if !missing.is_empty() {
+                    return Err(format!("Not saved: the sort must keep every lesson word for word, and these lines aren't in \
+any list yet:\n{}\nCopy each, unchanged, into lessons, dev_lessons or its project's project_lessons, and save again.", missing.join("\n")));
+                }
+                Some(placed.into_iter().map(|(x, p)| (x, p.unwrap_or_default())).collect::<Vec<_>>())
+            } else {
+                None
+            }
+        };
         let diff = |label: &str, old: &str, new: &str| {
             let (old, new) = (lines(old), lines(new));
             let added = new.iter().filter(|l| !old.contains(l)).map(|l| format!("+ {l}"));
@@ -2083,26 +2203,87 @@ The user may be looking at another workspace while you work; carry on regardless
             }
         };
         let mut st = self.store.lock().unwrap();
+        // Nothing to sort when there were no shared lessons to begin with.
+        if !st.lessons_scoped && st.lessons.trim().is_empty() && st.lesson_sort_before.is_empty() {
+            st.lessons_scoped = true;
+        }
         let mut out = vec![];
-        if let Some(g) = general {
+        if let Some(g) = l.general {
             out.push(diff("lessons", &st.lessons, g.trim()));
             st.lessons = g.trim().to_string();
         }
-        if let Some((ws, l)) = project {
+        if let Some(d) = l.dev {
+            out.push(diff("dev_lessons", &st.dev_lessons, d.trim()));
+            st.dev_lessons = d.trim().to_string();
+        }
+        if let Some(b) = l.business {
+            out.push(diff("business_lessons", &st.business_lessons, b.trim()));
+            st.business_lessons = b.trim().to_string();
+        }
+        if let Some((ws, pl)) = l.project {
             let n = st.notes_mut(ws);
-            out.push(diff(&format!("project_lessons ({ws})"), &n.lessons, l.trim()));
-            n.lessons = l.trim().to_string();
+            out.push(diff(&format!("project_lessons ({ws})"), &n.lessons, pl.trim()));
+            n.lessons = pl.trim().to_string();
             n.updated_at = now();
             st.lessons_split = true;
+        }
+        let mut report = None;
+        if let Some(placed) = &sort {
+            st.lessons_scoped = true;
+            st.lesson_sort_before.clear();
+            let count = |pred: &dyn Fn(&str) -> bool| placed.iter().filter(|(_, p)| pred(p)).count();
+            let mut per_project: Vec<(String, usize)> = vec![];
+            for (_, p) in placed {
+                if let Some(name) = p.strip_prefix("project_lessons:") {
+                    match per_project.iter_mut().find(|(n, _)| n == name) {
+                        Some(e) => e.1 += 1,
+                        None => per_project.push((name.to_string(), 1)),
+                    }
+                }
+            }
+            let in_projects = count(&|p| p.starts_with("project_lessons:"));
+            let text = format!(
+                "Before: {} shared lessons. After: {} about you, {} for development work, {} in project lessons{}.",
+                placed.len(), count(&|p| p == "lessons"), count(&|p| p == "dev_lessons"), in_projects,
+                if per_project.is_empty() { String::new() } else {
+                    format!(" ({})", per_project.iter().map(|(n, c)| format!("{n} {c}")).collect::<Vec<_>>().join(", "))
+                },
+            );
+            let moves: Vec<Value> = placed.iter().filter(|(_, p)| p != "lessons")
+                .map(|(x, p)| json!({"lesson": x, "to": p.replace("project_lessons:", "project lessons: ")})).collect();
+            out.push(format!("Sort done. {text}"));
+            report = Some((text, moves));
         }
         let changes = out.join("\n");
         st.lessons_updated_at = now();
         st.since_lessons = 0;
         st.save();
         drop(st);
+        if let Some((text, moves)) = report {
+            if !key.is_empty() {
+                self.hub.emit(key, json!({"kind": "lessons_sorted", "text": text, "moves": moves}));
+            }
+        }
         self.owes_lesson.lock().unwrap().remove(key);
         self.touch();
         Ok(changes)
+    }
+
+    /// Settings → Workspace → Shared lessons (window only).
+    pub fn set_lesson_scope(&self, scope: &str) -> Result<(), String> {
+        let scope = match scope {
+            "" | "type" => "",
+            "about_me" => "about_me",
+            "none" => "none",
+            _ => return Err("shared lessons: by type, about_me or none".into()),
+        };
+        let ws = self.workspace();
+        let mut st = self.store.lock().unwrap();
+        st.notes_mut(&ws).lesson_scope = scope.to_string();
+        st.save();
+        drop(st);
+        self.touch();
+        Ok(())
     }
 
     /// Notes the app adds to a user message for the orchestrator: a correction should
@@ -4574,6 +4755,27 @@ pub const LIMIT_RULES: usize = 5000;
 pub const LIMIT_TUNING: usize = 3000;
 pub const LIMIT_LESSONS: usize = 5000;
 pub const LIMIT_PROJECT_LESSONS: usize = 4000;
+pub const LIMIT_DEV_LESSONS: usize = 4000;
+pub const LIMIT_BUSINESS_LESSONS: usize = 4000;
+
+/// The lists save_lessons may write (None leaves a list as it is).
+#[derive(Default)]
+pub struct Lessons<'a> {
+    pub general: Option<&'a str>,
+    pub dev: Option<&'a str>,
+    pub business: Option<&'a str>,
+    /// (project folder, its lessons)
+    pub project: Option<(&'a str, &'a str)>,
+}
+
+/// A lesson list's lines, trimmed, without blank ones.
+pub fn lesson_lines(s: &str) -> Vec<String> {
+    s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
+}
+
+fn folder_name(p: &str) -> String {
+    std::path::Path::new(p.trim_end_matches(['\\', '/'])).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string())
+}
 
 pub fn fmt_minutes(s: f64) -> String {
     let m = s / 60.0;
@@ -4842,5 +5044,105 @@ mod phone_decide_tests {
         let s2 = signed_with(&sk, |ts| crate::phone::done_message("iphone-1", &id, &item, &fh, ts, "nonce-done-b-0123456789"), "nonce-done-b-0123456789");
         app.phone_manual_done(&id, &item, &s2).unwrap();
         assert_eq!(app.store.lock().unwrap().queue.iter().find(|x| x.id == item).unwrap().status, "done");
+    }
+}
+
+#[cfg(test)]
+mod lesson_scope_tests {
+    use super::*;
+    use crate::config::Paths;
+
+    /// A development workspace, a business one and a third project, with old unsorted lessons.
+    fn app(name: &str) -> (Arc<App>, String, String, String, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("orch-lessons-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |n: &str| { let p = root.join(n); std::fs::create_dir_all(&p).unwrap(); p.to_string_lossy().to_string() };
+        let (dev, biz, other) = (mk("dev"), mk("biz"), mk("atlas"));
+        let state = json!({
+            "workspace": dev, "open_workspaces": [dev, biz],
+            "lessons": "- ABOUT-ME talks in shorthand\n- DEV-PRACTICE opus reviews every slice\n- ATLAS-BOX deploy to the box",
+            "lessons_split": true,
+            "dev_lessons": "", "business_lessons": "BIZ-PRACTICE keep costs down",
+            "projects": {dev.clone(): {}, biz.clone(): {"kind": "business"}, other.clone(): {}},
+        });
+        std::fs::write(root.join("state.json"), state.to_string()).unwrap();
+        let app = App::new(Paths { config_dir: root.clone(), data_dir: root.clone() }, "t".repeat(40));
+        (app, dev, biz, other, root)
+    }
+
+    #[tokio::test]
+    async fn each_type_gets_only_its_own_list() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, dev, biz, _, _) = app("types");
+        {
+            let mut st = app.store.lock().unwrap();
+            st.lessons_scoped = true;
+            st.dev_lessons = "DEV-ONLY run the tests".into();
+        }
+        let d = app.orchestrator_prompt(&dev);
+        let b = app.orchestrator_prompt(&biz);
+        assert!(d.contains("ABOUT-ME") && b.contains("ABOUT-ME"), "lessons about the user reach both");
+        assert!(d.contains("DEV-ONLY") && !d.contains("BIZ-PRACTICE"), "a development prompt has no business_lessons");
+        assert!(b.contains("BIZ-PRACTICE") && !b.contains("DEV-ONLY"), "a business prompt has no dev_lessons");
+        assert!(d.contains("1. the user's newer words; 2. project rules"), "the order of precedence is stated");
+    }
+
+    #[tokio::test]
+    async fn the_override_narrows_what_reaches_a_workspace() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, _, biz, _, _) = app("override");
+        app.store.lock().unwrap().lessons_scoped = true;
+        app.store.lock().unwrap().notes_mut(&biz).lessons = "PROJECT-OWN".into();
+        app.store.lock().unwrap().notes_mut(&biz).lesson_scope = "about_me".into();
+        let p = app.orchestrator_prompt(&biz);
+        assert!(p.contains("ABOUT-ME") && !p.contains("BIZ-PRACTICE") && p.contains("PROJECT-OWN"));
+        app.store.lock().unwrap().notes_mut(&biz).lesson_scope = "none".into();
+        let p = app.orchestrator_prompt(&biz);
+        assert!(!p.contains("ABOUT-ME") && !p.contains("BIZ-PRACTICE") && p.contains("PROJECT-OWN"), "project lessons still apply");
+        assert!(app.set_lesson_scope("everything").is_err());
+    }
+
+    #[tokio::test]
+    async fn a_business_workspace_cant_write_dev_lessons_or_run_the_sort() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, dev, biz, _, _) = app("biz");
+        let k = orch_key(&biz);
+        assert!(app.save_lessons(&k, Some(&biz), Lessons { dev: Some("x"), ..Default::default() }).unwrap_err().contains("development workspaces"));
+        assert!(app.save_lessons(&orch_key(&dev), Some(&dev), Lessons { business: Some("x"), ..Default::default() }).is_err());
+        // The unsorted lessons reach the business workspace marked as such, and it's never asked to sort.
+        assert!(app.orchestrator_prompt(&biz).contains("Not sorted yet"));
+        assert!(app.housekeeping_note(&biz).is_none());
+        app.save_lessons(&k, Some(&biz), Lessons { business: Some("BIZ-PRACTICE keep costs down\nBIZ-2"), ..Default::default() }).unwrap();
+        assert!(!app.store.lock().unwrap().lessons_scoped);
+    }
+
+    #[tokio::test]
+    async fn the_sort_keeps_every_lesson_and_backs_up_first() {
+        let _g = crate::vault::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, dev, _, atlas, root) = app("sort");
+        let note = app.housekeeping_note(&dev).expect("a development workspace is asked to sort");
+        assert!(note.contains("dev_lessons") && note.contains(&atlas));
+        assert!(note.contains(&format!("Current project_lessons of {atlas}:\n(empty)")), "{note}");
+        let backup = std::fs::read_to_string(root.join("notes-backup-before-lesson-sort.json")).expect("backup written first");
+        assert!(backup.contains("ATLAS-BOX"));
+        let k = orch_key(&dev);
+        // A project's lesson moves first.
+        app.save_lessons(&k, Some(&dev), Lessons { project: Some((atlas.as_str(), "- ATLAS-BOX deploy to the box")), ..Default::default() }).unwrap();
+        // Dropping (or rewording) a line is refused, and nothing is saved.
+        let e = app.save_lessons(&k, Some(&dev), Lessons { general: Some("- ABOUT-ME talks in shorthand"), dev: Some("- DEV-PRACTICE opus reviews"), ..Default::default() }).unwrap_err();
+        assert!(e.contains("DEV-PRACTICE opus reviews every slice"), "{e}");
+        assert!(app.store.lock().unwrap().dev_lessons.is_empty());
+        let out = app.save_lessons(&k, Some(&dev), Lessons {
+            general: Some("- ABOUT-ME talks in shorthand"), dev: Some("- DEV-PRACTICE opus reviews every slice"), ..Default::default()
+        }).unwrap();
+        assert!(out.contains("Before: 3 shared lessons. After: 1 about you, 1 for development work, 1 in project lessons (atlas 1)."), "{out}");
+        let st = app.store.lock().unwrap();
+        assert!(st.lessons_scoped && st.lesson_sort_before.is_empty());
+        let after = lesson_lines(&st.lessons).len() + lesson_lines(&st.dev_lessons).len() + lesson_lines(&st.notes(&atlas).unwrap().lessons).len();
+        assert_eq!(after, 3, "count before = sum of counts after");
+        drop(st);
+        assert!(app.housekeeping_note(&dev).is_none(), "asked once");
+        let log = std::fs::read_to_string(app.hub.path(&k)).unwrap();
+        assert!(log.contains("lessons_sorted") && log.contains("ATLAS-BOX"), "the user sees the moves");
     }
 }

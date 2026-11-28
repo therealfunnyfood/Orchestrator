@@ -136,6 +136,16 @@ pub struct Store {
     /// Lessons used to be one shared list; set once an orchestrator has moved the
     /// project-specific ones into their projects.
     pub lessons_split: bool,
+    /// Shared lessons about how the user likes development work done (development
+    /// workspaces only).
+    pub dev_lessons: String,
+    /// Shared lessons about how the user likes business work done (business workspaces only).
+    pub business_lessons: String,
+    /// Set once the old shared lessons were sorted into lessons (about the user),
+    /// dev_lessons and project lessons.
+    pub lessons_scoped: bool,
+    /// The shared lessons when the sort was asked for: each one must survive it.
+    pub lesson_sort_before: Vec<String>,
     /// Approval queue items of business workspaces (all workspaces; see queue.rs).
     pub queue: Vec<crate::queue::QueueItem>,
     /// Kill switch for every business workspace at once (tray menu).
@@ -240,6 +250,9 @@ pub struct ProjectNotes {
     /// The orchestrator's lessons that only apply to this project (save_lessons
     /// project_lessons); lessons about the user in general are in Store::lessons.
     pub lessons: String,
+    /// Which shared lessons reach this workspace: "" (by workspace type), "about_me" (only
+    /// lessons about the user) or "none". Project lessons always do.
+    pub lesson_scope: String,
     /// "business" turns on the business features (approval queue, ...); anything else
     /// (the default) is a development workspace and behaves as before.
     pub kind: String,
