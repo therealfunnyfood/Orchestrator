@@ -17,6 +17,9 @@ mod events;
 mod inbox;
 mod lines;
 mod mcp;
+// "Needs you" data model; wired into the app in 0.6.6 (see HANDOFF.md).
+#[allow(dead_code)]
+mod needs;
 mod migrate;
 mod notify;
 mod phone;
